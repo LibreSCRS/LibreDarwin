@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+# SKELETON macOS CI — builds the broker-host against a sibling LibreAgent/LM.
+name: build
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      # TODO(P1b): check out + build/install LibreMiddleware 4.2 and point
+      # CMAKE_PREFIX_PATH at it; check out LibreAgent as a sibling for
+      # -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT.
+      - name: Configure
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT=../LibreAgent
+      - name: Build
+        run: cmake --build build -j4
+      - name: Test
+        run: ctest --test-dir build --output-on-failure

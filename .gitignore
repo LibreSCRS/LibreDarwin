@@ -1,0 +1,6 @@
+build/
+.build/
+*.o
+*.dylib
+.DS_Store
+DerivedData/

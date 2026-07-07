@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-2.1-or-later
+  SKELETON launchd LaunchAgent for the macOS broker-host daemon.
+
+  Per-user agent (installed under ~/Library/LaunchAgents). Uses launchd SOCKET
+  ACTIVATION so the daemon inherits the listening fd (design §4.1; symmetry with
+  p11-kit/systemd socket activation) — the agent calls launch_activate_socket()
+  and never bind()s the path itself.
+
+  TODO(P1b):
+   - SockPathName MUST resolve to the App-Group container
+     (~/Library/Group Containers/group.org.librescrs.LibreMac/agent.sock), which
+     is per-user and cannot use ~ expansion in a plist — template it at install
+     time. Mind the AF_UNIX 104-byte sun_path limit. The container does NOT exist
+     until the sandboxed host (app-group entitlement) first runs, so the host must
+     create it (+ prime CTK) and THEN load this agent — launchd cannot bind the
+     socket into a non-existent container at login.
+   - Set the correct installed ExecStable path; decide on-demand vs KeepAlive
+     (design §8 lifecycle — settled in P1).
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.librescrs.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/librescrs-agent</string>
+    </array>
+
+    <!-- Socket activation: launchd owns the listener; the agent inherits it. -->
+    <key>Sockets</key>
+    <dict>
+        <key>Agent</key>
+        <dict>
+            <key>SockFamily</key>
+            <string>Unix</string>
+            <key>SockType</key>
+            <string>stream</string>
+            <!-- TODO(P1b): templated App-Group container path (per-user). -->
+            <key>SockPathName</key>
+            <string>/Users/USERNAME/Library/Group Containers/group.org.librescrs.LibreMac/agent.sock</string>
+            <key>SockPathMode</key>
+            <integer>384</integer> <!-- 0600 -->
+        </dict>
+    </dict>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- On-demand: launchd starts the agent on first client connection. -->
+    <key>KeepAlive</key>
+    <false/>
+</dict>
+</plist>
