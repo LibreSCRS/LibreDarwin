@@ -1,0 +1,161 @@
+; SPDX-License-Identifier: LGPL-2.1-or-later
+; SPDX-FileCopyrightText: 2026 hirashix0
+;
+; LibreSCRS macOS agent socket wire contract — CBOR (RFC 8949) / CDDL (RFC 8610).
+;
+; PROJECT wire contract for the LibreDarwin macOS agent socket transport. The
+; canonical SEMANTIC source of truth is the Linux-session-owned D-Bus agent
+; surface (LibreLinux/agent/dbus/*.xml); this schema MIRRORS it for the macOS
+; socket transport and does NOT fork it. Reconciled against
+; LibreLinux/agent/dbus/*.xml @ d00aa90 on 2026-07-07 (deltas R1-R11, see
+; knowledge/plans/2026-07-07-libredarwin-p1b-macos-agent-backend.md). Aligns with
+; knowledge/specs/2026-07-06-macos-agent-socket-protocol-design.md §4.
+;
+; Frame on the wire: uint32 little-endian body length + uint32 little-endian fd
+; count + one `message` CBOR map. File descriptors (signed artifact, photo, sign
+; input) ride SCM_RIGHTS ancillary data and are referenced from the body by `fd`
+; (a 0-based index into the frame's fd vector); the fd-count header lets a
+; streaming reader attribute exactly that many fds to each frame (the D-Bus
+; UNIX_FDS approach). The socket is SOCK_CLOEXEC; set FD_CLOEXEC on each received
+; fd via fcntl(fd, F_SETFD, FD_CLOEXEC) after recvmsg — MSG_CMSG_CLOEXEC is
+; Linux-only, absent on Darwin. Frames larger than the max cap fail closed (the
+; browser-loaded facade is untrusted).
+; Encode with RFC 8949 §4.2 CORE DETERMINISTIC ENCODING (sorted map keys,
+; shortest-form integers, no indefinite-length items) — the CTAP2 "canonical
+; CBOR" rule — so the WireContractGuard byte-stable round-trip is meaningful and
+; the wire is malleability-free. The reference codec is QCBOR (deterministic).
+
+start = message
+message = request / reply / event
+
+; ---- shared value types ----
+handle   = tstr                 ; opaque per-insertion reader/card handle (NOT the fingerprint)
+cert-id  = tstr                 ; sha256hex(DER) of a signing certificate
+fd-index = uint                 ; index into the frame's SCM_RIGHTS fd vector
+
+capabilities   = uint .bits capability-bit
+capability-bit = ( Pki: 0, IdentityData: 1, EmrtdCrypto: 2, PinManagement: 3 )   ; .bits RHS is a plain group
+pre-read-auth  = &( None: 0, BacMrz: 1, PaceCan: 2 )
+op-phase  = &( Created: 0, Connecting: 1, AwaitingConsent: 2, Authenticating: 3,
+               Reading: 4, Signing: 5, Timestamping: 6, Done: 7 )
+op-status = &( Ok: 0, Cancelled: 1, Error: 2 )
+; 18 stable, append-only values — MUST match LibreAgent value/ErrorTaxonomy.h.
+error-code = &( None: 0, CardRemoved: 1, CredentialWrong: 2, CredentialBlocked: 3,
+  CommunicationError: 4, ParseError: 5, UnsupportedCard: 6, AuthFailed: 7,
+  PrompterError: 8, CapabilityMissing: 9, WatchdogTimeout: 10, KeyNotFound: 11,
+  KeyAmbiguous: 12, CertExpiredBlocked: 13, ChainIncomplete: 14, TsaUnreachable: 15,
+  SigningEngineError: 16, RateLimited: 17 )
+
+; ---- requests (client -> agent) ----
+request  = { req: uint, req-body }
+req-body = ( hello // get-state // read-identity // get-photo //
+  read-certificates // sign // get-cert-der // get-config // set-config // reset-config //
+  cancel-op // get-sign-result // pk-login // pk-logout // pk-public-key // pk-sign-raw // pk-decrypt )
+
+hello             = ( t: "Hello", proto: uint, ? client: tstr )
+get-state         = ( t: "GetState" )
+read-identity     = ( t: "ReadIdentity", card: handle )
+get-photo         = ( t: "GetPhoto", card: handle )
+read-certificates = ( t: "ReadCertificates", card: handle )
+; Card1.Sign: the document to sign rides SCM_RIGHTS (referenced by `in`).
+sign              = ( t: "Sign", card: handle, cert: cert-id, in: fd-index, opts: sign-opts )
+; Pkcs11_1 seam — ALL methods reader-addressed (R11: canonical Pkcs11_1.xml takes
+; a reader object path + certId; the resolution seams are reader-path-keyed and
+; the login lease is per-token/per-reader-slot). NO PIN args (protected-auth);
+; Login raises the agent prompter on the first cold-lease SignRaw/Decrypt.
+get-cert-der      = ( t: "GetCertDer", reader: handle, cert: cert-id )   ; public, no consent/lease
+get-config        = ( t: "GetConfig" )                                  ; -> config (typed entries)
+set-config        = ( t: "SetConfig", key: settable-config-key, value: any )  ; Config1.SetValue; low vs trust tier
+reset-config      = ( t: "ResetConfig", key: config-key )               ; R1: Config1.Reset(key)
+cancel-op         = ( t: "CancelOp", op: uint )
+get-sign-result   = ( t: "GetSignResult", op: uint )                    ; recovery is Sign-ONLY (Sign1.GetResult, §8)
+pk-login          = ( t: "Pkcs11.Login",     reader: handle )                       ; R11 reader-addressed
+pk-logout         = ( t: "Pkcs11.Logout",    reader: handle )                       ; R11
+pk-public-key     = ( t: "Pkcs11.PublicKey", reader: handle, cert: cert-id )        ; R11; RSA n/e (EC reserved)
+pk-sign-raw       = ( t: "Pkcs11.SignRaw",   reader: handle, cert: cert-id, data: bstr )   ; R11
+pk-decrypt        = ( t: "Pkcs11.Decrypt",   reader: handle, cert: cert-id, data: bstr )   ; R11
+; Card1.Sign options (R6): format/level/packaging + optional per-sign chrome.
+; NO `tsa` — the TSA is Config1-owned (TsaUrls/LastTsaUrl), not a per-sign option.
+sign-opts     = { format: tstr, level: tstr, packaging: tstr,
+                  ? allowExpired: bool, ? displayName: tstr, ? reason: tstr, ? location: tstr }
+
+; Config1 is a TYPED property set. Only a SUBSET is settable over the wire;
+; TslCacheDir/AiaCacheDir/PluginDir are file-only (a wire-settable PluginDir is a
+; dlopen code-exec vector) and LastTsaUrl is read-only agent state.
+settable-config-key = "DefaultLevel" / "DefaultReason" / "DefaultLocation" /   ; low tier (configure)
+                      "TsaUrls" / "TslSources"                                 ; trust tier (configure.trust)
+config-key = settable-config-key / "LastTsaUrl" / "TslCacheDir" / "AiaCacheDir" / "PluginDir"
+
+; ---- reply (agent -> client, correlated by req) ----
+; A map member value must be a TYPE, not a group (RFC 8610 §3.5); the success
+; result groups are merged into the reply map directly (discriminated by their
+; own keys), the error case under the `err` key.
+reply    = { t: "Reply", req: uint, ( reply-ok // ( err: err-info ) ) }
+; Async-op failures carry the numeric ErrorCode; synchronous method failures
+; (Pkcs11_1 / Config1 / Card1.Sign method-entry) carry a NAMED error. One or the
+; other, never both.
+err-info = { ( code: error-code // name: sync-error ), ? msgKey: tstr, ? msgFallback: tstr }
+; Named synchronous-method errors (D-Bus Error.* names). R7 adds the Card1.Sign
+; method-entry rejections (no Operation minted): UnsupportedOnThisCard,
+; UnsupportedSignatureParameter, InputTooLarge, RateLimited.
+sync-error = "UnknownCard" / "KeyNotFound" / "NotAuthorized" / "UserNotLoggedIn" /
+             "UnknownConfigKey" / "ReadOnlyConfig" / "InvalidConfigValue" / "UnsupportedProtocol" /
+             "AuthFailed" / "CommunicationError" / "NotSupported" /
+             "UnsupportedOnThisCard" / "UnsupportedSignatureParameter" /
+             "InputTooLarge" / "RateLimited"
+reply-ok = ( hello-ack // op-started // state // cert-list // cert-der // public-key //
+             config // ack // raw-signature // sign-recovery )
+hello-ack     = ( kind: "HelloAck", agentVer: tstr, features: [* tstr] )   ; Manager1.Version
+op-started    = ( op: uint )    ; async op id (ReadIdentity/GetPhoto/ReadCertificates/Sign)
+state         = ( readers: [* reader-state], cards: [* card-state] )
+cert-list     = ( certs: [* cert-info] )
+cert-der      = ( der: bstr )
+public-key    = ( kty: "RSA", n: bstr, e: bstr //             ; RSA: modulus + public exponent (served)
+                  kty: "EC",  crv: tstr, x: bstr, y: bstr )   ; EC reserved — not served in v0.1 (agent-ec-support)
+config        = ( entries: { * config-key => any } )
+ack           = ( ok: true )
+raw-signature = ( sig: bstr )              ; Pkcs11.SignRaw / Decrypt result
+sign-recovery = ( result: sign-result )    ; GetSignResult reply (Sign-only, within the grace window)
+
+reader-state = { handle: handle, name: tstr, hasCard: bool, ? card: handle }
+card-state   = { handle: handle, reader: handle, caps: capabilities, preAuth: pre-read-auth }
+; R3: mirror the canonical Certificates1.Result a(sba{sa{s(ssv)}}uasasu) grouped
+; shape — grouped fields (group -> field -> [labelKey, labelFallback, value]) plus
+; keyUsageBits, ekus, chainSubjectCns, trustStatus. No DER on the wire.
+cert-info    = { certId: cert-id, signingCapable: bool,
+                 fields: { * tstr => { * tstr => cert-field } },
+                 keyUsageBits: uint, ekus: [* tstr], chainSubjectCns: [* tstr], trustStatus: uint }
+cert-field   = [ labelKey: tstr, labelFallback: tstr, value: tstr ]   ; (ssv): value is UTF-8
+
+; ---- events (agent -> client, unsolicited) ----
+event = { reader-added // reader-removed // card-added // card-removed //
+          property-changed // config-changed // op-progress // op-result-ready //
+          op-finished // agent-quiesced }
+reader-added     = ( t: "ReaderAdded",   reader: reader-state )
+reader-removed   = ( t: "ReaderRemoved", handle: handle )
+card-added       = ( t: "CardAdded",     card: card-state )
+card-removed     = ( t: "CardRemoved",   handle: handle )
+property-changed = ( t: "PropertyChanged", handle: handle, iface: tstr, props: { * tstr => any } )
+config-changed   = ( t: "ConfigChanged", key: config-key )   ; R2: Config1.Changed(key) — client re-reads via GetConfig
+; Operation1 progress properties: Phase + Progress/IsIndeterminate/WatchdogTimeoutSeconds.
+op-progress = ( t: "OpProgress", op: uint, phase: op-phase,
+                ? progress: float, ? indeterminate: bool, ? watchdogSecs: uint )
+; R8: the typed Result fires BEFORE Finished (canonical Operation1 ordering); a
+; distinct op-result-ready event carries the payload, op-finished carries no result.
+op-result-ready = ( t: "OpResultReady", op: uint, result: op-result )
+op-finished = ( t: "OpFinished", op: uint, status: op-status, code: error-code,
+                msgKey: tstr, msgFallback: tstr )
+; system-lifecycle: the agent quiesced card access (sleep / lock / user-switch).
+agent-quiesced = ( t: "AgentQuiesced", reason: quiesce-reason )
+quiesce-reason = &( SystemSleep: 0, ScreenLocked: 1, SessionInactive: 2, Shutdown: 3 )
+
+; ---- op result payloads (Sign also served by GetSignResult within the grace window) ----
+op-result = identity-result / photo-result / cert-list-result / sign-result
+; R4: mirror the canonical Identity1.Result a{sa{s(sssv)}} grouped 4-tuple
+; (labelKey, labelFallback, type, value). Photo fields are omitted (fetch via GetPhoto).
+identity-result  = { kind: "Identity",     fields: { * tstr => { * tstr => id-field } } }
+id-field         = [ labelKey: tstr, labelFallback: tstr, type: tstr, value: tstr / bstr ]
+photo-result     = { kind: "Photo",        photos: [* { key: tstr, fd: fd-index }] }  ; key = "group:field"
+cert-list-result = { kind: "Certificates", certs: [* cert-info] }
+sign-result      = { kind: "Sign",         artifact: fd-index, meta: sign-meta }
+sign-meta = { format: tstr, level: tstr, tsaUsed: bool, chainComplete: bool }
