@@ -1,43 +1,206 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
+#include <LibreSCRS/Darwin/backend/PeerIdentity.h>
+#include <LibreSCRS/Darwin/backend/wire/FrameReassembler.h>
+#include <LibreSCRS/Darwin/backend/wire/Messages.h>
+#include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
+
 #include <LibreSCRS/Agent/backend/AgentTransport.h>
 
+#include <dispatch/dispatch.h>
+
 #include <chrono>
+#include <cstdint>
+#include <deque>
+#include <expected>
 #include <functional>
+#include <map>
+#include <memory>
+#include <optional>
+#include <string>
+#include <vector>
 
 namespace LibreSCRS::Darwin {
 
-// macOS AgentTransport backend: the client membrane + its dispatch thread over
-// the App-Group `0600` AF_UNIX socket. It owns the CBOR framing, the SCM_RIGHTS
-// fd-passing, and the ObjectId<->socket-handle mapping; the neutral core never
-// touches wire paths. The Linux twin is LibreLinux's D-Bus ObjectManager +
-// sd-event backend; here it is a GCD dispatch source over the listening socket
-// (launchd socket-activated).
+// macOS AgentTransport backend: the client membrane + its GCD loop over the
+// App-Group `0600` AF_UNIX socket. It owns the CBOR framing, the SCM_RIGHTS
+// fd-passing, peer identity, the ObjectId<->wire-handle mapping, and the
+// published presence snapshot; the neutral core never touches wire paths. The
+// Linux twin is LibreLinux's D-Bus ObjectManager + sd-event backend; here it is
+// GCD dispatch sources on one serial queue (the loop). D7: the agent SELF-BINDS
+// the container socket (SMAppService can't template a per-user SockPathName);
+// launch_activate_socket is an optional inherited-fd fallback.
 //
-// TODO(P1b) implement-macos-backend: socket listen/accept, per-connection peer
-// audit_token capture, CBOR encode of publish/withdraw/property deltas, the
-// worker->loop post via dispatch_async, and the connection-invalidation ->
-// onClientDisconnect fan-out (registration order is the contract:
-// OperationManager auto-cancel, then Pkcs11Broker lease revoke).
+// THREADING: everything that touches transport state runs on the single serial
+// dispatch queue (the loop). Cross-thread entry is only via post()/postAfter()
+// (thread-safe dispatch_async/after). The core's presence updates arrive
+// post-marshaled, so publish*/withdraw/updateProperties, the inbound sink, and
+// sendTo all run on the loop with no additional locking.
 class SocketTransport final : public Agent::AgentTransport
 {
 public:
-    SocketTransport();
-    ~SocketTransport() override;
+    // One inbound request delivered to the frontend (Task 8), with the fds that
+    // accompanied it (Sign's inputFd) and the connection to reply on.
+    struct Inbound
+    {
+        Agent::CallerToken caller;
+        std::uint64_t connId{0};
+        wire::RequestEnvelope request;
+        std::vector<wire::UniqueFd> fds;
+    };
+    using RequestSink = std::function<void(Inbound&&)>;
 
+    // Bind the container socket at `socketPath` (0600, sun_path-guarded,
+    // unlink-stale, cleanup-on-exit), or inherit a launchd-activated fd when
+    // `socketActivationName` is set and available. On success the loop + accept
+    // source are installed (driven by the process CFRunLoop / dispatch main).
+    [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, std::string>
+    create(std::string socketPath, std::optional<std::string> socketActivationName = std::nullopt);
+
+    ~SocketTransport() override;
     SocketTransport(const SocketTransport&) = delete;
     SocketTransport& operator=(const SocketTransport&) = delete;
 
+    // Wire the inbound sink (the SocketFrontend). Called once at startup.
+    void setRequestSink(RequestSink sink);
+
+    // Routing facts for a card, resolved from a card wire handle carried in a
+    // request. The frontend uses these to gate the op (caps/preAuth) and to
+    // address OperationManager::publish (readerId + readerName) + the caches
+    // (cardKey == the card wire handle). nullopt if the handle is unknown.
+    struct CardRouting
+    {
+        Agent::ObjectId cardId;
+        Agent::ObjectId readerId;
+        std::string readerName;
+        std::string cardKey; // == the card wire handle (opaque per-insertion key)
+        std::uint32_t caps{0};
+        wire::PreReadAuthMethod preAuth{wire::PreReadAuthMethod::None};
+    };
+    [[nodiscard]] std::optional<CardRouting> cardRouting(const std::string& cardHandle) const;
+
+    // Routing facts for a reader wire handle (the reader-addressed Pkcs11/CertDer
+    // requests + the AgentCore ResolveReaderCard/ResolveCardKey seams). The
+    // cardKey is the card currently in the reader, or empty when none is present.
+    struct ReaderCardInfo
+    {
+        Agent::ObjectId readerId;
+        std::string readerName;
+        std::string cardKey; // the present card's wire handle, or empty
+    };
+    [[nodiscard]] std::optional<ReaderCardInfo> readerCard(const std::string& readerHandle) const;
+
+    // Send one CBOR message to a specific connection, optionally taking ownership
+    // of fds to pass via SCM_RIGHTS. Loop-thread only (the sink runs there).
+    void sendTo(std::uint64_t connId, const wire::CborValue& message, std::vector<wire::UniqueFd> fds = {});
+
+    // The current presence snapshot for a GetState reply. Loop-thread only.
+    [[nodiscard]] wire::StateReply currentState() const;
+
+    // Broadcast a Config1.Changed event to every subscribed connection (the
+    // frontend's emitConfigChanged path). Loop-thread only.
+    void broadcastConfigChanged(const std::string& key);
+
+    // Broadcast an AgentQuiesced event (system sleep / screen lock / user switch /
+    // shutdown) so clients render "card suspended" rather than a bare removal.
+    // Loop-thread only (wrap in post() from another thread).
+    void broadcastQuiesced(wire::QuiesceReason reason);
+
+    // Resolve a live CallerToken to its captured peer credentials (for the
+    // Authorizer's SecTask check). Loop-thread only; nullopt if the connection
+    // is gone.
+    [[nodiscard]] std::optional<PeerCredentials> credentialsFor(const Agent::CallerToken& caller) const;
+
+    // The serial loop queue (for the daemon to target other work at the loop).
+    [[nodiscard]] dispatch_queue_t loopQueue() const noexcept
+    {
+        return m_queue;
+    }
+
+    // Quiesce the loop at teardown, BEFORE the frontend is destroyed: drops every
+    // subsequently-run posted/postAfter block AND severs the frontend-bound inbound
+    // edges (the request sink + the client-disconnect handlers) so no transport
+    // source event can invoke a frontend callback after the frontend is freed.
+    void quiesceLoop();
+
+    // --- AgentTransport ----------------------------------------------------
     void publishReader(const Agent::ReaderState& reader) override;
     void publishCard(const Agent::CardState& card) override;
     void withdraw(Agent::ObjectId object) override;
     void updateProperties(Agent::ObjectId reader, const Agent::PropertyDelta& delta) override;
-
     void post(std::function<void()> fn) override;
     void postAfter(std::chrono::microseconds delay, std::function<void()> fn) override;
-
     void onClientDisconnect(std::function<void(Agent::CallerToken)> handler) override;
+
+private:
+    struct OutFrame
+    {
+        std::vector<std::uint8_t> bytes; // full framed bytes (header + body)
+        std::vector<wire::UniqueFd> fds; // owned; sent via SCM_RIGHTS on the first sendmsg
+        std::size_t sent{0};
+        bool ancillarySent{false};
+    };
+
+    struct Connection
+    {
+        std::uint64_t id{0};
+        // The socket fd is held in a shared_ptr with a closing deleter so BOTH the
+        // read and write dispatch sources' cancel handlers co-own it: the fd is
+        // closed only after GCD has fully torn down every source monitoring it
+        // (Apple requires an fd-source cancel handler; closing the fd before
+        // cancellation completes races the kevent dereg). Never null after accept.
+        std::shared_ptr<int> fd;
+        Agent::CallerToken caller;
+        PeerCredentials creds;
+        wire::FrameReassembler reassembler;
+        dispatch_source_t readSource{nullptr};
+        dispatch_source_t writeSource{nullptr};
+        bool writeSourceResumed{false};
+        std::deque<OutFrame> outQueue;
+    };
+
+    enum class SendState : std::uint8_t { Sent, WouldBlock, Error };
+    [[nodiscard]] static SendState trySendFrame(int fd, OutFrame& f);
+
+    SocketTransport(dispatch_queue_t queue, wire::UniqueFd listenFd, std::string socketPath, bool ownsSocketFile);
+    void installAcceptSource();
+    void onAcceptReady();
+    void acceptOne(int connFd);
+    void onReadReady(std::uint64_t connId);
+    void closeConnection(std::uint64_t connId);
+    void enqueueSend(Connection& conn, std::vector<std::uint8_t> framed, std::vector<wire::UniqueFd> fds);
+    void flushWrites(Connection& conn);
+    void broadcast(const wire::CborValue& event);
+
+    // ObjectId <-> opaque wire handle. The handle is a stable per-insertion
+    // string ("reader/<n>" / "card/<n>"); NEVER a fingerprint.
+    [[nodiscard]] std::string handleFor(Agent::ObjectId id);
+
+    dispatch_queue_t m_queue{nullptr};
+    wire::UniqueFd m_listenFd;
+    std::string m_socketPath;
+    bool m_ownsSocketFile{false};
+    dispatch_source_t m_acceptSource{nullptr};
+
+    RequestSink m_sink;
+    bool m_loopQuiesced{false}; // set by quiesceLoop(); drops late posted blocks
+    std::vector<std::function<void(Agent::CallerToken)>> m_disconnectHandlers;
+
+    std::uint64_t m_nextConnId{1};
+    std::uint64_t m_nextHandle{1};
+    std::map<std::uint64_t, std::unique_ptr<Connection>> m_connections;
+
+    // Published presence snapshot, keyed by wire handle.
+    std::map<std::string, wire::ReaderState> m_readers;
+    std::map<std::string, wire::CardState> m_cards;
+    // Card routing (readerId/readerName/caps/preAuth), keyed by card wire handle.
+    // Populated alongside m_cards in publishCard; consumed by cardRouting().
+    std::map<std::string, CardRouting> m_cardRouting;
+    // ObjectId -> handle for withdraw / updateProperties, and the reverse for the
+    // request path (a request carries a wire handle; the seams need the ObjectId).
+    std::map<std::uint64_t, std::string> m_idToHandle;
+    std::map<std::string, std::uint64_t> m_handleToId;
 };
 
 } // namespace LibreSCRS::Darwin

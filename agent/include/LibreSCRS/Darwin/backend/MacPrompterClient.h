@@ -1,30 +1,42 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
+#include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h> // PromptKind
+
 #include <LibreSCRS/Agent/backend/PromptTypes.h>        // PromptOptions, PromptResult
 #include <LibreSCRS/Agent/backend/PrompterClientBase.h> // Operations::PrompterClientBase
+
+#include <string>
 
 namespace LibreSCRS::Darwin {
 
 // macOS PrompterClientBase backend: forwards PIN / CAN / MRZ requests to the
-// agent-owned secure credential window (prompter/). The secret returns as a
-// cleansing Secure::String and NEVER transits a client — the same contract as
-// the Linux pinentry-kde prompter. The window shows the platform-derived client
-// identity (from the peer SecCode) so the user authorizes a NAMED requester.
+// agent-owned secure credential window (librescrs-prompter) over the private
+// 0600 prompter.sock. The secret returns INLINE over the local socket, is
+// scrubbed straight into a cleansing Secure::String, and the transfer buffer is
+// zeroed — it NEVER transits a client. The window shows the platform-derived
+// (SecCode) requester so the user authorizes a NAMED caller. Same contract as
+// the Linux pinentry-kde prompter. The prompter authenticates that WE are the
+// agent (peer-auth) before serving.
 //
-// TODO(P1b) implement-macos-backend: IPC to the credential window, cancel()
-// dismissing the current modal, and the CAN/MRZ surfaces the system PIN sheet
-// cannot provide (why protected-auth-path is agent-owned here).
+// requestX runs on a per-reader worker (off the main actor); the blocking
+// request/reply over prompter.sock is fine there. cancel() opens a separate
+// connection and sends CancelCurrent so an in-flight prompt on another
+// connection returns Cancelled (mirrors the Linux cross-connection dismiss).
 class MacPrompterClient final : public Agent::Operations::PrompterClientBase
 {
 public:
-    MacPrompterClient();
+    explicit MacPrompterClient(std::string prompterSocketPath);
     ~MacPrompterClient() override;
 
-    [[nodiscard]] Agent::Operations::PromptResult requestPin(const Agent::Operations::PromptOptions& options) override;
-    [[nodiscard]] Agent::Operations::PromptResult requestCan(const Agent::Operations::PromptOptions& options) override;
-    [[nodiscard]] Agent::Operations::PromptResult requestMrz(const Agent::Operations::PromptOptions& options) override;
+    [[nodiscard]] Agent::PromptResult requestPin(const Agent::PromptOptions& options) override;
+    [[nodiscard]] Agent::PromptResult requestCan(const Agent::PromptOptions& options) override;
+    [[nodiscard]] Agent::PromptResult requestMrz(const Agent::PromptOptions& options) override;
     void cancel() noexcept override;
+
+private:
+    [[nodiscard]] Agent::PromptResult request(wire::PromptKind kind, const Agent::PromptOptions& options);
+    std::string m_socketPath;
 };
 
 } // namespace LibreSCRS::Darwin

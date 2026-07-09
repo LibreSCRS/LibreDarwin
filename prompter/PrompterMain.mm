@@ -1,0 +1,88 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
+// SPDX-FileCopyrightText: 2026 hirashix0
+//
+// librescrs-prompter: the agent-owned secure credential window helper. A
+// background thread serves the private prompter.sock (peer-authenticating the
+// agent); the AppKit run loop on the main thread shows the modal on demand.
+#include "PromptWindow.h"
+#include "PrompterServer.h"
+
+#import <AppKit/AppKit.h>
+#import <Security/Security.h>
+
+#include <cstdlib>
+#include <memory>
+#include <optional>
+#include <string>
+
+namespace {
+
+std::string prompterSocketPath()
+{
+    if (const char* env = std::getenv("LIBRESCRS_PROMPTER_SOCK")) {
+        return env;
+    }
+    const char* home = std::getenv("HOME");
+    return std::string(home ? home : "") + "/Library/Group Containers/group.org.librescrs.LibreMac/prompter.sock";
+}
+
+// The connecting peer must be the agent. If LIBRESCRS_AGENT_SIGNING_ID is set, we
+// require the peer's SecTask signing identifier to match it (production);
+// otherwise (dev) we only require an identifiable same-user peer (the 0600 socket
+// already restricts to our uid). The real deployment sets the env from the
+// agent's bundle id.
+LibreSCRS::Darwin::PrompterServer::PeerAuthorized makePeerAuth()
+{
+    std::optional<std::string> expected;
+    if (const char* env = std::getenv("LIBRESCRS_AGENT_SIGNING_ID")) {
+        expected = env;
+    }
+    return [expected](const LibreSCRS::Darwin::PeerCredentials& creds) -> bool {
+        if (!expected) {
+            return true; // dev: any identifiable same-uid peer
+        }
+        SecTaskRef task = SecTaskCreateWithAuditToken(nullptr, creds.auditToken);
+        if (task == nullptr) {
+            return false;
+        }
+        bool ok = false;
+        CFErrorRef err = nullptr;
+        if (CFStringRef sid = SecTaskCopySigningIdentifier(task, &err)) {
+            char buf[256];
+            if (CFStringGetCString(sid, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+                ok = (*expected == buf);
+            }
+            CFRelease(sid);
+        }
+        if (err != nullptr) {
+            CFRelease(err);
+        }
+        CFRelease(task);
+        return ok;
+    };
+}
+
+} // namespace
+
+int main(int /*argc*/, char** /*argv*/)
+{
+    @autoreleasepool {
+        // LSUIElement (no Dock icon / menu bar); the window is a transient modal.
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+
+        auto window = std::make_shared<LibreSCRS::Darwin::PromptWindow>();
+
+        LibreSCRS::Darwin::PrompterServer server(
+            prompterSocketPath(),
+            [window](const LibreSCRS::Darwin::wire::PromptRequest& req) { return window->showPrompt(req); },
+            [window] { window->dismiss(); }, makePeerAuth());
+
+        if (auto started = server.start(); !started) {
+            NSLog(@"librescrs-prompter: %s", started.error().c_str());
+            return 1;
+        }
+        [NSApp run]; // the accept thread lives inside `server`
+    }
+    return 0;
+}
