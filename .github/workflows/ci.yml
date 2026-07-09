@@ -1,25 +1,110 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-# SKELETON macOS CI — builds the broker-host against a sibling LibreAgent/LM.
-name: build
+#
+# LibreDarwin is the macOS broker-host: the librescrs-agent daemon (App-Group
+# socket + CBOR wire) built on LibreAgent::Core, plus the agent-owned prompter
+# and the (P2) PKCS#11 facade. It links LibreMiddleware only through
+# LibreAgent::Core, so the real build runs on a macOS runner that first
+# builds+installs LibreMiddleware, then builds LibreDarwin against the sibling
+# LibreAgent source. The hardware sign-smoke (SignHwSmokeTest) GTEST_SKIP()s
+# without LIBRESCRS_TEST_PIN, so an unattended CI run is green, not failed.
+name: CI
+
 on:
   push:
     branches: [main]
   pull_request:
 
 jobs:
-  build-macos:
-    runs-on: macos-15
+  format-check:
+    # The format gate needs neither Xcode nor LibreMiddleware, so it runs on
+    # ubuntu with the clang-format-21 the rest of the org pins. Covers the C++
+    # and Objective-C++ backend sources.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # TODO(P1b): check out + build/install LibreMiddleware 4.2 and point
-      # CMAKE_PREFIX_PATH at it; check out LibreAgent as a sibling for
-      # -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT.
-      - name: Configure
+
+      - name: Install clang-format-21
         run: |
-          cmake -B build -S . \
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y clang-format-21
+
+      - name: Check clang-format
+        run: |
+          find agent prompter pkcs11-module \
+            \( -name '*.cpp' -o -name '*.h' -o -name '*.mm' \) -print0 \
+            | xargs -0 clang-format-21 --dry-run --Werror
+
+  build-macos:
+    # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
+    # LibreMiddleware SHARED build and the -fexperimental-library C++23 the
+    # backend uses on AppleClang.
+    runs-on: macos-15
+    env:
+      # Where LibreMiddleware installs and where LibreDarwin (+ the FetchContent
+      # LibreAgent) find it via find_package(LibreMiddleware 4.2 CONFIG).
+      LM_PREFIX: ${{ github.workspace }}/lm-prefix
+      # Git ref of LibreMiddleware to build against — track its trunk during the
+      # development cycle (as LibreAgent/LibreCelik/LibreMac do). The 4.2 pin in
+      # CMakeLists.txt enforces the required version independently of this ref.
+      MIDDLEWARE_REF: main
+      # LibreAgent ref consumed as the sibling FetchContent source.
+      AGENT_REF: main
+    steps:
+      - name: Install build tools
+        # ninja drives the CMake builds; autoconf/automake/libtool/pkg-config are
+        # required by the vendored OpenSC autoconf bootstrap LibreMiddleware
+        # builds (same as the LibreCelik/LibreMac macOS jobs).
+        run: brew install ninja autoconf automake libtool pkg-config
+
+      - uses: actions/checkout@v4
+        with:
+          path: LibreDarwin
+
+      - name: Checkout LibreAgent (sibling FetchContent source)
+        uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ env.AGENT_REF }}
+          path: LibreAgent
+
+      - name: Checkout LibreMiddleware
+        # submodules: recursive — LM vendors OpenSC + curl as git submodules,
+        # both needed for the SHARED build to configure.
+        uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreMiddleware
+          ref: ${{ env.MIDDLEWARE_REF }}
+          path: LibreMiddleware
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Build & install LibreMiddleware (Release, SHARED)
+        working-directory: LibreMiddleware
+        run: |
+          cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
-            -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT=../LibreAgent
+            -DCMAKE_INSTALL_PREFIX="$LM_PREFIX" \
+            -DLIBREMIDDLEWARE_BUILD_SHARED=ON
+          cmake --build build -j4
+          cmake --install build
+
+      - name: Configure LibreDarwin
+        working-directory: LibreDarwin
+        run: |
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_PREFIX_PATH="$LM_PREFIX" \
+            -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT="$GITHUB_WORKSPACE/LibreAgent"
+
       - name: Build
+        working-directory: LibreDarwin
         run: cmake --build build -j4
+
       - name: Test
+        # The hardware SignHwSmokeTest auto-skips without LIBRESCRS_TEST_PIN, so
+        # this is green unattended. All wire/transport/frontend/lifecycle unit
+        # tests run against fakes + a real bound socket (no PC/SC reader needed).
+        working-directory: LibreDarwin
         run: ctest --test-dir build --output-on-failure
