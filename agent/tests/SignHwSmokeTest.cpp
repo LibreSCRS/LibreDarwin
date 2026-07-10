@@ -150,7 +150,19 @@ struct HwRig
 
     ~HwRig()
     {
+        // Mirror the daemon's ordered teardown (main.cpp): a gtest fatal
+        // assertion can leave an operation in flight, and rushing the frontend
+        // down while a worker's posted continuation is queued is a
+        // use-after-free. Stop the monitor, cancel in-flight crypto, sever the
+        // observers, quiesce the loop (drops every subsequently-run posted
+        // block), drain it, and only then release the frontend the core
+        // borrows.
         bridge.reset();
+        core->requestCryptoShutdown();
+        core->objectRegistry().setObservers({}, {}, {}, {});
+        transport->quiesceLoop();
+        dispatch_sync(transport->loopQueue(), ^{
+                      });
         frontend.reset();
         core.reset();
         transport.reset();
@@ -160,14 +172,29 @@ struct HwRig
     }
 };
 
-// Send a request; return the decoded reply map (the OpStarted / typed reply).
+// Send a request; return THE reply correlated by our request id ("req").
+// Unsolicited event frames (presence/property broadcasts, "t"-tagged) and
+// stale earlier replies ride the same stream and must be skipped — reading
+// exactly one frame desyncs the whole session after the first broadcast.
 wire::CborValue sendReq(int client, std::uint64_t req, wire::Request body, std::vector<int> fds = {})
 {
     const auto bytes = wire::toCbor(wire::RequestEnvelope{req, std::move(body)}).encode();
     EXPECT_TRUE(wire::sendFrame(client, bytes, fds).has_value());
-    const auto frame = wire::recvFrame(client);
-    EXPECT_TRUE(frame.has_value());
-    return wire::decode(frame->body).value_or(wire::CborValue{});
+    for (int i = 0; i < 200; ++i) {
+        const auto frame = wire::recvFrame(client);
+        if (!frame) {
+            break;
+        }
+        const auto decoded = wire::decode(frame->body);
+        if (!decoded) {
+            continue;
+        }
+        if (const auto* r = decoded->find("req"); r != nullptr && r->asUInt().value_or(0) == req) {
+            return *decoded;
+        }
+    }
+    ADD_FAILURE() << "no reply correlated to req=" << req;
+    return wire::CborValue{};
 }
 
 // After an OpStarted reply, read event frames until OpFinished; return the
