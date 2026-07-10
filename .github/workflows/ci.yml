@@ -55,8 +55,12 @@ jobs:
       - name: Install build tools
         # ninja drives the CMake builds; autoconf/automake/libtool/pkg-config are
         # required by the vendored OpenSC autoconf bootstrap LibreMiddleware
-        # builds (same as the LibreCelik/LibreMac macOS jobs).
-        run: brew install ninja autoconf automake libtool pkg-config
+        # builds (same as the LibreCelik/LibreMac macOS jobs). jsonschema: LM's
+        # opensc-plugin manifest2header.py hard-fails without it (same install
+        # line as LM's own release.yml macOS job).
+        run: |
+          brew install ninja autoconf automake libtool pkg-config
+          python3 -m pip install --break-system-packages --user jsonschema
 
       - uses: actions/checkout@v4
         with:
@@ -108,3 +112,35 @@ jobs:
         # tests run against fakes + a real bound socket (no PC/SC reader needed).
         working-directory: LibreDarwin
         run: ctest --test-dir build --output-on-failure
+
+  fuzz-cbor:
+    # Untrusted-decoder fuzz gate (D1): the CBOR decoder parses input from any
+    # local client, so CborFuzzTest must actually run in CI. AppleClang ships
+    # no libFuzzer runtime, so this leg builds the fuzzer standalone on Linux
+    # clang with -fsanitize=fuzzer,address (the decoder + QCBOR are
+    # platform-neutral; nothing macOS-specific is exercised). Bounded run over
+    # the seed corpus; any crash/UB/leak fails the job. Marked required in
+    # branch protection alongside build-macos and format-check.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch QCBOR at the pinned revision
+        # Single source of truth: the same immutable SHA cmake/FetchQCBOR.cmake
+        # pins for the product build.
+        run: |
+          QCBOR_SHA="$(sed -n 's/^[[:space:]]*GIT_TAG[[:space:]]*\([0-9a-f]\{40\}\).*/\1/p' cmake/FetchQCBOR.cmake)"
+          test -n "$QCBOR_SHA"
+          git clone https://github.com/laurencelundblade/QCBOR.git qcbor-src
+          git -C qcbor-src checkout "$QCBOR_SHA"
+
+      - name: Build the fuzzer
+        run: |
+          clang -c -g -O1 -fsanitize=address -Iqcbor-src/inc qcbor-src/src/*.c
+          clang++ -std=c++23 -g -O1 -fsanitize=fuzzer,address \
+            -Iagent/include -Iqcbor-src/inc \
+            agent/tests/CborFuzzTest.cpp agent/src/backend/wire/Cbor.cpp \
+            ./*.o -o cbor-fuzz
+
+      - name: Run the bounded fuzz
+        run: ./cbor-fuzz -max_total_time=120 -timeout=5 -print_final_stats=1 agent/tests/corpus/cbor

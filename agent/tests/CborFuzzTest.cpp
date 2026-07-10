@@ -6,8 +6,9 @@
 // bounded CborValue or a CborError. A returned value must re-encode without
 // crashing (exercises the encode path on fuzz-derived structures too).
 //
-// Built only with -DLIBREDARWIN_BUILD_FUZZERS=ON (AppleClang
-// -fsanitize=fuzzer,address). Run: ./CborFuzz -max_total_time=60 corpus/
+// Built with -DLIBREDARWIN_BUILD_FUZZERS=ON (needs a fuzzer-capable clang;
+// AppleClang ships no libFuzzer runtime) — CI builds + runs it standalone on
+// the Linux `fuzz-cbor` leg. Run: ./CborFuzz -max_total_time=60 corpus/
 #include <LibreSCRS/Darwin/backend/wire/Cbor.h>
 
 #include <cstddef>

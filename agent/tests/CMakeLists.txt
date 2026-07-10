@@ -59,10 +59,13 @@ foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest 
 endforeach()
 
 # libFuzzer target for the CBOR decoder (untrusted-parser hardening, D1). Off by
-# default; needs a clang WITH the libFuzzer runtime (Homebrew LLVM / CI) — Apple
-# Clang may lack libclang_rt.fuzzer_osx.a. Scoped to just the codec + qcbor
-# (instrumented), NOT the whole backend lib, so coverage focuses on the parser.
-# Local decoder robustness is otherwise covered by CborRoundTrip.MalformedInput*.
+# default; needs a clang WITH the libFuzzer runtime (e.g. Homebrew LLVM) — Apple
+# Clang ships none, so CI runs the fuzz on a Linux leg (the `fuzz-cbor` job
+# builds CborFuzzTest.cpp + Cbor.cpp + QCBOR standalone with
+# -fsanitize=fuzzer,address over agent/tests/corpus/cbor). Scoped to just the
+# codec + qcbor (instrumented), NOT the whole backend lib, so coverage focuses
+# on the parser. Local decoder robustness is otherwise covered by
+# CborRoundTrip.MalformedInput*.
 option(LIBREDARWIN_BUILD_FUZZERS "Build the libFuzzer decoder target (needs a fuzzer-capable clang)" OFF)
 if(LIBREDARWIN_BUILD_FUZZERS)
     add_executable(CborFuzz
