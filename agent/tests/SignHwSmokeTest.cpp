@@ -18,6 +18,9 @@
 //   LIBRESCRS_PLUGIN_DIR=<dir>     LM card plugins
 //   LIBRESCRS_TEST_PIN=<pin>       the card's signing PIN (sign phase)
 //   LIBRESCRS_TEST_CAN / _MRZ      PACE channel secret (as the card needs)
+//   LIBRESCRS_PKCS11_MODULE=<so>   optional; the sign engine's LM PKCS#11
+//                                  module. Auto-derived from LIBRESCRS_PLUGIN_DIR
+//                                  when unset (see ensurePkcs11ModuleEnv).
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Darwin/backend/wire/Cbor.h>
@@ -70,6 +73,32 @@ std::optional<std::string> env(const char* name)
 bool hwEnabled()
 {
     return env("LIBRESCRS_HW").has_value();
+}
+
+// The signing engine loads the LM PKCS#11 module (librescrs-pkcs11.dylib) to
+// drive the on-card sign; resolvePkcs11Module() searches paths RELATIVE TO THE
+// EXECUTABLE, none of which match this in-tree test binary's location (the
+// module lives under the LM install's lib/pkcs11/, not next to the test). A
+// bundled agent (.app) colocates the module and needs no override; the in-tree
+// smoke does. If LIBRESCRS_PKCS11_MODULE is not already set, derive it from the
+// plugin dir (…/lib/librescrs/plugins → …/lib/pkcs11/librescrs-pkcs11.dylib) —
+// the documented override escape hatch. Without it the sign fails
+// SigningEngineError before ever reaching the card.
+void ensurePkcs11ModuleEnv()
+{
+    if (env("LIBRESCRS_PKCS11_MODULE")) {
+        return; // caller supplied an explicit path
+    }
+    const auto pluginDir = env("LIBRESCRS_PLUGIN_DIR");
+    if (!pluginDir) {
+        return; // nothing to derive from; resolvePkcs11Module falls back itself
+    }
+    const std::filesystem::path module =
+        std::filesystem::path{*pluginDir}.parent_path().parent_path() / "pkcs11" / "librescrs-pkcs11.dylib";
+    std::error_code ec;
+    if (std::filesystem::exists(module, ec)) {
+        ::setenv("LIBRESCRS_PKCS11_MODULE", module.c_str(), /*overwrite=*/0);
+    }
 }
 
 // Env-backed prompter: PIN/CAN/MRZ come from the environment (never a GUI,
@@ -131,6 +160,7 @@ struct HwRig
         : resolver(std::make_shared<LibreSCRS::Plugin::CardPluginService>(
               std::filesystem::path{env("LIBRESCRS_PLUGIN_DIR").value_or("/usr/local/lib/librescrs/plugins")}))
     {
+        ensurePkcs11ModuleEnv(); // the sign engine needs the LM PKCS#11 module resolvable
         std::filesystem::create_directories(tmp);
         transport = std::move(*SocketTransport::create(path));
         core.emplace(
