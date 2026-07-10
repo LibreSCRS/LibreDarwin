@@ -26,4 +26,15 @@ else()
         GIT_REPOSITORY https://github.com/LibreSCRS/LibreAgent.git
         GIT_TAG main)
     FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core
+
+    # The neutral core uses std::jthread/std::stop_token, which AppleClang 16/17
+    # (Xcode 16, the macos-15 CI image) still gates behind -fexperimental-library
+    # (feedback_apple_clang_experimental; harmless on newer AppleClang where the
+    # types are stable). LibreAgent itself is Linux-built (GCC needs no flag) and
+    # this session never edits it, so the consumer adds the flag to the fetched
+    # target from its side.
+    if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND TARGET LibreAgentCore)
+        target_compile_options(LibreAgentCore PRIVATE -fexperimental-library)
+        target_link_options(LibreAgentCore PRIVATE -fexperimental-library)
+    endif()
 endif()

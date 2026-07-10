@@ -134,10 +134,21 @@ jobs:
           git clone https://github.com/laurencelundblade/QCBOR.git qcbor-src
           git -C qcbor-src checkout "$QCBOR_SHA"
 
+      - name: Install clang-21
+        # The decoder uses std::expected, which libstdc++ gates on
+        # __cpp_concepts >= 202002L — advertised by clang 19+, not the image's
+        # default clang 18. Pin the same LLVM 21 the org pins for clang-format;
+        # libclang-rt-21-dev carries the libFuzzer/ASan runtimes.
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y clang-21 libclang-rt-21-dev
+
       - name: Build the fuzzer
         run: |
-          clang -c -g -O1 -fsanitize=address -Iqcbor-src/inc qcbor-src/src/*.c
-          clang++ -std=c++23 -g -O1 -fsanitize=fuzzer,address \
+          clang-21 -c -g -O1 -fsanitize=address -Iqcbor-src/inc qcbor-src/src/*.c
+          clang++-21 -std=c++23 -g -O1 -fsanitize=fuzzer,address \
             -Iagent/include -Iqcbor-src/inc \
             agent/tests/CborFuzzTest.cpp agent/src/backend/wire/Cbor.cpp \
             ./*.o -o cbor-fuzz
