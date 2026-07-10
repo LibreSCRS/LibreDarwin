@@ -131,6 +131,38 @@ std::string uniqueSocketPath()
     return "/tmp/ld-hw-" + std::to_string(::getpid()) + ".sock";
 }
 
+// A structurally valid, single-page PDF the PAdES signer can actually parse.
+// The earlier fake ("%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF") passed
+// the format sniff (a %PDF- prefix) but has no catalog/pages/page objects and
+// no valid xref, so libresign rejected it ("PAdES: failed to parse input PDF")
+// before any card I/O — the whole sign pipeline was fine, the input was not.
+// Offsets in the xref table are computed from the actual byte layout so a
+// strict parser accepts it.
+std::string minimalValidPdf()
+{
+    std::string pdf = "%PDF-1.4\n";
+    std::vector<std::size_t> offsets;
+    const auto addObject = [&](const std::string& body) {
+        offsets.push_back(pdf.size());
+        pdf += body;
+    };
+    addObject("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n");
+    addObject("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n");
+    addObject("3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] >>\nendobj\n");
+
+    const std::size_t xrefOffset = pdf.size();
+    pdf += "xref\n0 " + std::to_string(offsets.size() + 1) + "\n";
+    pdf += "0000000000 65535 f \n";
+    for (const auto off : offsets) {
+        char entry[32];
+        std::snprintf(entry, sizeof(entry), "%010zu 00000 n \n", off);
+        pdf += entry;
+    }
+    pdf += "trailer\n<< /Size " + std::to_string(offsets.size() + 1) + " /Root 1 0 R >>\n";
+    pdf += "startxref\n" + std::to_string(xrefOffset) + "\n%%EOF\n";
+    return pdf;
+}
+
 int connectClient(const std::string& path)
 {
     const int c = ::socket(AF_UNIX, SOCK_STREAM, 0);
@@ -329,14 +361,14 @@ TEST(SignHwSmoke, PresenceReadAndSign)
                      << (inventory.empty() ? " (empty cert list)" : inventory);
     }
 
-    // Sign a small doc (PIN-guarded). PAdES over a minimal PDF prefix; the format
-    // sniff needs only a bounded prefix, but a real PDF keeps the flow honest.
+    // Sign a small PIN-guarded doc: a real, parseable single-page PAdES PDF (a
+    // fake %PDF- prefix passes the sniff but fails libresign's PDF parser).
     SKIP_IF_PIN_FAILED();
     if (!env("LIBRESCRS_TEST_PIN")) {
         ::close(client);
         GTEST_SKIP() << "LIBRESCRS_TEST_PIN unset — sign phase INCONCLUSIVE";
     }
-    const std::string pdf = "%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n";
+    const std::string pdf = minimalValidPdf();
     const std::filesystem::path docPath = rig.tmp / "doc.pdf";
     {
         FILE* f = std::fopen(docPath.c_str(), "wb");
