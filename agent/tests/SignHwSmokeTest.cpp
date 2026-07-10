@@ -272,11 +272,21 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     const auto certFinished = driveToFinished(client, &certResult, nullptr);
     ASSERT_NE(certFinished.find("status"), nullptr);
 
+    // OpResultReady nests the typed payload under "result" (kind="Certificates",
+    // certs=[…]) — see wire::toCbor(OpResultReady). Read the cert list there, not
+    // at the frame's top level.
     std::string certId;
-    if (const auto* certs = certResult.find("certs"); certs != nullptr && certs->asArray() != nullptr) {
+    std::string inventory; // dumped on skip — the triage evidence for a miss
+    const auto* resultMap = certResult.find("result");
+    const auto* certs = resultMap != nullptr ? resultMap->find("certs") : nullptr;
+    if (certs != nullptr && certs->asArray() != nullptr) {
         for (const auto& c : *certs->asArray()) {
             const auto* sc = c.find("signingCapable");
             const auto* id = c.find("certId");
+            const auto* ku = c.find("keyUsageBits");
+            inventory += "\n  cert id=" + (id && id->asText() ? id->asText()->substr(0, 12) : std::string("?")) +
+                         " signingCapable=" + ((sc && sc->asBool().value_or(false)) ? "true" : "false") +
+                         " keyUsageBits=" + std::to_string(ku ? ku->asUInt().value_or(0) : 0);
             if (sc != nullptr && sc->asBool().value_or(false) && id != nullptr && id->asText() != nullptr) {
                 certId = *id->asText();
                 break;
@@ -285,7 +295,8 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     }
     if (certId.empty()) {
         ::close(client);
-        GTEST_SKIP() << "no signing-capable certificate on the card";
+        GTEST_SKIP() << "no signing-capable certificate on the card; inventory:"
+                     << (inventory.empty() ? " (empty cert list)" : inventory);
     }
 
     // Sign a small doc (PIN-guarded). PAdES over a minimal PDF prefix; the format
