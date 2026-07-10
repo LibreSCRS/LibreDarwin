@@ -334,10 +334,14 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     // failure trips the PIN guard so no further PIN is ever presented this run.
     if (status != 0) {
         const auto code = signFinished.find("code") ? signFinished.find("code")->asUInt().value_or(0) : 0;
+        const auto* mk = signFinished.find("msgKey");
+        const auto* mf = signFinished.find("msgFallback");
         // ErrorCode AuthFailed family -> latch the guard (conservative: any Error
         // on the sign path after a PIN was presented latches).
         g_pinFailed = true;
         FAIL() << "Sign did not finish Ok (status=" << status << ", code=" << code
+               << ", msgKey=" << (mk && mk->asText() ? *mk->asText() : "?")
+               << ", msg=" << (mf && mf->asText() ? *mf->asText() : "?")
                << "). PIN guard latched — re-run only after confirming the PIN.";
     }
 
