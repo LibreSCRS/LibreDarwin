@@ -46,7 +46,7 @@ foreach(wire_test CborRoundTripTest FramingTest FrameReassemblerTest MessagesRou
 endforeach()
 
 # Backend: peer identity + the socket transport (real bound socket + GCD loop).
-foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest SignHwSmokeTest)
+foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest)
     add_executable(${backend_test} ${backend_test}.cpp)
     target_link_libraries(${backend_test}
         PRIVATE

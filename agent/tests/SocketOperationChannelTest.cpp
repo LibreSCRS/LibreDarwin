@@ -19,14 +19,65 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <string>
+#include <vector>
 
 using namespace LibreSCRS::Darwin;
 namespace Ops = ::LibreSCRS::Agent::Operations;
+
+// Allocation-failure injection (this test binary only). A replacement global
+// operator new/delete pair routes through std::malloc/std::free; setting
+// g_failNextAlloc makes the NEXT allocation on THIS thread throw a real
+// std::bad_alloc — driving the channel's noexcept emit guards the same way a
+// production allocation failure would. thread_local keeps the transport loop
+// thread unaffected. The matching deletes keep alloc/dealloc pairing
+// consistent (malloc/free) under ASan.
+namespace {
+thread_local bool g_failNextAlloc = false;
+} // namespace
+
+void* operator new(std::size_t size)
+{
+    if (g_failNextAlloc) {
+        g_failNextAlloc = false;
+        throw std::bad_alloc();
+    }
+    if (void* p = std::malloc(size ? size : 1)) {
+        return p;
+    }
+    throw std::bad_alloc();
+}
+
+void* operator new[](std::size_t size)
+{
+    return ::operator new(size);
+}
+
+void operator delete(void* p) noexcept
+{
+    std::free(p);
+}
+
+void operator delete[](void* p) noexcept
+{
+    std::free(p);
+}
+
+void operator delete(void* p, std::size_t) noexcept
+{
+    std::free(p);
+}
+
+void operator delete[](void* p, std::size_t) noexcept
+{
+    std::free(p);
+}
 
 namespace {
 
@@ -103,6 +154,50 @@ TEST(SocketOperationChannel, EmitsProgressAndFinished)
     const auto finished = recvEvent(w.client);
     EXPECT_EQ(*finished.find("t")->asText(), "OpFinished");
     EXPECT_EQ(finished.find("status")->asUInt(), static_cast<std::uint64_t>(Ops::OperationStatus::Ok));
+
+    ::close(w.client);
+    w.tr.reset();
+    std::filesystem::remove(w.path);
+}
+
+TEST(SocketOperationChannel, AllocationFailureInEmitIsDroppedNotFatal)
+{
+    Wired w = wireUp();
+    ASSERT_NE(w.connId, 0u);
+    auto state = std::make_shared<Ops::OperationState>();
+    std::vector<std::uint64_t> pruned;
+    SocketOperationChannel channel(*w.tr, w.connId, 42, state, {}, [&](std::uint64_t op) { pruned.push_back(op); });
+
+    // A real bad_alloc inside the noexcept emitFinished: no terminate, the
+    // event is dropped, and the terminal op-owner prune still fires.
+    g_failNextAlloc = true;
+    channel.emitFinished(Ops::OperationStatus::Error, LibreSCRS::Agent::ErrorCode::CommunicationError, "k", "f");
+    EXPECT_FALSE(g_failNextAlloc); // the guarded body did allocate (and threw)
+    ASSERT_EQ(pruned.size(), 1u);
+    EXPECT_EQ(pruned[0], 42u);
+
+    g_failNextAlloc = true;
+    channel.emitPropertiesChanged();
+    EXPECT_FALSE(g_failNextAlloc);
+
+    // emitResult under allocation failure fails the op closed (false) rather
+    // than emitting a half-result.
+    Ops::SignedArtifact artifact;
+    artifact.bytes = {'x'};
+    artifact.meta = Ops::SignMeta{"pades", "b-b", false, false};
+    const Ops::ResultPayload payload{artifact};
+    g_failNextAlloc = true;
+    EXPECT_FALSE(channel.emitResult(payload));
+    g_failNextAlloc = false;
+
+    // The channel and transport stay usable: a subsequent valid emit is the
+    // FIRST event the client sees — the dropped emits never reached the wire.
+    channel.emitFinished(Ops::OperationStatus::Ok, LibreSCRS::Agent::ErrorCode::None, "k2", "f2");
+    const auto finished = recvEvent(w.client);
+    EXPECT_EQ(*finished.find("t")->asText(), "OpFinished");
+    EXPECT_EQ(finished.find("status")->asUInt(), static_cast<std::uint64_t>(Ops::OperationStatus::Ok));
+    EXPECT_EQ(*finished.find("msgKey")->asText(), "k2");
+    ASSERT_EQ(pruned.size(), 2u);
 
     ::close(w.client);
     w.tr.reset();

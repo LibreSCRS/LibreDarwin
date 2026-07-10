@@ -28,6 +28,11 @@ namespace {
 
 namespace log = Agent::log;
 
+// Same-uid local-DoS bound: concurrent client connections (each may buffer up
+// to one max-size frame in its reassembler). Excess connects are closed at
+// accept.
+constexpr std::size_t kMaxConnections = 32;
+
 void makeNonBlockingCloexec(int fd) noexcept
 {
     ::fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -207,6 +212,7 @@ SocketTransport::~SocketTransport()
               dispatch_release(conn->writeSource);
               conn->writeSource = nullptr;
           }
+          cancelFirstFrameTimer(*conn);
       }
       m_connections.clear();
     });
@@ -250,6 +256,10 @@ void SocketTransport::onAcceptReady()
 void SocketTransport::acceptOne(int connFd)
 {
     wire::UniqueFd fd(connFd);
+    if (m_connections.size() >= kMaxConnections) {
+        log::warn("transport: connection cap reached; refusing a new connection");
+        return; // fd closed by UniqueFd
+    }
     makeNonBlockingCloexec(connFd);
     setNoSigPipe(connFd);
 
@@ -286,7 +296,42 @@ void SocketTransport::acceptOne(int connFd)
     dispatch_resume(conn->readSource);
 
     m_connections.emplace(id, std::move(conn));
+    armFirstFrameTimer(*m_connections[id]);
     log::infof("transport: client connected ({}, {})", m_connections[id]->caller.str(), creds->label());
+}
+
+void SocketTransport::armFirstFrameTimer(Connection& conn)
+{
+    // Slow-loris guard: the connection must deliver one complete frame within
+    // the window (a legit client Hello's immediately) or it is reaped.
+    const std::uint64_t id = conn.id;
+    conn.firstFrameTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, m_queue);
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(m_firstFrameTimeout).count();
+    dispatch_source_set_timer(conn.firstFrameTimer, dispatch_time(DISPATCH_TIME_NOW, ns), DISPATCH_TIME_FOREVER,
+                              static_cast<std::uint64_t>(ns / 10));
+    dispatch_source_set_event_handler(conn.firstFrameTimer, ^{
+      this->onFirstFrameTimeout(id);
+    });
+    dispatch_resume(conn.firstFrameTimer);
+}
+
+void SocketTransport::onFirstFrameTimeout(std::uint64_t connId)
+{
+    const auto it = m_connections.find(connId);
+    if (it == m_connections.end() || it->second->sawFirstFrame) {
+        return;
+    }
+    log::warn("transport: dropping a connection without a first frame (slow-loris guard)");
+    closeConnection(connId);
+}
+
+void SocketTransport::cancelFirstFrameTimer(Connection& conn) noexcept
+{
+    if (conn.firstFrameTimer != nullptr) {
+        dispatch_source_cancel(conn.firstFrameTimer);
+        dispatch_release(conn.firstFrameTimer);
+        conn.firstFrameTimer = nullptr;
+    }
 }
 
 void SocketTransport::onReadReady(std::uint64_t connId)
@@ -302,6 +347,10 @@ void SocketTransport::onReadReady(std::uint64_t connId)
     // mid-loop close must not be dereferenced on the next iteration.
     const Agent::CallerToken caller = conn.caller;
     wire::PumpResult pumped = conn.reassembler.pump(*conn.fd);
+    if (!pumped.frames.empty() && !conn.sawFirstFrame) {
+        conn.sawFirstFrame = true;
+        cancelFirstFrameTimer(conn); // the slow-loris window is satisfied
+    }
 
     for (auto& frame : pumped.frames) {
         auto env = wire::parseRequest(frame.body);
@@ -346,6 +395,7 @@ void SocketTransport::closeConnection(std::uint64_t connId)
         dispatch_release(it->second->writeSource);
         it->second->writeSource = nullptr;
     }
+    cancelFirstFrameTimer(*it->second);
     m_connections.erase(it); // drops this connection's fd share; the source cancel
                              // handlers close the fd once GCD finishes their teardown
 

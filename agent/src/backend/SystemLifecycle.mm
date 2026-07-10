@@ -14,6 +14,7 @@
 #include <IOKit/pwr_mgt/IOPMLib.h>
 #include <IOKit/IOMessage.h>
 
+#include <functional>
 #include <vector>
 
 namespace LibreSCRS::Darwin {
@@ -21,28 +22,39 @@ namespace LibreSCRS::Darwin {
 namespace {
 
 // Heap refcon for the IOKit power callback (anon-namespace type so the callback
-// can access it, unlike the private nested Impl): the owner to notify + the root
-// port to acknowledge the sleep on. Owned by Impl; rootPort is filled in after
-// IORegisterForSystemPower returns (the callback only fires on real sleep, later).
+// can access it, unlike the private nested Impl): the owner to notify, the root
+// port to acknowledge the sleep on, and the ack sink (production =
+// IOAllowPowerChange; tests substitute a recorder). Owned by Impl; rootPort is
+// filled in after IORegisterForSystemPower returns (the callback only fires on
+// real sleep, later).
 struct IoRefcon
 {
     SystemLifecycle* owner{nullptr};
     io_connect_t rootPort{0};
+    std::function<void(io_connect_t, intptr_t)> ack{
+        [](io_connect_t port, intptr_t arg) { IOAllowPowerChange(port, arg); }};
 };
 
-// IOKit system-power callback: acknowledge sleep immediately (we do NOT delay the
-// sleep — the scrub is fast and cooperative) and forward the will-sleep as a
-// Suspend.
+// IOKit system-power callback: acknowledge power messages immediately (we do NOT
+// delay or veto sleep — the scrub is fast and cooperative) and forward the
+// will-sleep as a Suspend.
 void ioPowerCallback(void* refcon, io_service_t /*service*/, natural_t messageType, void* messageArgument)
 {
     auto* rc = static_cast<IoRefcon*>(refcon);
     switch (messageType) {
+    case kIOMessageCanSystemSleep:
+        // Idle-sleep query: answer immediately, never veto. An unanswered query
+        // holds EVERY system idle sleep in the ~30 s power-management timeout
+        // while the always-on agent runs (Apple QA1340). The scrub stays on the
+        // will-sleep path — no Suspend here.
+        rc->ack(rc->rootPort, reinterpret_cast<intptr_t>(messageArgument));
+        break;
     case kIOMessageSystemWillSleep:
         if (rc->owner != nullptr) {
             rc->owner->injectForTest(SystemLifecycle::Event::Suspend);
         }
         // Allow the sleep to proceed without delay.
-        IOAllowPowerChange(rc->rootPort, reinterpret_cast<intptr_t>(messageArgument));
+        rc->ack(rc->rootPort, reinterpret_cast<intptr_t>(messageArgument));
         break;
     case kIOMessageSystemHasPoweredOn:
         if (rc->owner != nullptr) {
@@ -55,6 +67,21 @@ void ioPowerCallback(void* refcon, io_service_t /*service*/, natural_t messageTy
 }
 
 } // namespace
+
+bool drivePowerCallbackForTest(SystemLifecycle& owner, std::uint32_t messageType, std::uintptr_t messageArgument,
+                               std::uintptr_t& ackedArgument)
+{
+    IoRefcon rc;
+    rc.owner = &owner;
+    rc.rootPort = 0;
+    bool acked = false;
+    rc.ack = [&acked, &ackedArgument](io_connect_t /*port*/, intptr_t arg) {
+        acked = true;
+        ackedArgument = static_cast<std::uintptr_t>(arg);
+    };
+    ioPowerCallback(&rc, 0, messageType, reinterpret_cast<void*>(messageArgument));
+    return acked;
+}
 
 struct SystemLifecycle::Impl
 {

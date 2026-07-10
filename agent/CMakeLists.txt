@@ -42,6 +42,7 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/SocketFrontend.cpp
     src/backend/SystemLifecycle.mm
     src/backend/OsLogSink.cpp
+    src/backend/ProcessHardening.cpp
     src/backend/wire/Messages.cpp # Messages reuses the LibreAgent value enums
     # Operation subclasses: platform-neutral twins copied verbatim from
     # LibreLinux/agent/src/operations (they depend only on core flows +

@@ -11,8 +11,12 @@
 
 #include <gtest/gtest.h>
 
+#include <IOKit/IOMessage.h>
+
+#include <cstdint>
 #include <vector>
 
+using LibreSCRS::Darwin::drivePowerCallbackForTest;
 using LibreSCRS::Darwin::SystemLifecycle;
 using Event = SystemLifecycle::Event;
 
@@ -59,4 +63,42 @@ TEST(SystemLifecycle, HandlerlessInjectIsSafe)
     // A null handler must be a no-op, not a crash.
     lifecycle.injectForTest(Event::Suspend);
     SUCCEED();
+}
+
+TEST(SystemLifecycle, CanSystemSleepIsAcknowledgedWithoutSuspend)
+{
+    // The idle-sleep QUERY must be answered (never veto) — an unanswered query
+    // delays every system idle sleep by the ~30 s PM timeout — and must NOT
+    // scrub (no Suspend; that stays on the will-sleep path).
+    std::vector<Event> seen;
+    SystemLifecycle lifecycle([&](Event e) { seen.push_back(e); });
+
+    std::uintptr_t acked = 0;
+    EXPECT_TRUE(drivePowerCallbackForTest(lifecycle, kIOMessageCanSystemSleep, 0xBEEF, acked));
+    EXPECT_EQ(acked, 0xBEEFu); // the messageArgument was passed through to the ack
+    EXPECT_TRUE(seen.empty());
+}
+
+TEST(SystemLifecycle, WillSleepAcknowledgesAndSuspends)
+{
+    std::vector<Event> seen;
+    SystemLifecycle lifecycle([&](Event e) { seen.push_back(e); });
+
+    std::uintptr_t acked = 0;
+    EXPECT_TRUE(drivePowerCallbackForTest(lifecycle, kIOMessageSystemWillSleep, 0xCAFE, acked));
+    EXPECT_EQ(acked, 0xCAFEu);
+    ASSERT_EQ(seen.size(), 1u);
+    EXPECT_EQ(seen[0], Event::Suspend);
+}
+
+TEST(SystemLifecycle, PoweredOnResumesWithoutAck)
+{
+    std::vector<Event> seen;
+    SystemLifecycle lifecycle([&](Event e) { seen.push_back(e); });
+
+    std::uintptr_t acked = 0;
+    EXPECT_FALSE(drivePowerCallbackForTest(lifecycle, kIOMessageSystemHasPoweredOn, 0x1, acked));
+    EXPECT_EQ(acked, 0u);
+    ASSERT_EQ(seen.size(), 1u);
+    EXPECT_EQ(seen[0], Event::Resume);
 }

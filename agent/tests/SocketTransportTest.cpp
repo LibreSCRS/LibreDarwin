@@ -161,6 +161,90 @@ TEST(SocketTransport, DisconnectFiresHandlersInRegistrationOrder)
     std::filesystem::remove(path);
 }
 
+TEST(SocketTransport, ConnectionCapRefusesTheExcessConnection)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+
+    // Fill the cap: 32 registered connections, paced by the per-client sink
+    // ack (a burst of raw connects would overflow the listen(16) backlog and
+    // fail at connect() before the cap is even exercised).
+    std::vector<int> clients;
+    const auto helloBytes = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
+    for (std::size_t i = 0; i < 32; ++i) {
+        const int c = connectClient(path);
+        ASSERT_TRUE(wire::sendFrame(c, helloBytes).has_value());
+        clients.push_back(c);
+        ASSERT_TRUE(sink.waitFor(i + 1, std::chrono::seconds(5)));
+    }
+
+    // The 33rd connects at the kernel level (listen backlog) but the transport
+    // refuses it at accept: the client observes EOF.
+    const int excess = connectClient(path);
+    timeval tv{5, 0};
+    ::setsockopt(excess, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char buf[8] = {0};
+    EXPECT_EQ(::recv(excess, buf, sizeof(buf), 0), 0);
+
+    ::close(excess);
+    for (const int c : clients) {
+        ::close(c);
+    }
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
+TEST(SocketTransport, WatchdogReapsOnlyThePartialFrameConnection)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    tr->setFirstFrameTimeoutForTest(std::chrono::milliseconds(50));
+
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+
+    // A well-behaved client delivers its first frame inside the window.
+    const int good = connectClient(path);
+    const auto helloBytes = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(wire::sendFrame(good, helloBytes).has_value());
+    ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
+
+    // A slow-loris client sends half a length prefix and stalls.
+    const int slow = connectClient(path);
+    const std::uint8_t partial[2] = {0x10, 0x00};
+    ASSERT_EQ(::send(slow, partial, sizeof(partial), 0), 2);
+
+    // EOF on the stalled connection IS the watchdog event (no sleeps).
+    timeval tv{5, 0};
+    ::setsockopt(slow, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char buf[8] = {0};
+    EXPECT_EQ(::recv(slow, buf, sizeof(buf), 0), 0);
+
+    // The good connection outlived the same window (its timer was cancelled on
+    // the first frame): it still receives broadcasts.
+    SocketTransport* trp = tr.get();
+    dispatch_sync(tr->loopQueue(), ^{
+      Agent::ReaderState r;
+      r.id = Agent::ObjectId(9);
+      r.name = "Survivor";
+      r.hasCard = false;
+      trp->publishReader(r);
+    });
+    const auto frame = wire::recvFrame(good);
+    ASSERT_TRUE(frame.has_value());
+    const auto decoded = wire::decode(frame->body);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(*decoded->find("t")->asText(), "ReaderAdded");
+
+    ::close(good);
+    ::close(slow);
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
 TEST(SocketTransport, PostRunsOnTheLoop)
 {
     const std::string path = uniqueSocketPath();

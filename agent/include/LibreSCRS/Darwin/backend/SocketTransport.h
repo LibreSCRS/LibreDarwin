@@ -124,6 +124,13 @@ public:
     // source event can invoke a frontend callback after the frontend is freed.
     void quiesceLoop();
 
+    // Test hook: shrink the first-frame (slow-loris) watchdog window. Call
+    // before any client connects; production keeps the 30 s default.
+    void setFirstFrameTimeoutForTest(std::chrono::microseconds timeout) noexcept
+    {
+        m_firstFrameTimeout = timeout;
+    }
+
     // --- AgentTransport ----------------------------------------------------
     void publishReader(const Agent::ReaderState& reader) override;
     void publishCard(const Agent::CardState& card) override;
@@ -156,6 +163,12 @@ private:
         wire::FrameReassembler reassembler;
         dispatch_source_t readSource{nullptr};
         dispatch_source_t writeSource{nullptr};
+        // Slow-loris guard: armed on accept, cancelled on the first complete
+        // frame; fires -> the connection is reaped. A timer SOURCE (not
+        // dispatch_after) so closeConnection/teardown can cancel it — a pending
+        // dispatch_after block would outlive the transport.
+        dispatch_source_t firstFrameTimer{nullptr};
+        bool sawFirstFrame{false};
         bool writeSourceResumed{false};
         std::deque<OutFrame> outQueue;
     };
@@ -169,6 +182,9 @@ private:
     void acceptOne(int connFd);
     void onReadReady(std::uint64_t connId);
     void closeConnection(std::uint64_t connId);
+    void armFirstFrameTimer(Connection& conn);
+    void onFirstFrameTimeout(std::uint64_t connId);
+    static void cancelFirstFrameTimer(Connection& conn) noexcept;
     void enqueueSend(Connection& conn, std::vector<std::uint8_t> framed, std::vector<wire::UniqueFd> fds);
     void flushWrites(Connection& conn);
     void broadcast(const wire::CborValue& event);
@@ -190,6 +206,7 @@ private:
     std::uint64_t m_nextConnId{1};
     std::uint64_t m_nextHandle{1};
     std::map<std::uint64_t, std::unique_ptr<Connection>> m_connections;
+    std::chrono::microseconds m_firstFrameTimeout{std::chrono::seconds(30)};
 
     // Published presence snapshot, keyed by wire handle.
     std::map<std::string, wire::ReaderState> m_readers;

@@ -12,6 +12,8 @@
 #include <LibreSCRS/Darwin/backend/wire/Messages.h>
 #include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
 
+#include <LibreSCRS/Agent/backend/Logging.h>
+
 #include <LibreSCRS/Agent/value/CardReadSnapshot.h>
 #include <LibreSCRS/Agent/value/CertSnapshot.h>
 
@@ -22,6 +24,9 @@
 #include <vector>
 
 namespace LibreSCRS::Darwin {
+
+namespace log = Agent::log;
+
 namespace {
 
 namespace A = LibreSCRS::Agent;
@@ -107,43 +112,59 @@ SocketOperationChannel::~SocketOperationChannel() = default;
 
 void SocketOperationChannel::emitPropertiesChanged() noexcept
 {
-    wire::OpProgress ev;
-    ev.op = m_opId;
-    ev.phase = static_cast<Ops::OperationPhase>(m_state ? m_state->phase.load() : 0u);
-    if (m_state) {
-        ev.progress = m_state->progress.load();
-        ev.indeterminate = m_state->isIndeterminate.load();
-        ev.watchdogSecs = m_state->watchdogTimeoutSec.load();
+    // The encode + the posted std::function allocate inside a noexcept frame;
+    // an allocation failure degrades to a dropped progress event, never
+    // std::terminate.
+    try {
+        wire::OpProgress ev;
+        ev.op = m_opId;
+        ev.phase = static_cast<Ops::OperationPhase>(m_state ? m_state->phase.load() : 0u);
+        if (m_state) {
+            ev.progress = m_state->progress.load();
+            ev.indeterminate = m_state->isIndeterminate.load();
+            ev.watchdogSecs = m_state->watchdogTimeoutSec.load();
+        }
+        const wire::CborValue msg = wire::toCbor(ev);
+        const std::uint64_t connId = m_connId;
+        SocketTransport* t = &m_transport;
+        t->post([t, connId, msg] { t->sendTo(connId, msg); });
+    } catch (...) {
+        log::warn("op-channel: dropped OpProgress emit (encode/post failure)");
     }
-    const wire::CborValue msg = wire::toCbor(ev);
-    const std::uint64_t connId = m_connId;
-    SocketTransport* t = &m_transport;
-    t->post([t, connId, msg] { t->sendTo(connId, msg); });
 }
 
 void SocketOperationChannel::emitFinished(Ops::OperationStatus status, A::ErrorCode code, std::string_view msgKey,
                                           std::string_view msgFallback) noexcept
 {
-    wire::OpFinished ev;
-    ev.op = m_opId;
-    ev.status = status;
-    ev.code = code;
-    ev.msgKey = std::string(msgKey);
-    ev.msgFallback = std::string(msgFallback);
-    const wire::CborValue msg = wire::toCbor(ev);
-    const std::uint64_t connId = m_connId;
-    SocketTransport* t = &m_transport;
-    t->post([t, connId, msg] { t->sendTo(connId, msg); });
+    try {
+        wire::OpFinished ev;
+        ev.op = m_opId;
+        ev.status = status;
+        ev.code = code;
+        ev.msgKey = std::string(msgKey);
+        ev.msgFallback = std::string(msgFallback);
+        const wire::CborValue msg = wire::toCbor(ev);
+        const std::uint64_t connId = m_connId;
+        SocketTransport* t = &m_transport;
+        t->post([t, connId, msg] { t->sendTo(connId, msg); });
+    } catch (...) {
+        log::warn("op-channel: dropped OpFinished emit (encode/post failure)");
+    }
     // Terminal: let the frontend prune its per-op ownership entry (the sink itself
     // is worker-safe — it captures only the transport + posts a drop-guarded loop
-    // continuation).
-    if (m_onFinished) {
-        m_onFinished(m_opId);
+    // continuation). The prune runs even when the emit above was dropped, and is
+    // guarded on its own so a posting failure cannot escape the noexcept frame.
+    try {
+        if (m_onFinished) {
+            m_onFinished(m_opId);
+        }
+    } catch (...) {
+        log::warn("op-channel: op-owner prune failed; entry lives until connection close");
     }
 }
 
 bool SocketOperationChannel::emitResult(const Ops::ResultPayload& result) noexcept
-{
+try {
     wire::OpResultReady ev;
     ev.op = m_opId;
     std::vector<wire::UniqueFd> fds;
@@ -201,6 +222,13 @@ bool SocketOperationChannel::emitResult(const Ops::ResultPayload& result) noexce
     auto shared = std::make_shared<std::vector<wire::UniqueFd>>(std::move(fds));
     t->post([t, connId, msg, shared] { t->sendTo(connId, msg, std::move(*shared)); });
     return true;
+} catch (...) {
+    // Marshalling/encode/post allocation failed inside a noexcept frame: the
+    // result cannot be delivered, so fail the op closed (same contract arm as a
+    // failed REQUIRED fd materialization) rather than terminate or emit a
+    // half-result. UniqueFd destructors close any already-materialized fds.
+    log::warn("op-channel: dropped OpResultReady emit (encode/post failure); failing op closed");
+    return false;
 }
 
 } // namespace LibreSCRS::Darwin

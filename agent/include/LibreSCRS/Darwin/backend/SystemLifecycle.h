@@ -57,4 +57,11 @@ private:
     std::unique_ptr<Impl> m_impl;
 };
 
+// Test hook (keeps this header IOKit-free): drive the private IOKit power
+// callback with @p messageType / @p messageArgument against a fake ack sink.
+// Returns true when the callback acknowledged the message; @p ackedArgument
+// then carries the messageArgument it acknowledged (untouched otherwise).
+bool drivePowerCallbackForTest(SystemLifecycle& owner, std::uint32_t messageType, std::uintptr_t messageArgument,
+                               std::uintptr_t& ackedArgument);
+
 } // namespace LibreSCRS::Darwin

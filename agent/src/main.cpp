@@ -9,6 +9,7 @@
 // presence. Mirrors LibreLinux/agent AgentService on the D-Bus backend.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 #include <LibreSCRS/Darwin/backend/OsLogSink.h>
+#include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 #include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
@@ -100,12 +101,22 @@ Agent::Pkcs11Broker::ResolveCardKeySeam makeResolveCardKey(const LibreSCRS::Darw
 
 int main()
 {
+    // Deny debugger attach + core dumps BEFORE anything secret-bearing exists
+    // (this process will hold plaintext CAN/PIN + live PACE/SM keys). Covers
+    // ad-hoc/dev builds; hardened-runtime get-task-allow=false is the
+    // production backstop. Lives here in main(), not in a library ctor, so
+    // test binaries linking the backend stay attachable.
+    const bool hardened = LibreSCRS::Darwin::hardenAgentProcess();
+
     // Writing to a peer-closed socket must fail with EPIPE, never terminate the
     // daemon via SIGPIPE. Set process-wide as a belt-and-suspenders over the
     // per-fd SO_NOSIGPIPE the transport sets (covers the prompter socket too).
     ::signal(SIGPIPE, SIG_IGN);
 
     Agent::log::init(LibreSCRS::Darwin::makeOsLogSink(), "rs.librescrs.agent");
+    if (!hardened) {
+        Agent::log::warn("process hardening incomplete (PT_DENY_ATTACH / RLIMIT_CORE=0 failed)");
+    }
 
     const fs::path container = containerDir();
     std::error_code ec;
