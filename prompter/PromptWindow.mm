@@ -93,11 +93,22 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
 void PromptWindow::dismiss()
 {
     Impl* impl = m_impl;
-    dispatch_async(dispatch_get_main_queue(), ^{
+    // GCD main-queue blocks are NOT drained while [NSAlert runModal] spins the
+    // modal run loop (NSModalPanelRunLoopMode excludes the common-modes source
+    // that services the main queue), so a dispatch_async(main) abort would only
+    // run AFTER the modal ends — too late by definition. Enqueue directly on
+    // the main CFRunLoop in the modal mode (plus common modes for the no-modal
+    // case) and wake it. The block is idempotent: activeAlert is nil once the
+    // modal ended, so double-scheduling across modes is harmless.
+    void (^abortBlock)(void) = ^{
       if (impl->activeAlert != nil) {
           [NSApp abortModal]; // runModal returns != FirstButton -> Cancelled
       }
-    });
+    };
+    CFRunLoopRef mainLoop = CFRunLoopGetMain();
+    CFRunLoopPerformBlock(mainLoop, (__bridge CFStringRef)NSModalPanelRunLoopMode, abortBlock);
+    CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, abortBlock);
+    CFRunLoopWakeUp(mainLoop);
 }
 
 } // namespace LibreSCRS::Darwin
