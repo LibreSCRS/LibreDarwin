@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// Prompter socket server. Peer-authenticates the agent (fail-closed
-// "unauthorized"), then serves one RequestSecret / CancelCurrent per connection.
+// Prompter socket server, event-driven on GCD dispatch sources. Peer-
+// authenticates the agent at accept (fail-closed "unauthorized"), then serves
+// one RequestSecret / CancelCurrent per connection; the blocking provider call
+// runs on a concurrent worker queue so a cross-connection CancelCurrent is
+// dispatched while a modal is up.
 #include "PrompterServer.h"
 
 #include <LibreSCRS/Darwin/backend/wire/Framing.h>
@@ -13,6 +16,7 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstring>
 #include <format>
 #include <utility>
@@ -29,6 +33,27 @@ wire::PromptReply unauthorizedReply()
     return r;
 }
 
+void makeNonBlockingCloexec(int fd) noexcept
+{
+    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+}
+
+void clearNonBlocking(int fd) noexcept
+{
+    const int flags = ::fcntl(fd, F_GETFL, 0);
+    ::fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
+}
+
+// Writing to a peer-closed socket must return EPIPE, not raise SIGPIPE (the
+// prompter has no process-wide SIG_IGN like the daemon).
+void setNoSigPipe(int fd) noexcept
+{
+    int on = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+}
+
 } // namespace
 
 PrompterServer::PrompterServer(std::string socketPath, SecretProvider provider, CancelHandler cancel,
@@ -40,20 +65,32 @@ PrompterServer::PrompterServer(std::string socketPath, SecretProvider provider, 
 PrompterServer::~PrompterServer()
 {
     stop();
+    if (m_worker != nullptr) {
+        dispatch_release(m_worker);
+        m_worker = nullptr;
+    }
+    if (m_queue != nullptr) {
+        dispatch_release(m_queue);
+        m_queue = nullptr;
+    }
 }
 
 std::expected<void, std::string> PrompterServer::start()
 {
+    if (m_started) {
+        return {};
+    }
     if (m_socketPath.size() >= sizeof(sockaddr_un{}.sun_path)) {
         return std::unexpected(std::format("prompter socket path exceeds sun_path limit"));
     }
-    ::unlink(m_socketPath.c_str());
+    ::unlink(m_socketPath.c_str()); // remove a stale socket
     int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (fd < 0) {
         return std::unexpected(std::format("socket(): {}", std::strerror(errno)));
     }
     m_listen = wire::UniqueFd(fd);
-    ::fcntl(fd, F_SETFD, FD_CLOEXEC);
+    makeNonBlockingCloexec(fd);
+    setNoSigPipe(fd);
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, m_socketPath.c_str(), sizeof(addr.sun_path) - 1);
@@ -64,66 +101,171 @@ std::expected<void, std::string> PrompterServer::start()
     if (::listen(fd, 8) != 0) {
         return std::unexpected(std::format("listen(): {}", std::strerror(errno)));
     }
-    m_thread = std::thread([this] { acceptLoop(); });
+
+    if (m_queue == nullptr) {
+        m_queue = dispatch_queue_create("rs.librescrs.prompter", DISPATCH_QUEUE_SERIAL);
+    }
+    if (m_worker == nullptr) {
+        m_worker = dispatch_queue_create("rs.librescrs.prompter.worker", DISPATCH_QUEUE_CONCURRENT);
+    }
+    m_acceptSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, static_cast<uintptr_t>(fd), 0, m_queue);
+    dispatch_source_set_event_handler(m_acceptSource, ^{
+      this->onAcceptReady();
+    });
+    dispatch_resume(m_acceptSource);
+    m_started = true;
     return {};
 }
 
 void PrompterServer::stop() noexcept
 {
-    if (m_stop.exchange(true)) {
+    if (!m_started) {
         return;
     }
-    if (m_listen) {
-        ::shutdown(m_listen.get(), SHUT_RDWR);
-    }
-    if (m_thread.joinable()) {
-        m_thread.join();
-    }
+    m_started = false;
+    // Cancel every source on the loop, then barrier once more so the enqueued
+    // cancellation handlers have run before the listen fd closes (Apple's
+    // fd-source teardown discipline; per-connection fds are co-owned by their
+    // cancel handlers and close themselves). No blocking accept() to wake ->
+    // no join() -> stop() cannot hang on a pending modal.
+    dispatch_sync(m_queue, ^{
+      if (m_acceptSource != nullptr) {
+          dispatch_source_cancel(m_acceptSource);
+          dispatch_release(m_acceptSource);
+          m_acceptSource = nullptr;
+      }
+      for (auto& [id, conn] : m_connections) {
+          if (conn->readSource != nullptr) {
+              dispatch_source_cancel(conn->readSource);
+              dispatch_release(conn->readSource);
+              conn->readSource = nullptr;
+          }
+      }
+      m_connections.clear();
+    });
+    dispatch_sync(m_queue, ^{
+                  });
+    m_listen.reset();
     if (!m_socketPath.empty()) {
         ::unlink(m_socketPath.c_str());
     }
 }
 
-void PrompterServer::acceptLoop()
+void PrompterServer::onAcceptReady()
 {
-    while (!m_stop.load()) {
+    for (;;) {
         const int c = ::accept(m_listen.get(), nullptr, nullptr);
         if (c < 0) {
             if (errno == EINTR) {
                 continue;
             }
-            break; // listen socket shut down
+            break; // EWOULDBLOCK: drained
         }
-        wire::UniqueFd conn(c);
-        handleConnection(c);
+        acceptOne(c);
     }
 }
 
-void PrompterServer::handleConnection(int connFd)
+void PrompterServer::acceptOne(int connFd)
 {
-    // Peer-auth: only the agent may drive the prompter (Prompter1 "unauthorized").
+    wire::UniqueFd fd(connFd);
+    makeNonBlockingCloexec(connFd);
+    setNoSigPipe(connFd);
+
+    // Peer-auth BEFORE reading anything: only the agent may drive the prompter
+    // (Prompter1 "unauthorized"). The rejection is a tiny frame on a fresh
+    // socket; best-effort, then the fd closes.
     const auto creds = capturePeerCredentials(connFd);
     if (!creds || !m_peerAuth(*creds)) {
-        static_cast<void>(wire::sendFrame(connFd, wire::toCbor(unauthorizedReply()).encode()));
+        wire::PromptReply rejection = unauthorizedReply();
+        wire::sendPromptReplyScrubbed(connFd, rejection);
+        return; // fail closed; fd closed by UniqueFd
+    }
+
+    const std::uint64_t id = m_nextConnId++;
+    auto conn = std::make_unique<Connection>();
+    conn->id = id;
+    conn->fd = std::shared_ptr<int>(new int(fd.release()), [](int* p) {
+        if (*p >= 0) {
+            ::close(*p);
+        }
+        delete p;
+    });
+    conn->readSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, static_cast<uintptr_t>(*conn->fd), 0, m_queue);
+    dispatch_source_set_event_handler(conn->readSource, ^{
+      this->onReadReady(id);
+    });
+    // The cancel handler co-owns the fd so it stays open until GCD has fully
+    // deregistered the source (mirror of SocketTransport).
+    std::shared_ptr<int> readFdRef = conn->fd;
+    dispatch_source_set_cancel_handler(conn->readSource, ^{
+      (void)readFdRef;
+    });
+    dispatch_resume(conn->readSource);
+    m_connections.emplace(id, std::move(conn));
+}
+
+void PrompterServer::onReadReady(std::uint64_t connId)
+{
+    const auto it = m_connections.find(connId);
+    if (it == m_connections.end()) {
+        return;
+    }
+    Connection& conn = *it->second;
+    wire::PumpResult pumped = conn.reassembler.pump(*conn.fd);
+    if (pumped.frames.empty()) {
+        if (pumped.status != wire::PumpStatus::Ok) {
+            closeConnection(connId); // EOF / protocol error before a request
+        }
         return;
     }
 
-    auto frame = wire::recvFrame(connFd);
-    if (!frame.has_value()) {
-        return;
-    }
-    auto parsed = wire::parsePrompterRequest(frame->body);
+    // One request per connection: detach the fd share for the reply path and
+    // retire the read side before dispatching anything.
+    std::shared_ptr<int> fd = conn.fd;
+    wire::Frame frame = std::move(pumped.frames.front());
+    closeConnection(connId); // cancels the read source; `conn` is gone
+
+    auto parsed = wire::parsePrompterRequest(frame.body);
     if (!parsed.has_value()) {
-        return; // malformed; drop
+        return; // malformed; fail closed — the detached fd share drops here
     }
-
     if (std::holds_alternative<wire::PromptCancel>(*parsed)) {
-        m_cancel(); // dismiss the active modal; CancelCurrent has no reply
+        // Inline on the serial queue — which a modal never blocks (the modal
+        // blocks the worker + main queues), so a cross-connection cancel can
+        // always dismiss it. The handler dispatches abortModal asynchronously.
+        // CancelCurrent has no reply.
+        m_cancel();
         return;
     }
-    const auto& req = std::get<wire::PromptRequest>(*parsed);
-    const wire::PromptReply reply = m_provider(req);
-    static_cast<void>(wire::sendFrame(connFd, wire::toCbor(reply).encode()));
+
+    // The blocking provider call (dispatch_sync(main) + runModal) runs on the
+    // concurrent worker. The block holds its own copies (provider, request, fd
+    // share) and never touches `this`, so a stop()/destruction while the modal
+    // is up cannot dangle; the reply is sent + scrubbed on the worker and the
+    // fd closes with its last share. The fd turns blocking for the send: the
+    // read side is retired, and a reply near the 8 KiB cap may not fit the
+    // socket buffer in one non-blocking write.
+    const wire::PromptRequest req = std::get<wire::PromptRequest>(std::move(*parsed));
+    const SecretProvider provider = m_provider;
+    dispatch_async(m_worker, ^{
+      wire::PromptReply reply = provider(req);
+      clearNonBlocking(*fd);
+      wire::sendPromptReplyScrubbed(*fd, reply);
+    });
+}
+
+void PrompterServer::closeConnection(std::uint64_t connId)
+{
+    const auto it = m_connections.find(connId);
+    if (it == m_connections.end()) {
+        return;
+    }
+    if (it->second->readSource != nullptr) {
+        dispatch_source_cancel(it->second->readSource);
+        dispatch_release(it->second->readSource);
+        it->second->readSource = nullptr;
+    }
+    m_connections.erase(it);
 }
 
 } // namespace LibreSCRS::Darwin

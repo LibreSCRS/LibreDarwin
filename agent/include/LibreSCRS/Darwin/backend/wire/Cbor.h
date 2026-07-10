@@ -123,6 +123,12 @@ public:
     // Canonical (RFC 8949 §4.2) encoding.
     [[nodiscard]] std::vector<std::uint8_t> encode() const;
 
+    // Zero every text/byte-string payload in this tree in place, recursing
+    // through arrays and maps (map KEYS are wire field names, not secrets, and
+    // stay intact). For secret-bearing frames (prompter replies): no decoded
+    // plaintext copy may outlive its use.
+    void scrub() noexcept;
+
 private:
     std::variant<std::nullptr_t, bool, std::uint64_t, std::int64_t, double, std::string, Bytes, Array, Map> m_v;
 };
@@ -131,6 +137,10 @@ private:
 // Rejects trailing bytes, non-canonical encodings, and over-deep / over-large
 // inputs fail-closed.
 [[nodiscard]] std::expected<CborValue, CborError> decode(std::span<const std::uint8_t> bytes);
+
+// Guaranteed zeroization for secret-bearing buffers: volatile writes the
+// optimizer may not elide as dead stores (unlike a plain fill before free).
+void secureZero(std::span<std::uint8_t> bytes) noexcept;
 
 // Caps applied by decode() (also the encode side stays well within them).
 inline constexpr std::size_t kMaxCborDepth = 16;

@@ -2,8 +2,11 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
 // The private agent<->prompter CBOR protocol over the Cbor seam. Strict decode
-// (fail closed) for both directions.
+// (fail closed) for both directions; every secret-bearing buffer this layer
+// creates is zeroed before it dies.
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
+
+#include <LibreSCRS/Darwin/backend/wire/Framing.h>
 
 #include <optional>
 #include <string_view>
@@ -188,6 +191,18 @@ std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const 
     if (!mapRes) {
         return std::unexpected(mapRes.error());
     }
+    // The decoded tree holds the plaintext secret for Ok replies; zero it on
+    // EVERY exit (success, cap reject, malformed), after the copy below.
+    struct HoldScrub
+    {
+        std::optional<CborValue>& hold;
+        ~HoldScrub()
+        {
+            if (hold) {
+                hold->scrub();
+            }
+        }
+    } scrubGuard{hold};
     const Map& m = **mapRes;
 
     const auto statusIt = m.find("status");
@@ -213,7 +228,11 @@ std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const 
         if (secretIt == m.end() || secretIt->second.asBytes() == nullptr) {
             return std::unexpected(PrompterParseError::MissingField);
         }
-        reply.secret = *secretIt->second.asBytes();
+        const auto& secretBytes = *secretIt->second.asBytes();
+        if (secretBytes.size() > kMaxSecretBytes) {
+            return std::unexpected(PrompterParseError::SecretTooLarge);
+        }
+        reply.secret = secretBytes;
     }
     const auto msg = optText(m, "userMessage");
     if (!msg) {
@@ -221,6 +240,21 @@ std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const 
     }
     reply.userMessage = std::move(*msg);
     return reply;
+}
+
+void sendPromptReplyScrubbed(int connFd, PromptReply& reply) noexcept
+{
+    try {
+        CborValue msg = toCbor(reply);
+        std::vector<std::uint8_t> body = msg.encode();
+        static_cast<void>(sendFrame(connFd, body));
+        secureZero(body);
+        msg.scrub();
+    } catch (...) {
+        // Encode/send allocation failed: nothing (or a partial frame) went out;
+        // the peer times out. Fall through — the secret scrub below still runs.
+    }
+    secureZero(reply.secret);
 }
 
 } // namespace LibreSCRS::Darwin::wire

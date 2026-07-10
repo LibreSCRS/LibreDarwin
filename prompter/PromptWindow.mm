@@ -71,6 +71,11 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
 
           if (resp == NSAlertFirstButtonReturn) {
               // Read-before-hide: pull the secret out of the field NOW, then scrub.
+              // Documented residual: the NSSecureTextField/NSString internals
+              // (autoreleased, immutable) cannot be deterministically zeroed from
+              // here; their lifetime is minimised (autoreleasepool around this
+              // block) and everything downstream — reply.secret, the CBOR tree,
+              // the encoded frame — is zeroed after send (sendPromptReplyScrubbed).
               NSString* value = field.stringValue;
               const char* utf8 = value.UTF8String;
               const std::size_t len = utf8 != nullptr ? std::strlen(utf8) : 0;

@@ -3,6 +3,7 @@
 #pragma once
 #include <LibreSCRS/Darwin/backend/wire/Cbor.h>
 
+#include <cstddef>
 #include <cstdint>
 #include <expected>
 #include <span>
@@ -31,7 +32,13 @@ enum class PrompterParseError : std::uint8_t {
     WrongType,
     UnknownMessage,
     BadEnum,
+    SecretTooLarge,
 };
+
+// Upper bound for an inline prompter secret (PIN/CAN/MRZ are tens of bytes);
+// mirrors the Linux SecretMemfdReader::kMaxSecretBytes bound. parsePromptReply
+// rejects anything larger fail-closed.
+inline constexpr std::size_t kMaxSecretBytes = 8 * 1024;
 
 // RequestSecret (agent -> prompter): ask the user for one secret value.
 struct PromptRequest
@@ -70,6 +77,16 @@ struct PromptReply
 // --- decode (strict; fail closed) --------------------------------------------
 [[nodiscard]] std::expected<PrompterRequest, PrompterParseError>
 parsePrompterRequest(std::span<const std::uint8_t> body);
+// Rejects a secret over kMaxSecretBytes (SecretTooLarge). Scrubs its own
+// decoded intermediates on every exit; the caller still owns (and must zero)
+// the raw frame body and the returned reply.secret after use.
 [[nodiscard]] std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const std::uint8_t> body);
+
+// Encode + send one prompter reply on a connected fd, then zero every
+// secret-bearing buffer this side created: the CBOR tree copy, the encoded
+// frame body, and reply.secret itself. Send failures are best-effort (the
+// peer just times out); the scrub always runs. Shared by every prompter send
+// path.
+void sendPromptReplyScrubbed(int connFd, PromptReply& reply) noexcept;
 
 } // namespace LibreSCRS::Darwin::wire

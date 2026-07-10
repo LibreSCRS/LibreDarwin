@@ -87,6 +87,10 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
         return errorResult("prompter recv failed");
     }
     auto reply = wire::parsePromptReply(frame->body);
+    // The raw frame body carries the secret inline for Ok replies; zero it the
+    // moment it is parsed, whatever the outcome (parsePromptReply scrubbed its
+    // own decoded intermediates, and decode() zeroed the canonical re-encode).
+    wire::secureZero(frame->body);
     if (!reply.has_value()) {
         return errorResult("prompter reply malformed");
     }

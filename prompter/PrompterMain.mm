@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// librescrs-prompter: the agent-owned secure credential window helper. A
-// background thread serves the private prompter.sock (peer-authenticating the
-// agent); the AppKit run loop on the main thread shows the modal on demand.
+// librescrs-prompter: the agent-owned secure credential window helper. The
+// server serves the private prompter.sock on its own GCD queues (peer-
+// authenticating the agent); the AppKit run loop on the main thread shows the
+// modal on demand, and a cross-connection CancelCurrent can dismiss it.
 #include "PromptWindow.h"
 #include "PrompterServer.h"
 
@@ -82,7 +83,7 @@ int main(int /*argc*/, char** /*argv*/)
             NSLog(@"librescrs-prompter: %s", started.error().c_str());
             return 1;
         }
-        [NSApp run]; // the accept thread lives inside `server`
+        [NSApp run]; // the socket server lives on its GCD queues inside `server`
     }
     return 0;
 }

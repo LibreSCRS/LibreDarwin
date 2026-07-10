@@ -266,12 +266,42 @@ std::expected<CborValue, CborError> decode(std::span<const std::uint8_t> bytes)
     if (QCBORDecode_Finish(&ctx) != QCBOR_SUCCESS) {
         return std::unexpected(CborError::TrailingBytes);
     }
-    // Malleability guard: the input must equal our canonical re-encoding.
-    const std::vector<std::uint8_t> canonical = value->encode();
-    if (canonical.size() != bytes.size() || !std::equal(canonical.begin(), canonical.end(), bytes.begin())) {
+    // Malleability guard: the input must equal our canonical re-encoding. The
+    // re-encode is a full frame copy — for secret-bearing frames (prompter
+    // replies) it holds the plaintext, so zero it before it dies.
+    std::vector<std::uint8_t> canonical = value->encode();
+    const bool matches =
+        canonical.size() == bytes.size() && std::equal(canonical.begin(), canonical.end(), bytes.begin());
+    secureZero(canonical);
+    if (!matches) {
         return std::unexpected(CborError::NotCanonical);
     }
     return value;
+}
+
+void CborValue::scrub() noexcept
+{
+    if (auto* text = std::get_if<std::string>(&m_v)) {
+        secureZero({reinterpret_cast<std::uint8_t*>(text->data()), text->size()});
+    } else if (auto* bytes = std::get_if<Bytes>(&m_v)) {
+        secureZero({bytes->data(), bytes->size()});
+    } else if (auto* arr = std::get_if<Array>(&m_v)) {
+        for (auto& v : *arr) {
+            v.scrub();
+        }
+    } else if (auto* map = std::get_if<Map>(&m_v)) {
+        for (auto& [key, v] : *map) {
+            v.scrub();
+        }
+    }
+}
+
+void secureZero(std::span<std::uint8_t> bytes) noexcept
+{
+    volatile std::uint8_t* p = bytes.data();
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        p[i] = 0;
+    }
 }
 
 } // namespace LibreSCRS::Darwin::wire
