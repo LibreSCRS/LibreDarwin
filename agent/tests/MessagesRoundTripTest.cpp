@@ -4,9 +4,20 @@
 // Every request round-trips through the typed model and the canonical CBOR wire
 // (parseRequest(encode(toCbor(env))) == env). Reply/event builders produce the
 // reconciled shapes. Malformed / unknown requests fail closed.
+//
+// This binary doubles as the cross-implementation fixture generator for the
+// LibreMac Swift client's decode tests: run with `--dump-fixtures <dir>` to
+// write the canonical FRAME BODY bytes (CBOR only, no 8-byte frame header) of
+// one instance of every reply/event shape to `<dir>/<ShapeName>.cbor`, instead
+// of running the gtest suite. See dumpFixtures() below.
 #include <LibreSCRS/Darwin/backend/wire/Messages.h>
 
 #include <gtest/gtest.h>
+
+#include <cstdio>
+#include <filesystem>
+#include <fstream>
+#include <string_view>
 
 using namespace LibreSCRS::Darwin::wire;
 
@@ -164,4 +175,112 @@ TEST(MessagesRoundTrip, EveryEventEncodesWithItsTag)
     EXPECT_EQ(*toCbor(AgentQuiesced{QuiesceReason::SystemSleep}).find("t")->asText(), "AgentQuiesced");
 }
 
+// --- --dump-fixtures: cross-implementation fixture generator ----------------
+// One representative instance of every reply/event shape, written as raw
+// canonical CBOR frame bodies (no frame header) for the LibreMac Swift
+// client's MessagesRoundTripTests to decode and typecheck against. Covers the
+// op-path shapes (OpProgress/OpResultReady/OpFinished) the card-free smoke
+// tests cannot reach.
+
+CertInfo makeSampleCertInfo()
+{
+    CertInfo ci;
+    ci.certId = "deadbeef";
+    ci.signingCapable = true;
+    ci.fields["Subject"]["CN"] = CertField{"cn.subject.key", "Common Name", "John Doe"};
+    ci.keyUsageBits = 1;
+    ci.ekus = {"clientAuth"};
+    ci.chainSubjectCns = {"Root CA"};
+    ci.trustStatus = 0;
+    return ci;
+}
+
+void writeFixture(const std::filesystem::path& dir, std::string_view name, const CborValue& v)
+{
+    const auto bytes = v.encode();
+    std::ofstream out(dir / (std::string(name) + ".cbor"), std::ios::binary);
+    out.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+int dumpFixtures(const std::filesystem::path& dir)
+{
+    std::filesystem::create_directories(dir);
+
+    // ---- replies ----
+    writeFixture(dir, "HelloAck", makeReply(1, HelloAck{"0.1.0", {"pki", "sign"}}));
+    writeFixture(dir, "OpStarted", makeReply(2, OpStarted{42}));
+    {
+        StateReply state;
+        state.readers.push_back(ReaderState{"r1", "Reader One", true, std::string("c1")});
+        state.cards.push_back(CardState{"c1", "r1", 0x3, PreReadAuthMethod::PaceCan});
+        writeFixture(dir, "State", makeReply(3, state));
+    }
+    {
+        CertListReply certList;
+        certList.certs.push_back(makeSampleCertInfo());
+        writeFixture(dir, "CertList", makeReply(4, certList));
+    }
+    writeFixture(dir, "CertDer", makeReply(5, CertDerReply{{0xDE, 0xAD, 0xBE, 0xEF}}));
+    {
+        ConfigReply config;
+        config.entries.emplace("DefaultLevel", CborValue(std::string("b-t")));
+        writeFixture(dir, "Config", makeReply(6, config));
+    }
+    writeFixture(dir, "Ack", makeReply(7, AckReply{}));
+    writeFixture(dir, "SignRecovery", makeSignRecoveryReply(8, SignResult{5, SignMeta{"pades", "b-lta", true, true}}));
+    writeFixture(
+        dir, "ErrCode",
+        makeErrorReply(9, ErrInfo{ErrorCode::CardRemoved, std::string("cardRemoved"), std::string("Card removed")}));
+    writeFixture(dir, "ErrName", makeErrorReply(10, ErrInfo{SyncError::UnknownCard, std::nullopt, std::nullopt}));
+
+    // ---- events ----
+    writeFixture(dir, "ReaderAdded", toCbor(ReaderAdded{ReaderState{"r1", "Reader One", false, std::nullopt}}));
+    writeFixture(dir, "ReaderRemoved", toCbor(ReaderRemoved{"r1"}));
+    writeFixture(dir, "CardAdded", toCbor(CardAdded{CardState{"c1", "r1", 0x3, PreReadAuthMethod::PaceCan}}));
+    writeFixture(dir, "CardRemoved", toCbor(CardRemoved{"c1"}));
+    {
+        std::map<std::string, CborValue> props;
+        props.emplace("hasCard", CborValue(true));
+        writeFixture(dir, "PropertyChanged", toCbor(PropertyChanged{"r1", "org.librescrs.Reader1", props}));
+    }
+    writeFixture(dir, "ConfigChanged", toCbor(ConfigChanged{"DefaultLevel"}));
+    // Fractional progress: 0.5 lands as f16 on the wire via QCBOR preferred serialization.
+    writeFixture(dir, "OpProgress", toCbor(OpProgress{9, OperationPhase::Signing, 0.5, std::nullopt, std::nullopt}));
+    {
+        IdentityResult idResult;
+        idResult.fields["MRZ"]["Name"] = IdentityField{"name.key", "Name", "text", std::string("JOHN DOE")};
+        writeFixture(dir, "OpResultReadyIdentity", toCbor(OpResultReady{20, idResult}));
+    }
+    {
+        PhotoResult photoResult;
+        photoResult.photos.push_back(PhotoItem{"MRZ:Photo", 0});
+        writeFixture(dir, "OpResultReadyPhoto", toCbor(OpResultReady{21, photoResult}));
+    }
+    {
+        CertListResult certListResult;
+        certListResult.certs.push_back(makeSampleCertInfo());
+        writeFixture(dir, "OpResultReadyCertificates", toCbor(OpResultReady{22, certListResult}));
+    }
+    // fd index (never inline bytes) for the signed artifact.
+    writeFixture(dir, "OpResultReadySign",
+                 toCbor(OpResultReady{23, SignResult{5, SignMeta{"pades", "b-lta", true, true}}}));
+    writeFixture(dir, "OpFinished",
+                 toCbor(OpFinished{24, OperationStatus::Error, ErrorCode::CardRemoved, "op.failed", "Card removed"}));
+    writeFixture(dir, "AgentQuiesced", toCbor(AgentQuiesced{QuiesceReason::ScreenLocked}));
+
+    std::fprintf(stderr, "wrote fixtures to %s\n", dir.c_str());
+    return 0;
+}
+
 } // namespace
+
+int main(int argc, char** argv)
+{
+    for (int i = 1; i < argc; ++i) {
+        if (std::string_view(argv[i]) == "--dump-fixtures" && i + 1 < argc) {
+            return dumpFixtures(std::filesystem::path(argv[i + 1]));
+        }
+    }
+    ::testing::InitGoogleTest(&argc, argv);
+    return RUN_ALL_TESTS();
+}

@@ -33,7 +33,7 @@ target_link_options(OsLogSinkTest PRIVATE -fexperimental-library)
 add_test(NAME OsLogSinkTest COMMAND OsLogSinkTest)
 
 # Wire layer: canonical CBOR round-trips + framing/SCM_RIGHTS/FD_CLOEXEC + messages.
-foreach(wire_test CborRoundTripTest FramingTest FrameReassemblerTest MessagesRoundTripTest)
+foreach(wire_test CborRoundTripTest FramingTest FrameReassemblerTest)
     add_executable(${wire_test} ${wire_test}.cpp)
     target_link_libraries(${wire_test}
         PRIVATE
@@ -44,6 +44,21 @@ foreach(wire_test CborRoundTripTest FramingTest FrameReassemblerTest MessagesRou
     target_link_options(${wire_test} PRIVATE -fexperimental-library)
     add_test(NAME ${wire_test} COMMAND ${wire_test})
 endforeach()
+
+# MessagesRoundTripTest supplies its own main() (unlike the other wire_test
+# targets): besides the normal gtest run it doubles as the cross-implementation
+# fixture generator for the LibreMac Swift client's decode tests
+# (`--dump-fixtures <dir>` writes one canonical frame body per reply/event
+# shape instead of running the test suite), so it links GTest::gtest, not
+# GTest::gtest_main.
+add_executable(MessagesRoundTripTest MessagesRoundTripTest.cpp)
+target_link_libraries(MessagesRoundTripTest
+    PRIVATE
+        LibreDarwinAgentBackend
+        GTest::gtest)
+target_compile_options(MessagesRoundTripTest PRIVATE -fexperimental-library)
+target_link_options(MessagesRoundTripTest PRIVATE -fexperimental-library)
+add_test(NAME MessagesRoundTripTest COMMAND MessagesRoundTripTest)
 
 # Backend: peer identity + the socket transport (real bound socket + GCD loop).
 foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest)
