@@ -403,6 +403,7 @@ void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const 
                     .prompter = *core.sharedCryptoContext()->prompter,
                     .serializer = *core.sharedCryptoContext()->serializer,
                     .credentials = core.credentialCache(),
+                    .readCache = core.cardReadCache(),
                     .cardKey = cardKey,
                     .readerName = readerName,
                     .requester = requester,

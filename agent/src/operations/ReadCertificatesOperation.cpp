@@ -24,6 +24,21 @@ void ReadCertificatesOperation::doWork()
     // Card-I/O has no meaningful completion percentage — honest spinner.
     setIndeterminate(true);
     setPhase(static_cast<std::uint32_t>(OperationPhase::Connecting));
+
+    // Cache hit: serve the certs from RAM without opening a session or re-walking
+    // the card. The per-insertion cache is dropped on CardRemoved.
+    if (auto cached = m_deps.readCache.getCertificates(m_deps.cardKey)) {
+        // Backend teardown in progress: skip the wire completion (the reply
+        // channel is being torn down), matching the miss-path gate below —
+        // emitResult is not shutdown-gated, finish() is.
+        if (shutdownRequested()) {
+            return;
+        }
+        static_cast<void>(emitResult(ResultPayload{*cached}));
+        finish(OperationStatus::Ok, ErrorCode::None, "op.ok", "Certificates returned");
+        return;
+    }
+
     CertReadFlow flow(CertReadFlowDeps{
         .holder = *m_deps.holder,
         .certReader = m_deps.certReader,
@@ -55,6 +70,10 @@ void ReadCertificatesOperation::doWork()
         finish(OperationStatus::Error, result.code, std::move(result.msgKey), std::move(result.msgFallback));
         return;
     }
+
+    // Populate the cache so the next read serves from RAM. Past the
+    // shutdownRequested() gate above, so it never writes during teardown.
+    m_deps.readCache.putCertificates(m_deps.cardKey, result.certs);
 
     // Emit Certificates1.Result BEFORE Finished (strict ordering contract).
     // Certificates1 delivers inline (no memfd seal), so delivery cannot fail —

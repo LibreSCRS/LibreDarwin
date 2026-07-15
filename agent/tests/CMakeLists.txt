@@ -65,7 +65,7 @@ target_link_options(MessagesRoundTripTest PRIVATE -fexperimental-library)
 add_test(NAME MessagesRoundTripTest COMMAND MessagesRoundTripTest)
 
 # Backend: peer identity + the socket transport (real bound socket + GCD loop).
-foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest)
+foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest ReadCertificatesOperationTest)
     add_executable(${backend_test} ${backend_test}.cpp)
     target_link_libraries(${backend_test}
         PRIVATE
@@ -76,6 +76,17 @@ foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest 
     target_link_options(${backend_test} PRIVATE -fexperimental-library)
     add_test(NAME ${backend_test} COMMAND ${backend_test})
 endforeach()
+
+# White-box unit test of a backend-private operation: the ops headers live under
+# src/ (PRIVATE on the backend target, so they stay off the public surface), so
+# this test reaches them directly the way the backend's own .cpp files do.
+target_include_directories(ReadCertificatesOperationTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+# It also builds a session via the LM-internal detached-session factory
+# LibreSCRS::SmartCard::detail::makeDetachedCardSession, whose prototype in
+# <LibreSCRS/SmartCard/CardSession.h> is guarded behind LIBRESCRS_INTERNAL_BUILD.
+# Only this TEST TU opts in; production agent targets never define it, so the
+# internal surface stays out of the shipped binaries.
+target_compile_definitions(ReadCertificatesOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
 
 # libFuzzer target for the CBOR decoder (untrusted-parser hardening, D1). Off by
 # default; needs a clang WITH the libFuzzer runtime (e.g. Homebrew LLVM) — Apple

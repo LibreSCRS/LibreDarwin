@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Agent/value/CertSnapshot.h>
+#include <LibreSCRS/Agent/cache/CardReadCache.h>
 #include <LibreSCRS/Agent/cache/CredentialCache.h>
 #include <LibreSCRS/Agent/operations/CertReadFlow.h>
 #include <LibreSCRS/Agent/operations/OperationBase.h>
@@ -26,6 +27,8 @@ public:
         PrompterClientBase& prompter;
         PromptSerializer& serializer;
         CredentialCache& credentials;
+        // Per-insertion cache: a hot entry serves the certs from RAM.
+        CardReadCache& readCache;
         std::string cardKey;
         // Human reader name, used by the OperationManager to lazily build this
         // reader's CardSessionHolder and threaded into the flow's per-request
