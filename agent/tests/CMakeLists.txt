@@ -18,6 +18,10 @@ target_link_libraries(WireContractGuardTest
         GTest::gtest_main)
 target_compile_options(WireContractGuardTest PRIVATE -fexperimental-library -Werror=switch)
 target_link_options(WireContractGuardTest PRIVATE -fexperimental-library)
+# The CDDL is the wire contract of record; the guard parses its `error-code`
+# group and compares it value-for-value with the upstream taxonomy.
+target_compile_definitions(WireContractGuardTest PRIVATE
+    LIBREDARWIN_WIRE_CDDL="${CMAKE_CURRENT_SOURCE_DIR}/../wire/librescrs-agent.cddl")
 add_test(NAME WireContractGuardTest COMMAND WireContractGuardTest)
 
 # OsLogSink smoke: the sink is constructible + emits each severity (os_log has no

@@ -39,12 +39,12 @@ pre-read-auth  = &( None: 0, BacMrz: 1, PaceCan: 2 )
 op-phase  = &( Created: 0, Connecting: 1, AwaitingConsent: 2, Authenticating: 3,
                Reading: 4, Signing: 5, Timestamping: 6, Done: 7 )
 op-status = &( Ok: 0, Cancelled: 1, Error: 2 )
-; 18 stable, append-only values — MUST match LibreAgent value/ErrorTaxonomy.h.
+; 19 stable, append-only values — MUST match LibreAgent value/ErrorTaxonomy.h.
 error-code = &( None: 0, CardRemoved: 1, CredentialWrong: 2, CredentialBlocked: 3,
   CommunicationError: 4, ParseError: 5, UnsupportedCard: 6, AuthFailed: 7,
   PrompterError: 8, CapabilityMissing: 9, WatchdogTimeout: 10, KeyNotFound: 11,
   KeyAmbiguous: 12, CertExpiredBlocked: 13, ChainIncomplete: 14, TsaUnreachable: 15,
-  SigningEngineError: 16, RateLimited: 17 )
+  SigningEngineError: 16, RateLimited: 17, EngineUnavailable: 18 )
 
 ; ---- requests (client -> agent) ----
 request  = { req: uint, req-body }

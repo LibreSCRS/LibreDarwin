@@ -1,36 +1,30 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// Cross-stack wire-contract drift guard — macOS (LibreDarwin) half.
+// Cross-stack wire-contract drift guard.
 //
-// The macOS twin of LibreLinux/agent/tests/WireContractGuardTest.cpp. The socket
-// wire contract (agent/wire/librescrs-agent.cddl) mirrors, value-for-value, the
-// Linux-session-owned D-Bus contract; the CBOR message enums on the wire are
-// re-typed by hand (the CDDL enum literals) and by the future LibreMac Swift
-// client mirror. Each mirror pins itself to hard-coded literals in its OWN stack
-// but not to the upstream LibreAgent/LibreMiddleware symbol — so a core renumber
-// (or an ErrorCode append) would go silently stale on the wire + on the client.
+// The socket wire contract (agent/wire/librescrs-agent.cddl) mirrors, value-for-
+// value, the canonical D-Bus agent surface; the CBOR message enums on the wire
+// are re-typed by hand as CDDL literals, and again by the Swift client. Each
+// mirror pins itself to hard-coded literals in its OWN stack but not to the
+// upstream enum — so a renumber (or an append) would go silently stale on the
+// wire and on the client.
 //
-// This fixture is the ONE place on the macOS side that ties the canonical wire
-// literals to the upstream symbols. The LibreDarwin agent backend links
-// LibreAgent::Core (which re-exports LibreMiddleware Plugin/Auth PUBLIC), so a
-// static_assert here breaks the build the instant a core enum renumbers — the
-// half no LM-free client test can catch (a client stack cannot link LM).
-//
-// The matching CDDL (agent/wire/librescrs-agent.cddl) and the future LibreMac
-// Swift client mirror pin to the SAME literals; together they chain
-//   LibreAgent/LM  <->  CBOR/CDDL wire literals  <->  LibreMac
-// without the LM-free client ever linking LM.
+// This fixture is the one place that ties those wire literals back to the
+// upstream symbols. The agent backend links LibreAgent::Core (which re-exports
+// the LibreMiddleware Plugin/Auth types), so a static_assert here breaks the
+// build the instant a core enum renumbers — the half no client-side test can
+// catch, because a client stack cannot link the middleware.
 //
 // === Mirror manifest — keep these in lockstep ===
-//   ErrorCode        : LibreAgent value/ErrorTaxonomy.h (SOURCE, pinned to the
-//                      canonical dbus/org.librescrs.Agent.Operation1.xml on Linux)
-//                      <-> CDDL `error-code` <-> LibreMac ErrorCode mirror
-//   capability bits  : LibreMiddleware Plugin/PluginTypes.h CardCapabilities
-//                      <-> CDDL `capability-bit` <-> LibreMac Cap mirror
-//   pre-read auth    : LibreMiddleware Auth/AuthRequirement.h PreReadAuthMethod
+//   ErrorCode        : LibreSCRS/Agent/value/ErrorTaxonomy.h (SOURCE)
+//                      <-> CDDL `error-code` <-> the Swift client's ErrorCode
+//   capability bits  : LibreSCRS/Plugin/PluginTypes.h CardCapabilities
+//                      <-> CDDL `capability-bit` <-> the Swift client's Cap
+//   pre-read auth    : LibreSCRS/Auth/AuthRequirement.h PreReadAuthMethod
 //                      <-> CDDL `pre-read-auth`
-//   op phase/status  : LibreAgent OperationPhase.h <-> CDDL `op-phase`/`op-status`
+//   op phase/status  : LibreSCRS/Agent/OperationPhase.h
+//                      <-> CDDL `op-phase`/`op-status`
 //   message tags     : CDDL request/event `t:` tags — count-pinned below
 
 #include <LibreSCRS/Agent/value/ErrorTaxonomy.h>
@@ -41,9 +35,16 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
+#include <fstream>
+#include <regex>
+#include <sstream>
+#include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -104,16 +105,70 @@ static_assert(u(OperationStatus::Ok) == 0u, "wire contract: op-status Ok drifted
 static_assert(u(OperationStatus::Cancelled) == 1u, "wire contract: op-status Cancelled drifted from 1");
 static_assert(u(OperationStatus::Error) == 2u, "wire contract: op-status Error drifted from 2");
 
-// --- agent ErrorCode: renumber anchor (18 stable, append-only) ---------------
-// ErrorCode is append-only on the wire. Pinning first + last value + count
-// catches a RENUMBER of the existing range. An APPEND leaves first/last green,
-// so the count assert is the tripwire: bump it (and the CDDL `error-code` + the
-// LibreMac mirror) when the taxonomy grows.
+// --- agent ErrorCode <-> CDDL `error-code` (THE anchor) ----------------------
+// Canonical wire name per enumerator. NO default case: with -Werror=switch on
+// this target an appended enumerator is a compile error until it is named here,
+// and the runtime comparison below then fails until the CDDL enumerates it too.
+constexpr const char* wireNameFor(ErrorCode code) noexcept
+{
+    switch (code) {
+    case ErrorCode::None:
+        return "None";
+    case ErrorCode::CardRemoved:
+        return "CardRemoved";
+    case ErrorCode::CredentialWrong:
+        return "CredentialWrong";
+    case ErrorCode::CredentialBlocked:
+        return "CredentialBlocked";
+    case ErrorCode::CommunicationError:
+        return "CommunicationError";
+    case ErrorCode::ParseError:
+        return "ParseError";
+    case ErrorCode::UnsupportedCard:
+        return "UnsupportedCard";
+    case ErrorCode::AuthFailed:
+        return "AuthFailed";
+    case ErrorCode::PrompterError:
+        return "PrompterError";
+    case ErrorCode::CapabilityMissing:
+        return "CapabilityMissing";
+    case ErrorCode::WatchdogTimeout:
+        return "WatchdogTimeout";
+    case ErrorCode::KeyNotFound:
+        return "KeyNotFound";
+    case ErrorCode::KeyAmbiguous:
+        return "KeyAmbiguous";
+    case ErrorCode::CertExpiredBlocked:
+        return "CertExpiredBlocked";
+    case ErrorCode::ChainIncomplete:
+        return "ChainIncomplete";
+    case ErrorCode::TsaUnreachable:
+        return "TsaUnreachable";
+    case ErrorCode::SigningEngineError:
+        return "SigningEngineError";
+    case ErrorCode::RateLimited:
+        return "RateLimited";
+    case ErrorCode::EngineUnavailable:
+        return "EngineUnavailable";
+    }
+    return nullptr; // not a taxonomy value (used to probe past the end)
+}
+
+// Size derived from the switch itself (values outside it fall through to
+// nullptr), so the count tracks the switch automatically and no separate
+// constant can go stale — the failure mode of the count pin this replaced.
+constexpr std::uint32_t taxonomyCount() noexcept
+{
+    std::uint32_t count = 0;
+    while (wireNameFor(static_cast<ErrorCode>(count)) != nullptr) {
+        ++count;
+    }
+    return count;
+}
+
+constexpr std::uint32_t kTaxonomyCount = taxonomyCount();
 static_assert(u(ErrorCode::None) == 0u, "wire contract: ErrorCode::None drifted from 0");
-static_assert(u(ErrorCode::RateLimited) == 17u,
-              "wire contract: ErrorCode::RateLimited (last) drifted; mirror in CDDL error-code + LibreMac");
-static_assert(u(ErrorCode::RateLimited) + 1u == 18u,
-              "wire contract: ErrorCode count changed; append to CDDL error-code + LibreMac mirror + bump this guard");
+static_assert(kTaxonomyCount >= 19u, "the taxonomy is append-only; it can only grow");
 
 // --- CDDL message `t:` tags: presence + count drift guard --------------------
 // The socket message vocabulary (request + event `t:` tags) has no upstream enum
@@ -133,6 +188,47 @@ constexpr std::array<std::string_view, 27> kMessageTags{
 constexpr std::size_t kMessageTagCount = 27; // 17 requests + 10 events
 static_assert(kMessageTags.size() == kMessageTagCount,
               "wire contract: socket message vocabulary changed; update the CDDL + wire/Messages + this guard");
+
+std::string slurp(const char* path)
+{
+    std::ifstream in(path);
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    return buffer.str();
+}
+
+// Extracts the `Name: <value>` pairs of the CDDL `error-code = &( ... )` group.
+// CDDL comments run from ';' to end of line and are stripped first so a commented
+// value can never be mistaken for a live one.
+std::vector<std::pair<std::uint32_t, std::string>> parseCddlErrorCode(const std::string& cddl)
+{
+    std::vector<std::pair<std::uint32_t, std::string>> entries;
+    const std::size_t start = cddl.find("error-code");
+    if (start == std::string::npos) {
+        return entries;
+    }
+    const std::size_t open = cddl.find('(', start);
+    const std::size_t close = cddl.find(')', open);
+    if (open == std::string::npos || close == std::string::npos) {
+        return entries;
+    }
+
+    std::string block = cddl.substr(open + 1, close - open - 1);
+    std::istringstream lines(block);
+    std::string line;
+    std::string stripped;
+    while (std::getline(lines, line)) {
+        stripped += line.substr(0, line.find(';'));
+        stripped += '\n';
+    }
+
+    const std::regex entryRe(R"(([A-Za-z][A-Za-z0-9]*)\s*:\s*(\d+))");
+    for (auto it = std::sregex_iterator(stripped.begin(), stripped.end(), entryRe); it != std::sregex_iterator();
+         ++it) {
+        entries.emplace_back(static_cast<std::uint32_t>(std::stoul((*it)[2].str())), (*it)[1].str());
+    }
+    return entries;
+}
 
 } // namespace
 
@@ -191,4 +287,34 @@ TEST(WireContractGuard, MacOsAnchorsHold)
         }
     }
     SUCCEED();
+}
+
+// The CDDL is the wire contract of record and the Swift client mirrors it by
+// hand; neither links LM, so this is the only place they can be tied back to the
+// upstream taxonomy. wireNameFor()'s switch makes an APPEND a compile error, and
+// this test makes a stale CDDL a test failure: a code the CDDL omits still
+// reaches the wire, where a hand mirror that lacks it fails the decode closed.
+TEST(WireContractGuard, CddlErrorCodeMatchesAgentEnumValueForValue)
+{
+    const std::string cddl = slurp(LIBREDARWIN_WIRE_CDDL);
+    ASSERT_FALSE(cddl.empty()) << "wire CDDL source path not wired";
+
+    const auto entries = parseCddlErrorCode(cddl);
+    ASSERT_FALSE(entries.empty()) << "could not locate the `error-code = &( ... )` group in librescrs-agent.cddl — "
+                                     "if it was reformatted, keep the `Name: <value>` entries this guard parses";
+
+    EXPECT_EQ(entries.size(), kTaxonomyCount)
+        << "the CDDL enumerates " << entries.size() << " error codes but the agent ErrorCode enum has "
+        << kTaxonomyCount << " — the CDDL is the macOS wire contract of record, keep the two identical (append-only). "
+        << "A code the CDDL omits still reaches the wire and fails the Swift client's decode closed";
+
+    const std::size_t common = std::min<std::size_t>(entries.size(), kTaxonomyCount);
+    for (std::size_t i = 0; i < common; ++i) {
+        EXPECT_EQ(entries[i].first, static_cast<std::uint32_t>(i))
+            << "the CDDL error-code group is not contiguous at entry " << i
+            << " — the taxonomy is append-only from 0, never renumbered";
+        EXPECT_EQ(entries[i].second, wireNameFor(static_cast<ErrorCode>(i)))
+            << "the CDDL names error-code " << i << " '" << entries[i].second << "' but the agent enum calls it '"
+            << wireNameFor(static_cast<ErrorCode>(i)) << "'";
+    }
 }
