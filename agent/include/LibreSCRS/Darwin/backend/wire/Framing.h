@@ -11,7 +11,7 @@
 
 namespace LibreSCRS::Darwin::wire {
 
-// macOS socket framing (design §4.1). A frame is a `uint32` little-endian body
+// macOS socket framing. A frame is a `uint32` little-endian body
 // length + a `uint32` little-endian fd count + a CBOR (RFC 8949) body; the CDDL
 // schema (agent/wire/librescrs-agent.cddl) + the WireContractGuard pin the
 // message shapes. File descriptors (signed artifact / photo / sign input) ride

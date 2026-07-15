@@ -20,7 +20,7 @@ namespace LibreSCRS::Darwin {
 // TOCTOU-safe SecTaskCreateWithAuditToken -> signing identifier + app-group
 // entitlement, and checks a config/MDM allow-list.
 //
-// Posture (design §4.1): the three default actions (configure / sign /
+// Posture: the three default actions (configure / sign /
 // pkcs11.login) are DEFAULT-ALLOW (the signing PIN is the human-presence proof;
 // the core rate-limiter caps abuse) unless a site allow-list is configured. The
 // trust tier (configure.trust) is allow-list-gated (empty list => denied to all;

@@ -3,13 +3,10 @@
 ;
 ; LibreSCRS macOS agent socket wire contract — CBOR (RFC 8949) / CDDL (RFC 8610).
 ;
-; PROJECT wire contract for the LibreDarwin macOS agent socket transport. The
-; canonical SEMANTIC source of truth is the Linux-session-owned D-Bus agent
-; surface (LibreLinux/agent/dbus/*.xml); this schema MIRRORS it for the macOS
-; socket transport and does NOT fork it. Reconciled against
-; LibreLinux/agent/dbus/*.xml @ d00aa90 on 2026-07-07 (deltas R1-R11, see
-; knowledge/plans/2026-07-07-libredarwin-p1b-macos-agent-backend.md). Aligns with
-; knowledge/specs/2026-07-06-macos-agent-socket-protocol-design.md §4.
+; Wire contract for the macOS agent socket transport. The canonical SEMANTIC
+; source of truth is the D-Bus agent interface surface; this schema MIRRORS it
+; for the socket transport and does NOT fork it — a shape that differs here is a
+; bug in this file, not a dialect.
 ;
 ; Frame on the wire: uint32 little-endian body length + uint32 little-endian fd
 ; count + one `message` CBOR map. File descriptors (signed artifact, photo, sign
@@ -142,6 +139,21 @@ op-progress = ( t: "OpProgress", op: uint, phase: op-phase,
                 ? progress: float, ? indeterminate: bool, ? watchdogSecs: uint )
 ; R8: the typed Result fires BEFORE Finished (canonical Operation1 ordering); a
 ; distinct op-result-ready event carries the payload, op-finished carries no result.
+; Delivery invariant — a result cannot be missed by subscribing late, which is
+; why op-result-ready needs no pull-based recovery and get-sign-result is
+; Sign-only:
+;   Every frame of an op (the op-started reply, op-progress, op-result-ready,
+;   op-finished) is written to the connection that issued the request, in order,
+;   on one serial queue. Delivery eligibility is established when the connection
+;   is accepted — before the request that starts the op is parsed — so there is no
+;   separate subscription channel to arm afterwards and nothing to race. A client
+;   that reads its socket late loses nothing: unread frames stay queued. The
+;   result cannot overtake the op-started reply either, because that reply is
+;   enqueued inside the same serial-queue block that starts the op, and writes
+;   drain FIFO.
+;   Losing the connection is not a late subscriber: it cancels the op and evicts
+;   its recovery state, and a reconnect is issued a fresh connId/CallerToken, so
+;   there is no cross-connection resume to serve.
 op-result-ready = ( t: "OpResultReady", op: uint, result: op-result )
 op-finished = ( t: "OpFinished", op: uint, status: op-status, code: error-code,
                 msgKey: tstr, msgFallback: tstr )

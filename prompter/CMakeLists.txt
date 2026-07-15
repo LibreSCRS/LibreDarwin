@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# The agent-owned macOS credential window (secure PIN / CAN / MRZ). The Linux
-# twin is LibreLinux/prompter (librescrs-pinentry-kde). LM-free: the server logic
-# links only the wire core; the AppKit window is the secure-input surface. The
+# The agent-owned macOS credential window (secure PIN / CAN / MRZ). LM-free: the
+# server logic links only the wire core; the AppKit window is the secure-input
+# surface. The
 # secret flows prompter -> agent only, never through a client; the prompter
 # peer-authenticates that the caller is the agent.
 

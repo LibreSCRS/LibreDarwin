@@ -6,7 +6,7 @@
 // authorizer, the agent-owned prompter client, and the plugin capability resolver
 // around the neutral LibreAgent::AgentCore, then drives the process CFRunLoop while
 // the transport's GCD queue services the socket and the MonitorBridge pumps card
-// presence. Mirrors LibreLinux/agent AgentService on the D-Bus backend.
+// presence.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 #include <LibreSCRS/Darwin/backend/OsLogSink.h>
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>

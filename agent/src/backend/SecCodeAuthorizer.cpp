@@ -120,7 +120,7 @@ bool SecCodeAuthorizer::authorize(std::string_view actionId, const Agent::Caller
     // honoured ONLY when it is also bound to the app-group entitlement (Apple
     // provisions app groups per Team ID). If an allow-list is configured without a
     // requiredAppGroup, the gate cannot be a real boundary -> fail closed.
-    // NOTE (design §4.1): the fully-robust bind is SecCode validity vs a designated
+    // NOTE: the fully-robust bind is SecCode validity vs a designated
     // requirement (anchor apple + Team OU), which needs the SPI
     // SecCodeCreateWithAuditToken; the public SecTask path reports claimed identity
     // only. The app-group requirement is the strongest PUBLIC-API hardening; a

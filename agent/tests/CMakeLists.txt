@@ -9,7 +9,7 @@ find_package(GTest REQUIRED)
 # WireContractGuard: compile-time static_asserts tying the wire enums to the
 # core symbols (a renumber breaks the build). Links the backend lib ->
 # LibreAgent::Core -> LibreMiddleware Plugin/Auth, so the asserts see the
-# upstream enums. Mirrors LibreLinux/agent/tests/WireContractGuardTest.cpp.
+# upstream enums.
 add_executable(WireContractGuardTest WireContractGuardTest.cpp)
 target_link_libraries(WireContractGuardTest
     PRIVATE

@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # macOS backend for LibreAgent::Core + the librescrs-agent launchd daemon.
-# Mirrors LibreLinux/agent (which builds LibreLinuxAgentCore + the daemon on the
-# D-Bus backend); here the backend is the App-Group socket + CBOR + SecCode.
-# TODO: every .cpp body is a stub pending the real macOS backend implementation.
+# The backend is the App-Group socket + CBOR + SecCode.
 
 find_library(SECURITY_FRAMEWORK Security REQUIRED)
 find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
@@ -44,11 +42,10 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/OsLogSink.cpp
     src/backend/ProcessHardening.cpp
     src/backend/wire/Messages.cpp # Messages reuses the LibreAgent value enums
-    # Operation subclasses: platform-neutral twins copied verbatim from
-    # LibreLinux/agent/src/operations (they depend only on core flows +
-    # OperationBase + the OperationChannel interface, never on the transport).
-    # No ODR clash — LibreDarwin is a separate binary. Cross-track:
-    # promote-operation-subclasses-to-core would let both hosts share one copy.
+    # Operation subclasses: platform-neutral, so they depend only on core flows +
+    # OperationBase + the OperationChannel interface, never on the transport.
+    # They are duplicated per host rather than shared from the core; promoting
+    # them into the core would let every host share one copy.
     src/operations/ReadIdentityOperation.cpp
     src/operations/GetPhotoOperation.cpp
     src/operations/ReadCertificatesOperation.cpp
@@ -72,14 +69,14 @@ target_link_libraries(LibreDarwinAgentBackend
         ${IOKIT_FRAMEWORK})
 
 # AppleClang needs the experimental C++23 library flag when compiling against
-# LM's <expected>/<stop_token> (feedback_apple_clang_experimental). Do NOT swap
-# for a backport/polyfill — the flag is the documented upstream mechanism.
+# LM's <expected>/<stop_token>. Do NOT swap for a backport/polyfill — the flag is
+# the documented upstream mechanism.
 target_compile_options(LibreDarwinAgentBackend PRIVATE -fexperimental-library)
 target_link_options(LibreDarwinAgentBackend PRIVATE -fexperimental-library)
 
-# The wire contract (CBOR/CDDL) is a project artifact installed alongside the
-# agent — the macOS mirror of LibreLinux/agent/dbus/*.xml (design §8.3). The
-# canonical semantic source stays the Linux D-Bus XML; this schema mirrors it.
+# The wire contract (CBOR/CDDL) is installed alongside the agent so clients can
+# pin against it. The canonical semantic source stays the D-Bus interface
+# surface; this schema mirrors it rather than forking it.
 install(FILES wire/librescrs-agent.cddl
     DESTINATION ${CMAKE_INSTALL_DATADIR}/librescrs)
 

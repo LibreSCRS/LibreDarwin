@@ -40,9 +40,11 @@ a thin client of this agent.
 ## Wire protocol
 
 The macOS socket wire protocol (CBOR + `SCM_RIGHTS` + `LOCAL_PEERTOKEN`/`SecCode`
-peer-auth) mirrors the Linux D-Bus agent surface message-for-message. Design:
-`knowledge/specs/2026-07-06-macos-agent-socket-protocol-design.md`. The shared
-wire contract is Linux-session-owned; this backend consumes a compatible version.
+peer-auth) mirrors the D-Bus agent surface message-for-message. The contract of
+record is [`agent/wire/librescrs-agent.cddl`](agent/wire/librescrs-agent.cddl),
+installed alongside the agent so clients can pin against it. The D-Bus surface
+stays the canonical semantic source; this schema mirrors it rather than forking
+it.
 
 ## Status
 

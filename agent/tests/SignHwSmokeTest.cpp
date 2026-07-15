@@ -9,7 +9,7 @@
 //
 // SKIPPED unless LIBRESCRS_HW=1, so CI/dev runs without a reader stay green.
 //
-// CREDENTIAL SAFETY (feedback_pin_guard_pattern): the signing PIN comes ONLY
+// CREDENTIAL SAFETY: the signing PIN comes ONLY
 // from the environment, never hardcoded. A wrong signing PIN decrements an
 // irreversible on-card counter, so the sign phase ABORTS on the first auth
 // failure (g_pinFailed) and never retries (SKIP_IF_PIN_FAILED). CAN/MRZ (PACE
