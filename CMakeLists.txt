@@ -5,6 +5,15 @@ cmake_minimum_required(VERSION 3.24)
 # 0.0.1 fallback). Must run before project() — see the module's own note.
 include(cmake/GitVersion.cmake)
 
+# Universal (x86_64;arm64) build toggle for the release/packaging gate. CMAKE_OSX_
+# ARCHITECTURES MUST be set before the first project()/enable_language call — the
+# compiler-id check locks the arch set in. OFF (single-arch, the host's native
+# arch) is the dev default; the LibreMac release gate builds ON.
+option(LIBREDARWIN_UNIVERSAL "Build a universal x86_64;arm64 binary" OFF)
+if(LIBREDARWIN_UNIVERSAL)
+    set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "" FORCE)
+endif()
+
 project(LibreDarwin
     VERSION ${GIT_VERSION_MAJOR}.${GIT_VERSION_MINOR}.${GIT_VERSION_PATCH}
     LANGUAGES CXX)
@@ -33,7 +42,7 @@ find_package(LibreMiddleware 4.2 REQUIRED CONFIG)
 # with its D-Bus backend.
 include(cmake/FindOrUseLibreAgent.cmake)
 
-# Vendored CBOR codec (QCBOR) for the socket wire transport (plan D1).
+# Vendored CBOR codec (QCBOR) for the socket wire transport.
 include(cmake/FetchQCBOR.cmake)
 
 enable_testing()
@@ -41,11 +50,11 @@ enable_testing()
 add_subdirectory(agent)
 
 # Card-less, secret-less PKCS#11 facade dylib (browser-loadable) that forwards to
-# the agent over the App-Group socket. Full implementation is P2.
+# the agent over the App-Group socket. Full implementation is pending.
 add_subdirectory(pkcs11-module)
 
 # The agent-owned macOS credential window (secure PIN / CAN / MRZ). Optional so a
-# headless/CI build can drop the UI target. Full implementation is P1b.
+# headless/CI build can drop the UI target. Full implementation is pending.
 option(LIBREDARWIN_BUILD_PROMPTER "Build the macOS credential prompter" ON)
 if(LIBREDARWIN_BUILD_PROMPTER)
     add_subdirectory(prompter)

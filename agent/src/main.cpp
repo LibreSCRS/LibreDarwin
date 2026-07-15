@@ -27,6 +27,9 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
 
+#include <mach-o/dyld.h>
+#include <pwd.h>
+
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
@@ -34,6 +37,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <vector>
 
 #ifndef LIBREDARWIN_VERSION_STR
 #define LIBREDARWIN_VERSION_STR "0.1.0"
@@ -58,17 +62,64 @@ std::string envOr(const char* key, const std::string& fallback)
     return (v != nullptr && *v != '\0') ? std::string(v) : fallback;
 }
 
-// The App-Group container the sandboxed host + CTK extension can reach. The agent
-// (non-sandboxed) uses the absolute path directly. LIBRESCRS_AGENT_CONTAINER lets
-// dev/test point elsewhere.
+// The REAL user home directory, bypassing $HOME. Under App Sandbox, $HOME is
+// silently redirected to the process's private container
+// (~/Library/Containers/<bundle-id>/Data), NOT the shared App-Group container —
+// so a sandboxed agent that trusted $HOME would materialize its socket/cache/
+// config under a path the sandboxed host + CTK extension can never reach.
+// getpwuid(getuid()) reads the real passwd-database home, which the sandbox does
+// not redirect. Falls back to $HOME (then temp) if the passwd lookup fails.
+fs::path realHomeDir()
+{
+    if (struct passwd* pw = getpwuid(getuid()); pw != nullptr && pw->pw_dir != nullptr) {
+        return fs::path(pw->pw_dir);
+    }
+    const char* home = std::getenv("HOME");
+    return (home != nullptr && *home != '\0') ? fs::path(home) : fs::temp_directory_path();
+}
+
+// The App-Group container the sandboxed host + CTK extension can reach.
+// LIBRESCRS_AGENT_CONTAINER lets dev/test point elsewhere.
 fs::path containerDir()
 {
     if (const char* over = std::getenv("LIBRESCRS_AGENT_CONTAINER"); over != nullptr && *over != '\0') {
         return fs::path(over);
     }
-    const char* home = std::getenv("HOME");
-    const fs::path base = (home != nullptr && *home != '\0') ? fs::path(home) : fs::temp_directory_path();
-    return base / "Library" / "Group Containers" / LIBREDARWIN_APP_GROUP;
+    return realHomeDir() / "Library" / "Group Containers" / LIBREDARWIN_APP_GROUP;
+}
+
+// The running executable's own path, resolved via _NSGetExecutablePath (there is
+// no /proc on Darwin). Returns std::nullopt if the buffer growth loop fails —
+// callers fall back to the non-exe-relative candidate.
+std::optional<fs::path> executablePath()
+{
+    std::uint32_t size = 0;
+    _NSGetExecutablePath(nullptr, &size); // first call: report the required size
+    std::vector<char> buf(size);
+    if (_NSGetExecutablePath(buf.data(), &size) != 0) {
+        return std::nullopt;
+    }
+    std::error_code ec;
+    fs::path resolved = fs::canonical(fs::path(buf.data()), ec);
+    return ec ? fs::path(buf.data()) : resolved;
+}
+
+// The plugin directory default: env override -> the bundled PlugIns directory
+// next to the executable (the LibreMac host layout, Contents/MacOS/librescrs-agent
+// + Contents/PlugIns/librescrs) if it exists -> the dev-harness install prefix.
+fs::path defaultPluginDir()
+{
+    if (const char* over = std::getenv("LIBRESCRS_PLUGIN_DIR"); over != nullptr && *over != '\0') {
+        return fs::path(over);
+    }
+    if (auto exe = executablePath()) {
+        fs::path bundled = exe->parent_path() / ".." / "PlugIns" / "librescrs";
+        std::error_code ec;
+        if (fs::is_directory(bundled, ec)) {
+            return bundled;
+        }
+    }
+    return fs::path(LIBRESCRS_DEFAULT_PLUGIN_DIR);
 }
 
 // The macOS reader-routing seams AgentCore consults: reader wire handle ->
@@ -129,7 +180,7 @@ int main()
     const std::string prompterSocket = envOr("LIBRESCRS_PROMPTER_SOCK", (container / "prompter.sock").string());
     const fs::path configFile = container / "config.json";
     const fs::path cacheRoot = container / "cache";
-    const fs::path pluginDir = envOr("LIBRESCRS_PLUGIN_DIR", LIBRESCRS_DEFAULT_PLUGIN_DIR);
+    const fs::path pluginDir = defaultPluginDir();
 
     // [1] Platform primitives: the socket transport (self-binds the container
     // socket, D7) + the plugin capability resolver owned here at the entry point.

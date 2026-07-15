@@ -3,7 +3,7 @@
 # macOS backend for LibreAgent::Core + the librescrs-agent launchd daemon.
 # Mirrors LibreLinux/agent (which builds LibreLinuxAgentCore + the daemon on the
 # D-Bus backend); here the backend is the App-Group socket + CBOR + SecCode.
-# TODO(P1b): every .cpp body is a stub — see implement-macos-backend.
+# TODO: every .cpp body is a stub pending the real macOS backend implementation.
 
 find_library(SECURITY_FRAMEWORK Security REQUIRED)
 find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
@@ -14,7 +14,7 @@ find_library(BSM_LIB bsm REQUIRED) # audit_token_to_pid / _pidversion (PeerIdent
 
 # LM-free wire core: the CBOR codec, framing, streaming reassembler, peer
 # identity, and the prompter protocol. Links NO LibreMiddleware/LibreAgent, so
-# the agent-owned prompter (and, later, the P2 PKCS#11 facade) can reuse it
+# the agent-owned prompter (and, later, the PKCS#11 facade) can reuse it
 # without pulling the card stack. -fexperimental-library is still needed for the
 # libc++ std::expected/std::format the wire layer uses on AppleClang.
 add_library(LibreDarwinWireCore STATIC
@@ -31,7 +31,7 @@ target_compile_options(LibreDarwinWireCore PUBLIC -fexperimental-library)
 target_link_options(LibreDarwinWireCore PUBLIC -fexperimental-library)
 target_link_libraries(LibreDarwinWireCore
     PRIVATE
-        qcbor::qcbor # deterministic CBOR codec (D1); not exposed in headers
+        qcbor::qcbor # deterministic CBOR codec; not exposed in headers
         ${BSM_LIB})  # PeerIdentity audit_token_to_pid
 
 add_library(LibreDarwinAgentBackend STATIC
@@ -92,8 +92,24 @@ target_compile_definitions(librescrs-agent PRIVATE
 target_compile_options(librescrs-agent PRIVATE -fexperimental-library)
 target_link_options(librescrs-agent PRIVATE -fexperimental-library)
 
+# Bundle-ready: the LibreMac host stages this binary at
+# Contents/MacOS/librescrs-agent with LM dylibs + the pkcs11 module at
+# Contents/Frameworks/. @executable_path/../Frameworks covers
+# that layout; the bare @executable_path entry covers the dev-harness libexec
+# install (co-located dylibs, none today, kept for symmetry with the prompter).
+set_target_properties(librescrs-agent PROPERTIES
+    INSTALL_RPATH "@executable_path;@executable_path/../Frameworks"
+    BUILD_WITH_INSTALL_RPATH ON)
+# Embedded __info_plist: a bare sandboxed main executable needs its own
+# CFBundleIdentifier for secinitd container keying, or App Sandbox init SIGTRAPs
+# in libsystem_secinit — see agent/librescrs-agent-info.plist.
+target_link_options(librescrs-agent PRIVATE
+    "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/librescrs-agent-info.plist")
+set_property(TARGET librescrs-agent APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/librescrs-agent-info.plist)
+
 # Install the daemon to libexec (the dev harness path; in production it is the
-# librescrs-agent inside the LibreMac host's Contents/MacOS, P4) and the bundled
+# librescrs-agent inside the LibreMac host's Contents/MacOS) and the bundled
 # SMAppService-ready LaunchAgent plist, configured with the installed path.
 install(TARGETS librescrs-agent RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
 set(LIBRESCRS_AGENT_PROGRAM "${CMAKE_INSTALL_FULL_LIBEXECDIR}/librescrs-agent")

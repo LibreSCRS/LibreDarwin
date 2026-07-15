@@ -11,6 +11,9 @@
 #import <AppKit/AppKit.h>
 #import <Security/Security.h>
 
+#include <pwd.h>
+#include <unistd.h>
+
 #include <cstdlib>
 #include <memory>
 #include <optional>
@@ -18,13 +21,26 @@
 
 namespace {
 
+// The REAL user home directory, bypassing $HOME. Under App Sandbox, $HOME is
+// silently redirected to the process's private container, not the shared
+// App-Group container the agent also binds into — see the twin comment in
+// agent/src/main.cpp (realHomeDir). getpwuid(getuid()) reads the real
+// passwd-database home, which the sandbox does not redirect.
+std::string realHomeDir()
+{
+    if (struct passwd* pw = getpwuid(getuid()); pw != nullptr && pw->pw_dir != nullptr) {
+        return pw->pw_dir;
+    }
+    const char* home = std::getenv("HOME");
+    return home ? home : "";
+}
+
 std::string prompterSocketPath()
 {
     if (const char* env = std::getenv("LIBRESCRS_PROMPTER_SOCK")) {
         return env;
     }
-    const char* home = std::getenv("HOME");
-    return std::string(home ? home : "") + "/Library/Group Containers/group.org.librescrs.LibreMac/prompter.sock";
+    return realHomeDir() + "/Library/Group Containers/group.org.librescrs.LibreMac/prompter.sock";
 }
 
 // The connecting peer must be the agent. If LIBRESCRS_AGENT_SIGNING_ID is set, we

@@ -25,6 +25,20 @@ target_link_libraries(librescrs-prompter
         ${APPKIT_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
         ${SECURITY_FRAMEWORK})
+
+# Bundle-ready: the LibreMac host stages this binary as a sibling of
+# librescrs-agent at Contents/MacOS/librescrs-prompter, with LM-free deps only —
+# the Frameworks entry is kept for symmetry / any future homebrew dep closure.
+set_target_properties(librescrs-prompter PROPERTIES
+    INSTALL_RPATH "@executable_path;@executable_path/../Frameworks"
+    BUILD_WITH_INSTALL_RPATH ON)
+# Embedded __info_plist: same secinitd container-keying requirement as the
+# agent — see prompter/librescrs-prompter-info.plist.
+target_link_options(librescrs-prompter PRIVATE
+    "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/librescrs-prompter-info.plist")
+set_property(TARGET librescrs-prompter APPEND PROPERTY LINK_DEPENDS
+    ${CMAKE_CURRENT_SOURCE_DIR}/librescrs-prompter-info.plist)
+
 install(TARGETS librescrs-prompter RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
 
 if(PROJECT_IS_TOP_LEVEL)

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+SPDX-License-Identifier: LGPL-2.1-or-later
+SPDX-FileCopyrightText: 2026 hirashix0
+
+Embedded __info_plist for librescrs-prompter (linked via
+-Wl,-sectcreate,__TEXT,__info_plist,<this file>). Same secinitd container-
+keying requirement as the agent (see agent/librescrs-agent-info.plist);
+LSUIElement keeps the AppKit run loop dock- and menu-bar-less.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleIdentifier</key>
+    <string>org.librescrs.prompter</string>
+    <key>CFBundleName</key>
+    <string>librescrs-prompter</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1</string>
+    <key>LSUIElement</key>
+    <true/>
+</dict>
+</plist>
