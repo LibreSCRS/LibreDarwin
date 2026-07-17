@@ -150,6 +150,8 @@ constexpr const char* wireNameFor(ErrorCode code) noexcept
         return "RateLimited";
     case ErrorCode::EngineUnavailable:
         return "EngineUnavailable";
+    case ErrorCode::InvalidDocument:
+        return "InvalidDocument";
     }
     return nullptr; // not a taxonomy value (used to probe past the end)
 }
