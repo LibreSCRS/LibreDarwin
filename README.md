@@ -31,11 +31,12 @@ a thin client of this agent.
   | `Operations::OperationChannel` | `SocketOperationChannel` — per-op progress/result over the socket (inline results, no memfd) |
   | `log::LogSink` | `OsLogSink` — `os_log` sink injected via `log::init` |
 - **`prompter/`** — the agent-owned secure credential window (PIN / CAN / MRZ),
-  a separate helper the daemon drives. *(P1b)*
+  a separate helper the daemon drives.
 - **`pkcs11-module/`** — the card-less, secret-less PKCS#11 facade dylib that
-  browsers load; forwards to the agent over the socket. *(P2)*
-- **`packaging/launchd/`** — the LaunchAgent plist, using launchd **socket
-  activation** so the daemon inherits the listening fd.
+  browsers load; forwards to the agent over the socket. *(Skeleton — future work.)*
+- **`packaging/launchd/`** — the LaunchAgent plist. The daemon **self-binds** its
+  App-Group container socket at runtime; there is no launchd socket activation
+  (a per-user socket path can't ride `SMAppService`).
 
 ## Wire protocol
 
@@ -48,9 +49,20 @@ it.
 
 ## Status
 
-**Skeleton (scaffold).** Structure + build wiring + backend interface stubs are
-in place; the real backend implementation is phase **P1b**
-(`implement-macos-backend`). Every stub is marked `TODO(P1b)`.
+**The agent backend is implemented.** The framed AF_UNIX socket transport
+(`SCM_RIGHTS` fd-passing, GCD dispatch), the `SecCode`-based peer authorizer, the
+deterministic-CBOR wire layer, the agent-owned credential prompter, the process
+and launchd hardening, and the constructor-DI composition root are all in place
+and exercised by ~20 test suites — including a cross-stack wire-contract guard
+that pins the CBOR/CDDL literals to the upstream taxonomy value-for-value and a
+libFuzzer gate on the untrusted decoder. `LibreMac` can build and link against
+this agent today.
+
+Still skeletal and explicitly scoped as future work: the card-less **PKCS#11
+facade** (`pkcs11-module/`) is a stub that browsers will load, and the
+CryptoTokenKit integration lives on the `LibreMac` client side. Hardened-runtime
+signing and notarization are applied at the `LibreMac` packaging stage, not in
+this repo.
 
 ## Building
 
