@@ -11,9 +11,9 @@ namespace LibreSCRS::Darwin {
 // syslog-priority-prefixed std::clog. Mirrors LibreMiddleware's Qt-free logging
 // practice.
 //
-// TODO(P1b) implement-macos-backend: map Level{Info,Warn,Error} onto
+// The implementation maps Level{Info,Warn,Error} onto
 // os_log_with_type(OS_LOG_TYPE_{INFO,DEFAULT,ERROR}) under a dedicated
-// os_log_t subsystem ("rs.librescrs.agent"); never log secrets or clear PII.
+// os_log_t subsystem ("rs.librescrs.agent"); it never logs secrets or clear PII.
 [[nodiscard]] Agent::log::LogSink makeOsLogSink();
 
 } // namespace LibreSCRS::Darwin

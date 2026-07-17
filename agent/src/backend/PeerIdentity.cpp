@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
 // Peer identity capture via LOCAL_PEERTOKEN -> audit_token. This is the
-// non-spoofable, TOCTOU-safe basis for the Authorizer's SecTask check (Task 6).
+// non-spoofable, TOCTOU-safe basis for the Authorizer's SecTask check.
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
 
 #include <sys/socket.h>

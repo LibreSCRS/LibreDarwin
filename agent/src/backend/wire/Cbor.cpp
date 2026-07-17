@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// CborValue codec over QCBOR (plan D1). Encoding is RFC 8949 §4.2 core
+// CborValue codec over QCBOR. Encoding is RFC 8949 §4.2 core
 // deterministic: QCBOR preferred serialization (shortest ints, definite
 // lengths, preferred floats) + CanonicalKeyLess map ordering. Decoding is
 // strict + bounded (depth/item caps) with a re-encode-and-compare canonical

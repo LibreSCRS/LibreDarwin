@@ -40,7 +40,7 @@ namespace LibreSCRS::Darwin {
 class SocketTransport final : public Agent::AgentTransport
 {
 public:
-    // One inbound request delivered to the frontend (Task 8), with the fds that
+    // One inbound request delivered to the frontend, with the fds that
     // accompanied it (Sign's inputFd) and the connection to reply on.
     struct Inbound
     {

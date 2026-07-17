@@ -183,7 +183,7 @@ int main()
     const fs::path pluginDir = defaultPluginDir();
 
     // [1] Platform primitives: the socket transport (self-binds the container
-    // socket, D7) + the plugin capability resolver owned here at the entry point.
+    // socket) + the plugin capability resolver owned here at the entry point.
     auto created = LibreSCRS::Darwin::SocketTransport::create(socketPath);
     if (!created) {
         Agent::log::errorf("failed to bind the agent socket {}: {}", socketPath, created.error());

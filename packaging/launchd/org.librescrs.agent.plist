@@ -4,10 +4,10 @@
 
   LaunchAgent for the macOS broker-host daemon (librescrs-agent). Bundled as a
   resource in the LibreMac host's Contents/Library/LaunchAgents/, where
-  SMAppService.agent(plistName:) registers it (P4). No socket-activation, no
+  SMAppService.agent(plistName:) registers it. No socket-activation, no
   per-user path templating.
 
-  D7 (self-bind): the agent resolves the App-Group container socket at runtime
+  Self-bind: the agent resolves the App-Group container socket at runtime
   ($HOME/Library/Group Containers/group.org.librescrs.LibreMac/agent.sock) and
   bind()s it itself, so there is NO Sockets key. SMAppService cannot carry a
   per-user SockPathName, which is precisely why socket-activation is off the

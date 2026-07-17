@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# LibreDarwin agent-backend tests. Task 1 wires the WireContractGuard (the
+# LibreDarwin agent-backend tests. The WireContractGuard (below) is the
 # cross-stack drift anchor pinning the CBOR/CDDL wire literals to the upstream
-# LibreAgent/LibreMiddleware enums). Tasks 3-9 add the CBOR/framing/message/
-# transport/frontend/config unit tests against a fake socket peer.
+# LibreAgent/LibreMiddleware enums. The remaining suites add the CBOR/framing/
+# message/transport/frontend/config unit tests against a fake socket peer.
 find_package(GTest REQUIRED)
 
 # WireContractGuard: compile-time static_asserts tying the wire enums to the
@@ -88,7 +88,7 @@ target_include_directories(ReadCertificatesOperationTest PRIVATE ${CMAKE_CURRENT
 # internal surface stays out of the shipped binaries.
 target_compile_definitions(ReadCertificatesOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
 
-# libFuzzer target for the CBOR decoder (untrusted-parser hardening, D1). Off by
+# libFuzzer target for the CBOR decoder (untrusted-parser hardening). Off by
 # default; needs a clang WITH the libFuzzer runtime (e.g. Homebrew LLVM) — Apple
 # Clang ships none, so CI runs the fuzz on a Linux leg (the `fuzz-cbor` job
 # builds CborFuzzTest.cpp + Cbor.cpp + QCBOR standalone with

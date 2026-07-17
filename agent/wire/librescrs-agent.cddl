@@ -56,22 +56,22 @@ get-photo         = ( t: "GetPhoto", card: handle )
 read-certificates = ( t: "ReadCertificates", card: handle )
 ; Card1.Sign: the document to sign rides SCM_RIGHTS (referenced by `in`).
 sign              = ( t: "Sign", card: handle, cert: cert-id, in: fd-index, opts: sign-opts )
-; Pkcs11_1 seam — ALL methods reader-addressed (R11: canonical Pkcs11_1.xml takes
+; Pkcs11_1 seam — ALL methods reader-addressed (the canonical Pkcs11_1 interface takes
 ; a reader object path + certId; the resolution seams are reader-path-keyed and
 ; the login lease is per-token/per-reader-slot). NO PIN args (protected-auth);
 ; Login raises the agent prompter on the first cold-lease SignRaw/Decrypt.
 get-cert-der      = ( t: "GetCertDer", reader: handle, cert: cert-id )   ; public, no consent/lease
 get-config        = ( t: "GetConfig" )                                  ; -> config (typed entries)
 set-config        = ( t: "SetConfig", key: settable-config-key, value: any )  ; Config1.SetValue; low vs trust tier
-reset-config      = ( t: "ResetConfig", key: config-key )               ; R1: Config1.Reset(key)
+reset-config      = ( t: "ResetConfig", key: config-key )               ; Config1.Reset(key)
 cancel-op         = ( t: "CancelOp", op: uint )
-get-sign-result   = ( t: "GetSignResult", op: uint )                    ; recovery is Sign-ONLY (Sign1.GetResult, §8)
-pk-login          = ( t: "Pkcs11.Login",     reader: handle )                       ; R11 reader-addressed
-pk-logout         = ( t: "Pkcs11.Logout",    reader: handle )                       ; R11
-pk-public-key     = ( t: "Pkcs11.PublicKey", reader: handle, cert: cert-id )        ; R11; RSA n/e (EC reserved)
-pk-sign-raw       = ( t: "Pkcs11.SignRaw",   reader: handle, cert: cert-id, data: bstr )   ; R11
-pk-decrypt        = ( t: "Pkcs11.Decrypt",   reader: handle, cert: cert-id, data: bstr )   ; R11
-; Card1.Sign options (R6): format/level/packaging + optional per-sign chrome.
+get-sign-result   = ( t: "GetSignResult", op: uint )                    ; recovery is Sign-ONLY (Sign1.GetResult)
+pk-login          = ( t: "Pkcs11.Login",     reader: handle )                       ; reader-addressed
+pk-logout         = ( t: "Pkcs11.Logout",    reader: handle )                       ; reader-addressed
+pk-public-key     = ( t: "Pkcs11.PublicKey", reader: handle, cert: cert-id )        ; reader-addressed; RSA n/e (EC reserved)
+pk-sign-raw       = ( t: "Pkcs11.SignRaw",   reader: handle, cert: cert-id, data: bstr )   ; reader-addressed
+pk-decrypt        = ( t: "Pkcs11.Decrypt",   reader: handle, cert: cert-id, data: bstr )   ; reader-addressed
+; Card1.Sign options: format/level/packaging + optional per-sign chrome.
 ; NO `tsa` — the TSA is Config1-owned (TsaUrls/LastTsaUrl), not a per-sign option.
 sign-opts     = { format: tstr, level: tstr, packaging: tstr,
                   ? allowExpired: bool, ? displayName: tstr, ? reason: tstr, ? location: tstr }
@@ -92,7 +92,7 @@ reply    = { t: "Reply", req: uint, ( reply-ok // ( err: err-info ) ) }
 ; (Pkcs11_1 / Config1 / Card1.Sign method-entry) carry a NAMED error. One or the
 ; other, never both.
 err-info = { ( code: error-code // name: sync-error ), ? msgKey: tstr, ? msgFallback: tstr }
-; Named synchronous-method errors (D-Bus Error.* names). R7 adds the Card1.Sign
+; Named synchronous-method errors (D-Bus Error.* names). Includes the Card1.Sign
 ; method-entry rejections (no Operation minted): UnsupportedOnThisCard,
 ; UnsupportedSignatureParameter, InputTooLarge, RateLimited.
 sync-error = "UnknownCard" / "KeyNotFound" / "NotAuthorized" / "UserNotLoggedIn" /
@@ -116,7 +116,7 @@ sign-recovery = ( result: sign-result )    ; GetSignResult reply (Sign-only, wit
 
 reader-state = { handle: handle, name: tstr, hasCard: bool, ? card: handle }
 card-state   = { handle: handle, reader: handle, caps: capabilities, preAuth: pre-read-auth }
-; R3: mirror the canonical Certificates1.Result a(sba{sa{s(ssv)}}uasasu) grouped
+; Mirror the canonical Certificates1.Result a(sba{sa{s(ssv)}}uasasu) grouped
 ; shape — grouped fields (group -> field -> [labelKey, labelFallback, value]) plus
 ; keyUsageBits, ekus, chainSubjectCns, trustStatus. No DER on the wire.
 cert-info    = { certId: cert-id, signingCapable: bool,
@@ -133,11 +133,11 @@ reader-removed   = ( t: "ReaderRemoved", handle: handle )
 card-added       = ( t: "CardAdded",     card: card-state )
 card-removed     = ( t: "CardRemoved",   handle: handle )
 property-changed = ( t: "PropertyChanged", handle: handle, iface: tstr, props: { * tstr => any } )
-config-changed   = ( t: "ConfigChanged", key: config-key )   ; R2: Config1.Changed(key) — client re-reads via GetConfig
+config-changed   = ( t: "ConfigChanged", key: config-key )   ; Config1.Changed(key) — client re-reads via GetConfig
 ; Operation1 progress properties: Phase + Progress/IsIndeterminate/WatchdogTimeoutSeconds.
 op-progress = ( t: "OpProgress", op: uint, phase: op-phase,
                 ? progress: float, ? indeterminate: bool, ? watchdogSecs: uint )
-; R8: the typed Result fires BEFORE Finished (canonical Operation1 ordering); a
+; The typed Result fires BEFORE Finished (canonical Operation1 ordering); a
 ; distinct op-result-ready event carries the payload, op-finished carries no result.
 ; Delivery invariant — a result cannot be missed by subscribing late, which is
 ; why op-result-ready needs no pull-based recovery and get-sign-result is
@@ -163,7 +163,7 @@ quiesce-reason = &( SystemSleep: 0, ScreenLocked: 1, SessionInactive: 2, Shutdow
 
 ; ---- op result payloads (Sign also served by GetSignResult within the grace window) ----
 op-result = identity-result / photo-result / cert-list-result / sign-result
-; R4: mirror the canonical Identity1.Result a{sa{s(sssv)}} grouped 4-tuple
+; Mirror the canonical Identity1.Result a{sa{s(sssv)}} grouped 4-tuple
 ; (labelKey, labelFallback, type, value). Photo fields are omitted (fetch via GetPhoto).
 identity-result  = { kind: "Identity",     fields: { * tstr => { * tstr => id-field } } }
 id-field         = [ labelKey: tstr, labelFallback: tstr, type: tstr, value: tstr / bstr ]

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// P1b HARDWARE-ACCEPTANCE GATE (owner-present, PIN-guarded). Drives the FULL
+// HARDWARE-ACCEPTANCE GATE (owner-present, PIN-guarded). Drives the FULL
 // macOS backend end-to-end as a socket client: it constructs the real stack
 // (SocketTransport + PluginCapabilityResolver + AgentCore + SocketFrontend +
 // MonitorBridge) in-process against a live card, connects over the App-Group
@@ -307,7 +307,7 @@ std::optional<std::string> waitForCard(int client)
 TEST(SignHwSmoke, PresenceReadAndSign)
 {
     if (!hwEnabled()) {
-        GTEST_SKIP() << "set LIBRESCRS_HW=1 (+ a reader/card) to run the P1b hardware gate";
+        GTEST_SKIP() << "set LIBRESCRS_HW=1 (+ a reader/card) to run the hardware gate";
     }
     HwRig rig;
     const int client = connectClient(rig.path);

@@ -62,7 +62,7 @@ public:
     void onWithdrawn(Agent::ObjectId object);
     void onReaderPropertiesChanged(Agent::ObjectId reader, const Agent::PropertyDelta& delta);
 
-    // ConfigStore::setOnChanged -> Config1.Changed event (R2). Loop-safe.
+    // ConfigStore::setOnChanged -> Config1.Changed event. Loop-safe.
     void emitConfigChanged(const std::string& key);
 
     // CardKeyTracker::onKeyRemoved -> broker lease revoke (paired with the cache

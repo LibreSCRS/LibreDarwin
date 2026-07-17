@@ -21,7 +21,7 @@ namespace LibreSCRS::Darwin {
 //
 // THREADING: the real notifications deliver on the main CFRunLoop thread, so the
 // handler runs there; it MUST marshal any loop-affine transport work via post().
-// start() needs a live CFRunLoopRun() (Task 9). The handler is also driven by
+// start() needs a live CFRunLoopRun(). The handler is also driven by
 // injectForTest for hermetic unit tests (no real notifications).
 class SystemLifecycle
 {

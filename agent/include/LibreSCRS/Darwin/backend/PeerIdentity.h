@@ -12,7 +12,7 @@ namespace LibreSCRS::Darwin {
 // Non-spoofable peer credentials captured from an accepted AF_UNIX socket via
 // getsockopt(SOL_LOCAL, LOCAL_PEERTOKEN) (macOS 10.15+). The audit_token is
 // TOCTOU-safe — it carries the pid AND the pidversion, so a reused pid is
-// distinguishable — and is exactly what Task 6's SecCodeAuthorizer turns into a
+// distinguishable — and is exactly what the SecCodeAuthorizer turns into a
 // SecTask (SecTaskCreateWithAuditToken). Prefer this over getpeereid/getpid,
 // which are pid-reuse-racy and carry no code-signing identity.
 struct PeerCredentials

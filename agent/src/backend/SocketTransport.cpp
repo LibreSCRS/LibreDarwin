@@ -4,7 +4,7 @@
 // macOS AgentTransport backend over the App-Group AF_UNIX socket. One serial GCD
 // queue is the loop: the accept source, every per-connection read/write source,
 // and all AgentTransport calls (post-marshaled by the core) run on it, so
-// transport state needs no locks. The agent SELF-BINDS the socket (D7);
+// transport state needs no locks. The agent SELF-BINDS the socket;
 // launch_activate_socket is an optional inherited-fd fallback.
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 

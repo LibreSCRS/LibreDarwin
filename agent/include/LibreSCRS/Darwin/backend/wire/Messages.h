@@ -70,7 +70,7 @@ enum class SyncError : std::uint8_t {
 
 // ---- shared sub-types --------------------------------------------------------
 
-// Card1.Sign options (R6). format/level/packaging required; the rest optional.
+// Card1.Sign options. format/level/packaging required; the rest optional.
 struct SignOpts
 {
     std::string format;

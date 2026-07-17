@@ -22,8 +22,8 @@ struct PumpResult
     FrameError error{FrameError::Io}; // meaningful iff status == Error
 };
 
-// Non-blocking streaming frame reader for the dispatch_source client transport
-// (Task 5). One instance per connection. On read-readiness the transport calls
+// Non-blocking streaming frame reader for the dispatch_source client transport.
+// One instance per connection. On read-readiness the transport calls
 // pump(fd): it drains what is available (non-blocking recvmsg), harvests
 // SCM_RIGHTS fds (with FD_CLOEXEC), and returns every complete frame, attributing
 // exactly the header-declared fd count to each frame from an in-order fd FIFO

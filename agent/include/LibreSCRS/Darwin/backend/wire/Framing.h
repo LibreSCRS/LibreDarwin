@@ -71,7 +71,7 @@ struct Frame
 //
 // BLOCKING CONTRACT: sendFrame/recvFrame are for BLOCKING sockets — the
 // agent-owned prompter channel (a worker thread) and the tests. The
-// dispatch_source-driven CLIENT transport (Task 5) uses NON-blocking sockets and
+// dispatch_source-driven CLIENT transport uses NON-blocking sockets and
 // a stateful FrameReassembler (accumulate header + body across readiness
 // callbacks) rather than this synchronous loop; on a non-blocking socket
 // recvFrame reports WouldBlock rather than misclassifying EAGAIN as Io.

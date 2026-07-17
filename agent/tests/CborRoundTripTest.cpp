@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
 // Byte-stable canonical CBOR round-trips + fail-closed rejection of
-// non-canonical / malformed input (the untrusted-parser contract, D1).
+// non-canonical / malformed input (the untrusted-parser contract).
 #include <LibreSCRS/Darwin/backend/wire/Cbor.h>
 
 #include <gtest/gtest.h>

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// libFuzzer target for the CBOR decoder (untrusted-parser hardening, D1). The
+// libFuzzer target for the CBOR decoder (untrusted-parser hardening). The
 // decoder must never crash / invoke UB on arbitrary input; it either returns a
 // bounded CborValue or a CborError. A returned value must re-encode without
 // crashing (exercises the encode path on fuzz-derived structures too).

@@ -12,8 +12,8 @@
 #include <variant>
 #include <vector>
 
-// The CBOR value seam over the vendored QCBOR codec (plan D1). No caller sees
-// QCBOR; the Messages layer (Task 4) marshals typed structs to/from CborValue.
+// The CBOR value seam over the vendored QCBOR codec. No caller sees
+// QCBOR; the Messages layer marshals typed structs to/from CborValue.
 //
 // Encoding is RFC 8949 §4.2 CORE DETERMINISTIC: QCBOR preferred serialization
 // (shortest-form integers, definite lengths, preferred floats) plus canonical

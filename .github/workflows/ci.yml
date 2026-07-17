@@ -2,7 +2,7 @@
 #
 # LibreDarwin is the macOS broker-host: the librescrs-agent daemon (App-Group
 # socket + CBOR wire) built on LibreAgent::Core, plus the agent-owned prompter
-# and the (P2) PKCS#11 facade. It links LibreMiddleware only through
+# and the skeleton PKCS#11 facade. It links LibreMiddleware only through
 # LibreAgent::Core, so the real build runs on a macOS runner that first
 # builds+installs LibreMiddleware, then builds LibreDarwin against the sibling
 # LibreAgent source. The hardware sign-smoke (SignHwSmokeTest) GTEST_SKIP()s
@@ -114,7 +114,7 @@ jobs:
         run: ctest --test-dir build --output-on-failure
 
   fuzz-cbor:
-    # Untrusted-decoder fuzz gate (D1): the CBOR decoder parses input from any
+    # Untrusted-decoder fuzz gate: the CBOR decoder parses input from any
     # local client, so CborFuzzTest must actually run in CI. AppleClang ships
     # no libFuzzer runtime, so this leg builds the fuzzer standalone on Linux
     # clang with -fsanitize=fuzzer,address (the decoder + QCBOR are

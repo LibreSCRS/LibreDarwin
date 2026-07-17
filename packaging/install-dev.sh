@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 hirashix0
 #
-# Dev harness for the macOS broker-host agent (P1b). There is no LibreMac host
+# Dev harness for the macOS broker-host agent. There is no LibreMac host
 # yet, so this runs librescrs-agent STANDALONE against a dev App-Group container.
 # Two modes:
 #
@@ -11,9 +11,9 @@
 #   ./install-dev.sh unload      # bootout the dev LaunchAgent
 #   ./install-dev.sh smoke       # start the agent, connect, expect readiness
 #
-# The agent self-binds the container socket (D7); no socket-activation. In
+# The agent self-binds the container socket; no socket-activation. In
 # production the sandboxed LibreMac host creates the container (+ primes CTK) and
-# registers the bundled plist via SMAppService (P4) — this harness stands in for
+# registers the bundled plist via SMAppService — this harness stands in for
 # that until the host exists.
 set -euo pipefail
 
