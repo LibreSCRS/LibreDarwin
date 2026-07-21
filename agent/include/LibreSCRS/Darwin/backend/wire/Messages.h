@@ -3,9 +3,10 @@
 #pragma once
 #include <LibreSCRS/Darwin/backend/wire/Cbor.h>
 
-#include <LibreSCRS/Agent/OperationPhase.h>      // OperationPhase, OperationStatus
-#include <LibreSCRS/Agent/value/ErrorTaxonomy.h> // ErrorCode
-#include <LibreSCRS/Auth/AuthRequirement.h>      // PreReadAuthMethod
+#include <LibreSCRS/Agent/OperationPhase.h>         // OperationPhase, OperationStatus
+#include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialOpResult, CredentialRecord
+#include <LibreSCRS/Agent/value/ErrorTaxonomy.h>    // ErrorCode
+#include <LibreSCRS/Auth/AuthRequirement.h>         // PreReadAuthMethod
 
 #include <cstdint>
 #include <expected>
@@ -63,6 +64,8 @@ enum class SyncError : std::uint8_t {
     UnsupportedSignatureParameter,
     InputTooLarge,
     RateLimited,
+    UnknownCredential,
+    InvalidRequest,
 };
 
 // The wire name for a SyncError (== the CDDL literal). Never empty.
@@ -228,10 +231,31 @@ struct PkDecrypt
     std::vector<std::uint8_t> data;
     bool operator==(const PkDecrypt&) const = default;
 };
+// Credentials1 seam requests (PIN/signing-key lifecycle). Gated behind the
+// "credentials" HelloAck feature token + the PinManagement capability bit; this
+// wire never carries a secret (pinId is a record id from the last listing).
+struct ListCredentials
+{
+    std::string card;
+    bool operator==(const ListCredentials&) const = default;
+};
+struct ManagePin
+{
+    std::string card;
+    std::string pinId;               // a record id from the most recent listing (NOT a PIN)
+    std::string verb;                // a cred-verb: "change" | "unblock" | "activate_pin"
+    std::optional<bool> activateKey; // legal only with verb "activate_pin"
+    bool operator==(const ManagePin&) const = default;
+};
+struct ActivateSigningKey
+{
+    std::string card;
+    bool operator==(const ActivateSigningKey&) const = default;
+};
 
-using Request =
-    std::variant<Hello, GetState, ReadIdentity, GetPhoto, ReadCertificates, Sign, GetCertDer, GetConfig, SetConfig,
-                 ResetConfig, CancelOp, GetSignResult, PkLogin, PkLogout, PkPublicKey, PkSignRaw, PkDecrypt>;
+using Request = std::variant<Hello, GetState, ReadIdentity, GetPhoto, ReadCertificates, Sign, GetCertDer, GetConfig,
+                             SetConfig, ResetConfig, CancelOp, GetSignResult, PkLogin, PkLogout, PkPublicKey, PkSignRaw,
+                             PkDecrypt, ListCredentials, ManagePin, ActivateSigningKey>;
 
 struct RequestEnvelope
 {
@@ -333,7 +357,15 @@ struct SignResult
     std::uint64_t artifact{0}; // fd-index
     SignMeta meta;
 };
-using OpResult = std::variant<IdentityResult, PhotoResult, CertListResult, SignResult>;
+// Credentials op result: holds the AGENT value types directly — the codec (not
+// the caller) maps the outcome enum + record fields to their wire tokens/keys.
+// A mutation's records are always empty; a completed-Ok listing carries them.
+struct CredentialsResult
+{
+    LibreSCRS::Agent::CredentialOpResult result;
+    std::vector<LibreSCRS::Agent::CredentialRecord> records;
+};
+using OpResult = std::variant<IdentityResult, PhotoResult, CertListResult, SignResult, CredentialsResult>;
 
 // Build a full reply CBOR map ({t:"Reply", req, <arm keys>}) for each arm, or an
 // error reply ({t:"Reply", req, err:{...}}).

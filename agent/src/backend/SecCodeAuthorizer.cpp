@@ -101,8 +101,8 @@ void SecCodeAuthorizer::setAuthResolverForTest(AuthResolver resolver)
 
 bool SecCodeAuthorizer::authorize(std::string_view actionId, const Agent::CallerToken& caller)
 {
-    const bool isDefault =
-        actionId == Agent::kActionConfigure || actionId == Agent::kActionSign || actionId == Agent::kActionPkcs11Login;
+    const bool isDefault = actionId == Agent::kActionConfigure || actionId == Agent::kActionSign ||
+                           actionId == Agent::kActionPkcs11Login || actionId == Agent::kActionCredentialsManage;
     const bool isTrust = actionId == Agent::kActionConfigureTrust;
     if (!isDefault && !isTrust) {
         return false; // unknown action -> deny

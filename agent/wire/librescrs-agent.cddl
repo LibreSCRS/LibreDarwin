@@ -47,7 +47,8 @@ error-code = &( None: 0, CardRemoved: 1, CredentialWrong: 2, CredentialBlocked: 
 request  = { req: uint, req-body }
 req-body = ( hello // get-state // read-identity // get-photo //
   read-certificates // sign // get-cert-der // get-config // set-config // reset-config //
-  cancel-op // get-sign-result // pk-login // pk-logout // pk-public-key // pk-sign-raw // pk-decrypt )
+  cancel-op // get-sign-result // pk-login // pk-logout // pk-public-key // pk-sign-raw // pk-decrypt //
+  list-credentials // manage-pin // activate-signing-key )
 
 hello             = ( t: "Hello", proto: uint, ? client: tstr )
 get-state         = ( t: "GetState" )
@@ -71,6 +72,20 @@ pk-logout         = ( t: "Pkcs11.Logout",    reader: handle )                   
 pk-public-key     = ( t: "Pkcs11.PublicKey", reader: handle, cert: cert-id )        ; reader-addressed; RSA n/e (EC reserved)
 pk-sign-raw       = ( t: "Pkcs11.SignRaw",   reader: handle, cert: cert-id, data: bstr )   ; reader-addressed
 pk-decrypt        = ( t: "Pkcs11.Decrypt",   reader: handle, cert: cert-id, data: bstr )   ; reader-addressed
+; Credentials1 seam — PIN/signing-key lifecycle. Gated behind the "credentials"
+; hello-ack feature token (see hello-ack) and the PinManagement capability bit.
+list-credentials     = ( t: "ListCredentials",    card: handle )
+; pinId (NOT "pin" — this wire never carries a secret) = a record id
+; from the most recent listing of this card; ids resolve against the
+; agent's per-card snapshot regardless of which connection produced
+; it. The agent never lists implicitly inside a mutation. activateKey
+; is legal only with verb "activate_pin" (InvalidRequest otherwise);
+; the closed option set is structural here (no open options container);
+; unrecognized EXTRA map keys follow the wire-wide tolerant decode.
+manage-pin           = ( t: "ManagePin",          card: handle, pinId: tstr,
+                         verb: cred-verb, ? activateKey: bool )
+activate-signing-key = ( t: "ActivateSigningKey", card: handle )
+cred-verb = "change" / "unblock" / "activate_pin"
 ; Card1.Sign options: format/level/packaging + optional per-sign chrome.
 ; NO `tsa` — the TSA is Config1-owned (TsaUrls/LastTsaUrl), not a per-sign option.
 sign-opts     = { format: tstr, level: tstr, packaging: tstr,
@@ -99,11 +114,21 @@ sync-error = "UnknownCard" / "KeyNotFound" / "NotAuthorized" / "UserNotLoggedIn"
              "UnknownConfigKey" / "ReadOnlyConfig" / "InvalidConfigValue" / "UnsupportedProtocol" /
              "AuthFailed" / "CommunicationError" / "NotSupported" /
              "UnsupportedOnThisCard" / "UnsupportedSignatureParameter" /
-             "InputTooLarge" / "RateLimited"
+             "InputTooLarge" / "RateLimited" / "UnknownCredential" / "InvalidRequest"
 reply-ok = ( hello-ack // op-started // state // cert-list // cert-der // public-key //
              config // ack // raw-signature // sign-recovery )
+; `features` advertises optional request families this agent understands; the
+; client MUST gate the credential requests (ListCredentials / ManagePin /
+; ActivateSigningKey) on the "credentials" token and fall back to read-only when
+; it is absent. This gate is mandatory, not advisory: the tolerant decode only
+; skips unknown MAP KEYS within a known message — an unknown request `t:` tag has
+; no such tolerance. An agent predating this contract has no "credentials" token
+; and answers such a frame by failing it closed and dropping the connection, so a
+; client that skips the gate loses its whole session instead of getting a clean
+; per-request error.
 hello-ack     = ( kind: "HelloAck", agentVer: tstr, features: [* tstr] )   ; Manager1.Version
-op-started    = ( op: uint )    ; async op id (ReadIdentity/GetPhoto/ReadCertificates/Sign)
+op-started    = ( op: uint )    ; async op id (ReadIdentity/GetPhoto/ReadCertificates/Sign/
+                                ;   ListCredentials/ManagePin/ActivateSigningKey)
 state         = ( readers: [* reader-state], cards: [* card-state] )
 cert-list     = ( certs: [* cert-info] )
 cert-der      = ( der: bstr )
@@ -162,7 +187,7 @@ agent-quiesced = ( t: "AgentQuiesced", reason: quiesce-reason )
 quiesce-reason = &( SystemSleep: 0, ScreenLocked: 1, SessionInactive: 2, Shutdown: 3 )
 
 ; ---- op result payloads (Sign also served by GetSignResult within the grace window) ----
-op-result = identity-result / photo-result / cert-list-result / sign-result
+op-result = identity-result / photo-result / cert-list-result / sign-result / credentials-result
 ; Mirror the canonical Identity1.Result a{sa{s(sssv)}} grouped 4-tuple
 ; (labelKey, labelFallback, type, value). Photo fields are omitted (fetch via GetPhoto).
 identity-result  = { kind: "Identity",     fields: { * tstr => { * tstr => id-field } } }
@@ -171,3 +196,36 @@ photo-result     = { kind: "Photo",        photos: [* { key: tstr, fd: fd-index 
 cert-list-result = { kind: "Certificates", certs: [* cert-info] }
 sign-result      = { kind: "Sign",         artifact: fd-index, meta: sign-meta }
 sign-meta = { format: tstr, level: tstr, tsaUsed: bool, chainComplete: bool }
+
+; Credentials results. A MUTATION op (ManagePin/ActivateSigningKey)
+; emits EXACTLY ONE op-result-ready per operation — for EVERY completed
+; attempt, including invalidPin/blocked/userCancelled — always BEFORE
+; op-finished (one attempt per op; a retry is a new request); its
+; records are always []. A LIST op emits op-result-ready iff it
+; completes Ok; a failed/cancelled list finishes WITHOUT a result.
+; Ordering holds modulo channel allocation failure, which fails the op
+; closed. No GetResult analog: the unicast-FIFO delivery invariant
+; above removes the D-Bus late-subscribe race that justifies it.
+; pinActivated/keyActivated presence: populated for the activate_pin
+; bring-up continuation AND for activateSigningKey (partial bring-up =
+; pinActivated=true, keyActivated=false, outcome keyActivationFailed).
+credentials-result = { kind: "Credentials", result: cred-result,
+                       records: [* cred-record] }
+cred-result = { outcome: cred-outcome, ? retriesLeft: uint, blocked: bool,
+                ? pinActivated: bool, ? keyActivated: bool }
+cred-outcome = "unspecified" / "ok" / "userCancelled" / "missingFields" /
+               "invalidPin" / "blocked" / "pluginError" / "unsupported" /
+               "keyActivationFailed" / "cardRemoved"
+cred-record = { id: tstr, label: tstr, kind: cred-kind, state: cred-state,
+                ? retriesLeft: uint, ? retriesMax: uint, ? usesLeft: uint,
+                ? unblocksLeft: uint, ? minLength: uint, ? maxLength: uint,
+                canChange: bool, unblockable: bool, unblockStyle: unblock-style,
+                activatable: bool, keyActivationPending: bool,
+                keyActivatable: bool, recovery: cred-recovery, probeSafe: bool,
+                ? blockedGuidanceKey: tstr, ? blockedGuidanceFallback: tstr,
+                ? keyActivationGuidanceKey: tstr,
+                ? keyActivationGuidanceFallback: tstr }
+cred-kind      = "user" / "sign" / "puk" / "can" / "unknown"
+cred-state     = "unknown" / "transport" / "operational" / "needsChange" / "blocked"
+unblock-style  = "unknown" / "resetOnly" / "setsNewPin" / "unblockAndChange"
+cred-recovery  = "unknown" / "holderViaPuk" / "issuerProcess" / "none"

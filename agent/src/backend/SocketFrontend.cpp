@@ -10,7 +10,10 @@
 #include <LibreSCRS/Darwin/backend/SocketOperationChannel.h>
 #include <LibreSCRS/Darwin/backend/wire/AnonFd.h>
 
+#include "operations/ActivateSigningKeyOperation.h"
 #include "operations/GetPhotoOperation.h"
+#include "operations/ListCredentialsOperation.h"
+#include "operations/ManagePinOperation.h"
 #include "operations/ReadCertificatesOperation.h"
 #include "operations/ReadIdentityOperation.h"
 #include "operations/SignOperation.h"
@@ -24,9 +27,11 @@
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h>
 #include <LibreSCRS/Agent/operations/LmSeams.h>
 #include <LibreSCRS/Agent/operations/OperationManager.h>
+#include <LibreSCRS/Agent/operations/PinChangeFlow.h> // PinManageRequest, validatePinManageRequest
 #include <LibreSCRS/Agent/operations/SignatureParams.h>
 #include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>
 #include <LibreSCRS/Agent/util/CallerLabel.h>
+#include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialSnapshot, EntryError
 
 #include <LibreSCRS/Plugin/PluginTypes.h> // CardCapabilities
 
@@ -53,10 +58,17 @@ namespace sp = LibreSCRS::Agent::Operations::SignatureParams;
 
 constexpr std::uint32_t kIdentityCapBit = static_cast<std::uint32_t>(LibreSCRS::Plugin::CardCapabilities::IdentityData);
 constexpr std::uint32_t kPkiCapBit = static_cast<std::uint32_t>(LibreSCRS::Plugin::CardCapabilities::PKI);
+constexpr std::uint32_t kPinManagementCapBit =
+    static_cast<std::uint32_t>(LibreSCRS::Plugin::CardCapabilities::PinManagement);
 
 constexpr const char* kArtifactIdentity = "identity";
 constexpr const char* kArtifactPhoto = "photo";
 constexpr const char* kArtifactCertificates = "certificates";
+constexpr const char* kArtifactCredentials = "credentials";
+
+// The credentials verb that may carry the activateKey wire key (the wire's
+// closed cred-verb vocabulary; validatePinManageRequest owns the full check).
+constexpr const char* kVerbActivatePin = "activate_pin";
 
 constexpr std::size_t kMaxInputBytes = 256ull * 1024 * 1024;
 constexpr std::chrono::milliseconds kResolveRetryDelay{50};
@@ -148,6 +160,25 @@ wire::SyncError mapLoginOutcome(A::Pkcs11Broker::LoginOutcome oc) noexcept
     return wire::SyncError::CommunicationError;
 }
 
+// Map a validatePinManageRequest EntryError onto its typed wire error. UnknownVerb
+// / UnknownOption / InvalidCombination are the client's fault (InvalidRequest);
+// UnknownCredential (bad or unlisted pinId, incl. the never-listed case) is its own
+// name so a client can distinguish "re-list and retry" from "fix your request".
+// (Mirror of LibreLinux CardObject's throwEntryError.)
+wire::SyncError mapEntryError(A::EntryError err) noexcept
+{
+    switch (err) {
+    case A::EntryError::UnknownCredential:
+        return wire::SyncError::UnknownCredential;
+    case A::EntryError::UnknownVerb:
+    case A::EntryError::UnknownOption:
+    case A::EntryError::InvalidCombination:
+    case A::EntryError::AmbiguousCredential: // non-unique label: the seam must never guess
+        break;
+    }
+    return wire::SyncError::InvalidRequest;
+}
+
 // Extract a std::string from a CBOR text value; nullopt on a type mismatch.
 std::optional<std::string> asString(const wire::CborValue& v)
 {
@@ -220,6 +251,12 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handleReadCertificates(in, *m);
     } else if (const auto* m = std::get_if<wire::Sign>(&body)) {
         handleSign(in, *m);
+    } else if (const auto* m = std::get_if<wire::ListCredentials>(&body)) {
+        handleListCredentials(in, *m);
+    } else if (const auto* m = std::get_if<wire::ManagePin>(&body)) {
+        handleManagePin(in, *m);
+    } else if (const auto* m = std::get_if<wire::ActivateSigningKey>(&body)) {
+        handleActivateSigningKey(in, *m);
     } else if (const auto* m = std::get_if<wire::GetCertDer>(&body)) {
         handleCertDer(connId, req, *m, caller);
     } else if (std::get_if<wire::GetConfig>(&body)) {
@@ -249,7 +286,7 @@ void SocketFrontend::handleHello(std::uint64_t connId, std::uint64_t req, const 
 {
     wire::HelloAck ack;
     ack.agentVer = m_version;
-    ack.features = {"identity", "certificates", "photo", "sign", "pkcs11", "config"};
+    ack.features = {"identity", "certificates", "photo", "sign", "pkcs11", "config", "credentials"};
     sendReplyOnLoop(connId, wire::makeReply(req, ack));
 }
 
@@ -563,6 +600,229 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const wire::Sign& 
                 return op;
             });
         m_opOwners[id.value()] = owner;
+        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+    } catch (const Ops::QueueFull&) {
+        replyError(connId, req, wire::SyncError::RateLimited);
+    }
+}
+
+// --- credentials (PIN/PUK management) ----------------------------------------
+
+void SocketFrontend::handleListCredentials(SocketTransport::Inbound& in, const wire::ListCredentials& msg)
+{
+    // A read of the card's PIN credentials. Gates on PinManagement (no listing is
+    // meaningful without it) but is NOT rate-limited — no card-state mutation.
+    const std::uint64_t connId = in.connId;
+    const std::uint64_t req = in.request.req;
+    const auto routing = m_transport.cardRouting(msg.card);
+    if (!routing) {
+        replyError(connId, req, wire::SyncError::UnknownCard);
+        return;
+    }
+    if ((routing->caps & kPinManagementCapBit) == 0) {
+        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        return;
+    }
+    const std::string requester = requesterLabel(in.caller);
+    const std::string cardKey = routing->cardKey;
+    const std::string readerName = routing->readerName;
+    const A::ObjectId readerId = routing->readerId;
+    auto& core = m_core;
+
+    try {
+        const auto id = core.operationManager().publish(
+            readerId, readerName, in.caller,
+            [this, connId, &core, cardKey, readerName,
+             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
+                auto credentials = std::make_shared<Ops::LmCredentialManager>();
+                auto state = std::make_shared<Ops::OperationState>();
+                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
+                                                                        SocketOperationChannel::SignArtifactSink{},
+                                                                        makeOpFinishedSink());
+                Ops::ListCredentialsOperation::Deps deps{
+                    .holder = holder,
+                    .credentials = *credentials,
+                    .prompter = *core.sharedCryptoContext()->prompter,
+                    .serializer = *core.sharedCryptoContext()->serializer,
+                    .credCache = core.credentialCache(),
+                    .snapshotCache = core.credentialSnapshotCache(),
+                    .cardKey = cardKey,
+                    .readerName = readerName,
+                    .requester = requester,
+                    .artifact = kArtifactCredentials,
+                };
+                auto op = std::make_unique<Ops::ListCredentialsOperation>(std::move(channel), std::move(deps), state);
+                op->keepAlive(core.sharedCryptoContext());
+                op->keepAlive(credentials);
+                op->bindShutdownToken(core.shutdownToken());
+                return op;
+            });
+        m_opOwners[id.value()] = in.caller;
+        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+    } catch (const Ops::QueueFull&) {
+        replyError(connId, req, wire::SyncError::RateLimited);
+    }
+}
+
+void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const wire::ManagePin& msg)
+{
+    // Entry gating: capability -> authorize -> rate-limit -> validation, all
+    // BEFORE any Operation (and thus any prompt) exists — the same matrix and
+    // order as LibreLinux's Credentials1.ManagePin.
+    const std::uint64_t connId = in.connId;
+    const std::uint64_t req = in.request.req;
+    const auto routing = m_transport.cardRouting(msg.card);
+    if (!routing) {
+        replyError(connId, req, wire::SyncError::UnknownCard);
+        return;
+    }
+    if ((routing->caps & kPinManagementCapBit) == 0) {
+        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        return;
+    }
+
+    // Authorize + rate-limit (BEFORE any prompt), same posture + ordering as Sign.
+    if (!m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
+        replyError(connId, req, wire::SyncError::NotAuthorized);
+        return;
+    }
+    if (!m_core.rateLimiter().allow(in.caller)) {
+        replyError(connId, req, wire::SyncError::RateLimited);
+        return;
+    }
+
+    // The CDDL admits no open options container, so Linux's undefined-options-key
+    // entry rejection has one macOS analog: the activateKey wire key present on a
+    // verb that cannot carry it. Checked BEFORE the optional is flattened into
+    // the request (the flatten would erase a stray `activateKey: false`).
+    if (msg.activateKey.has_value() && msg.verb != kVerbActivatePin) {
+        replyError(connId, req, wire::SyncError::InvalidRequest);
+        return;
+    }
+
+    Ops::PinManageRequest request{
+        .cardKey = routing->cardKey,
+        .pinId = msg.pinId,
+        .verb = msg.verb,
+        .activateKey = msg.activateKey.value_or(false),
+    };
+    // Resolve the addressed record against the LATEST listing captured at entry. A
+    // client that never listed (no snapshot) or names an unknown id is rejected here
+    // rather than triggering an implicit list — an implicit list could prompt for
+    // the CAN inside a call the user never framed as a read.
+    std::optional<A::CredentialSnapshot> snapshot = m_core.credentialSnapshotCache().get(routing->cardKey);
+    if (const auto valid = Ops::validatePinManageRequest(request, snapshot ? &*snapshot : nullptr); !valid) {
+        replyError(connId, req, mapEntryError(valid.error()));
+        return;
+    }
+
+    const std::string requester = requesterLabel(in.caller);
+    const std::string cardKey = routing->cardKey;
+    const std::string readerName = routing->readerName;
+    const A::ObjectId readerId = routing->readerId;
+    auto& core = m_core;
+
+    try {
+        const auto id = core.operationManager().publish(
+            readerId, readerName, in.caller,
+            [this, connId, &core, cardKey, readerName, requester, request = std::move(request),
+             snapshot = std::move(*snapshot)](Ops::CardSessionHolder* holder,
+                                              A::OperationId opId) mutable -> std::unique_ptr<Ops::OperationBase> {
+                auto credentials = std::make_shared<Ops::LmCredentialManager>();
+                auto state = std::make_shared<Ops::OperationState>();
+                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
+                                                                        SocketOperationChannel::SignArtifactSink{},
+                                                                        makeOpFinishedSink());
+                Ops::ManagePinOperation::Deps deps{
+                    .holder = holder,
+                    .credentials = *credentials,
+                    .prompter = *core.sharedCryptoContext()->prompter,
+                    .serializer = *core.sharedCryptoContext()->serializer,
+                    .credCache = core.credentialCache(),
+                    .snapshotCache = core.credentialSnapshotCache(),
+                    .readCache = core.cardReadCache(),
+                    .cardKey = cardKey,
+                    .readerName = readerName,
+                    .requester = requester,
+                    .artifact = kArtifactCredentials,
+                    .request = std::move(request),
+                    .snapshot = std::move(snapshot),
+                };
+                auto op = std::make_unique<Ops::ManagePinOperation>(std::move(channel), std::move(deps), state);
+                op->keepAlive(core.sharedCryptoContext());
+                op->keepAlive(credentials);
+                op->bindShutdownToken(core.shutdownToken());
+                return op;
+            });
+        m_opOwners[id.value()] = in.caller;
+        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+    } catch (const Ops::QueueFull&) {
+        replyError(connId, req, wire::SyncError::RateLimited);
+    }
+}
+
+void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, const wire::ActivateSigningKey& msg)
+{
+    // Authorize + rate-limit (BEFORE any prompt). No client-supplied arguments to
+    // validate — the addressed signing-key record is resolved inside the operation
+    // from the latest listing (a card that exposes none answers unsupported).
+    const std::uint64_t connId = in.connId;
+    const std::uint64_t req = in.request.req;
+    const auto routing = m_transport.cardRouting(msg.card);
+    if (!routing) {
+        replyError(connId, req, wire::SyncError::UnknownCard);
+        return;
+    }
+    if ((routing->caps & kPinManagementCapBit) == 0) {
+        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        return;
+    }
+    if (!m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
+        replyError(connId, req, wire::SyncError::NotAuthorized);
+        return;
+    }
+    if (!m_core.rateLimiter().allow(in.caller)) {
+        replyError(connId, req, wire::SyncError::RateLimited);
+        return;
+    }
+
+    const std::string requester = requesterLabel(in.caller);
+    const std::string cardKey = routing->cardKey;
+    const std::string readerName = routing->readerName;
+    const A::ObjectId readerId = routing->readerId;
+    auto& core = m_core;
+
+    try {
+        const auto id = core.operationManager().publish(
+            readerId, readerName, in.caller,
+            [this, connId, &core, cardKey, readerName,
+             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
+                auto credentials = std::make_shared<Ops::LmCredentialManager>();
+                auto state = std::make_shared<Ops::OperationState>();
+                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
+                                                                        SocketOperationChannel::SignArtifactSink{},
+                                                                        makeOpFinishedSink());
+                Ops::ActivateSigningKeyOperation::Deps deps{
+                    .holder = holder,
+                    .credentials = *credentials,
+                    .prompter = *core.sharedCryptoContext()->prompter,
+                    .serializer = *core.sharedCryptoContext()->serializer,
+                    .credCache = core.credentialCache(),
+                    .snapshotCache = core.credentialSnapshotCache(),
+                    .readCache = core.cardReadCache(),
+                    .cardKey = cardKey,
+                    .readerName = readerName,
+                    .requester = requester,
+                    .artifact = kArtifactCredentials,
+                };
+                auto op =
+                    std::make_unique<Ops::ActivateSigningKeyOperation>(std::move(channel), std::move(deps), state);
+                op->keepAlive(core.sharedCryptoContext());
+                op->keepAlive(credentials);
+                op->bindShutdownToken(core.shutdownToken());
+                return op;
+            });
+        m_opOwners[id.value()] = in.caller;
         sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
         replyError(connId, req, wire::SyncError::RateLimited);

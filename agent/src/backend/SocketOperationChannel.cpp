@@ -99,6 +99,13 @@ wire::CertInfo toCertInfo(const A::CertSnapshot& c)
     return out;
 }
 
+// Exhaustiveness guard for the ResultPayload visit below: instantiated only
+// inside a discarded if-constexpr branch, so it fires ONLY if a future
+// ResultPayload arm reaches the final else without an explicit arm above it
+// (compile-break honesty in place of an else-arm assumption).
+template <class>
+inline constexpr bool always_false_v = false;
+
 } // namespace
 
 SocketOperationChannel::SocketOperationChannel(SocketTransport& transport, std::uint64_t connId, std::uint64_t opId,
@@ -193,7 +200,7 @@ try {
                     fds.push_back(std::move(*fd));
                 }
                 ev.result = std::move(pr);
-            } else { // SignedArtifact
+            } else if constexpr (std::is_same_v<T, Ops::SignedArtifact>) {
                 auto fd = wire::anonFdFromBytes(arm.bytes);
                 if (!fd) {
                     ok = false;
@@ -207,6 +214,14 @@ try {
                 if (m_onSignArtifact) {
                     m_onSignArtifact(m_opId, arm); // stash for GetSignResult recovery
                 }
+            } else if constexpr (std::is_same_v<T, Ops::CredentialResult>) {
+                // Member copy: the wire type carries the agent value types
+                // directly (the codec, not this channel, maps them to their
+                // wire tokens/keys). Delivered inline, exactly like
+                // Identity/Certificates — no fd, no seal step.
+                ev.result = wire::CredentialsResult{arm.op, arm.records};
+            } else {
+                static_assert(always_false_v<T>, "SocketOperationChannel::emitResult: unhandled ResultPayload arm");
             }
         },
         result);

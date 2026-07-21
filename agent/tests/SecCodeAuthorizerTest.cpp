@@ -44,6 +44,7 @@ TEST(SecCodeAuthorizer, DefaultActionsAllowedByDefault)
     EXPECT_TRUE(authz.authorize(Agent::kActionConfigure, kCaller));
     EXPECT_TRUE(authz.authorize(Agent::kActionSign, kCaller));
     EXPECT_TRUE(authz.authorize(Agent::kActionPkcs11Login, kCaller));
+    EXPECT_TRUE(authz.authorize(Agent::kActionCredentialsManage, kCaller));
 }
 
 TEST(SecCodeAuthorizer, UnknownActionDenied)

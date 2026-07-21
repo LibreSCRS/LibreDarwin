@@ -29,6 +29,9 @@ namespace LibreSCRS::Darwin {
 // LibreAgent::Core:
 //   - ReadIdentity/GetPhoto/ReadCertificates/Sign -> mint a SocketOperationChannel
 //     + OperationManager::publish, reply OpStarted;
+//   - ListCredentials/ManagePin/ActivateSigningKey -> the same publish path
+//     behind the PinManagement capability + the credentials entry gates
+//     (validate -> authorize -> rate-limit; the read is capability-gated only);
 //   - GetCertDer / Pkcs11.{PublicKey,Login,Logout,SignRaw,Decrypt} -> Pkcs11Broker
 //     (async server-handoff; reply on completion; all reader-addressed);
 //   - GetState -> transport snapshot; Cancel -> OperationManager::cancel;
@@ -86,6 +89,9 @@ private:
     void handleGetPhoto(SocketTransport::Inbound& in, const wire::GetPhoto& msg);
     void handleReadCertificates(SocketTransport::Inbound& in, const wire::ReadCertificates& msg);
     void handleSign(SocketTransport::Inbound& in, const wire::Sign& msg);
+    void handleListCredentials(SocketTransport::Inbound& in, const wire::ListCredentials& msg);
+    void handleManagePin(SocketTransport::Inbound& in, const wire::ManagePin& msg);
+    void handleActivateSigningKey(SocketTransport::Inbound& in, const wire::ActivateSigningKey& msg);
     void handleCancel(std::uint64_t connId, std::uint64_t req, const wire::CancelOp& msg,
                       const Agent::CallerToken& caller);
     void handleGetSignResult(std::uint64_t connId, std::uint64_t req, const wire::GetSignResult& msg,

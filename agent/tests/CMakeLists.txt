@@ -65,7 +65,7 @@ target_link_options(MessagesRoundTripTest PRIVATE -fexperimental-library)
 add_test(NAME MessagesRoundTripTest COMMAND MessagesRoundTripTest)
 
 # Backend: peer identity + the socket transport (real bound socket + GCD loop).
-foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest ReadCertificatesOperationTest)
+foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest ReadCertificatesOperationTest ManagePinOperationTest)
     add_executable(${backend_test} ${backend_test}.cpp)
     target_link_libraries(${backend_test}
         PRIVATE
@@ -87,6 +87,19 @@ target_include_directories(ReadCertificatesOperationTest PRIVATE ${CMAKE_CURRENT
 # Only this TEST TU opts in; production agent targets never define it, so the
 # internal surface stays out of the shipped binaries.
 target_compile_definitions(ReadCertificatesOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
+
+# ManagePinOperationTest reaches the same backend-private ops headers and builds
+# a detached session the same way, so it takes the identical src/ include +
+# internal-build opt-in.
+target_include_directories(ManagePinOperationTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(ManagePinOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
+
+# SocketFrontendTest drives the credentials ops end-to-end over the socket: it
+# includes the src-private CardRemovalCaches.h (the shared removal-invalidation
+# helper under test) and opens detached sessions via the same LM-internal
+# factory, so it takes the identical src/ include + internal-build opt-in.
+target_include_directories(SocketFrontendTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+target_compile_definitions(SocketFrontendTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
 
 # libFuzzer target for the CBOR decoder (untrusted-parser hardening). Off by
 # default; needs a clang WITH the libFuzzer runtime (e.g. Homebrew LLVM) — Apple

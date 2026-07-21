@@ -57,9 +57,42 @@ wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptio
     return r;
 }
 
+// Options dictionary parity with the Linux change_pin path: the display
+// chrome maps exactly as the single-secret request; the wire exposes PER-ROLE
+// length bounds (primary* for the current-PIN field, new* for the new +
+// confirm fields) while the seam carries ONE (min, max) pair — so the pair
+// maps onto BOTH roles: the same policy applies to the current and the new
+// PIN.
+wire::RequestSecrets buildChangeRequest(const Agent::PromptOptions& o)
+{
+    wire::RequestSecrets r;
+    r.kind = "change_pin";
+    // Interim carry until the prompter wire gains card/pin label fields: the
+    // shared change flow sends title="" with the context in cardLabel/pinLabel,
+    // which this wire does not transport — surface the PIN label as the title
+    // so the modal keeps identifying what is being changed.
+    r.title = (o.title.empty() && !o.pinLabel.empty()) ? o.pinLabel : o.title;
+    r.description = o.description;
+    r.requester = o.requester;
+    r.artifact = o.artifact;
+    r.primaryMinLength = o.minLength;
+    r.primaryMaxLength = o.maxLength;
+    r.newMinLength = o.minLength;
+    r.newMaxLength = o.maxLength;
+    return r;
+}
+
 Agent::PromptResult errorResult(std::string message)
 {
     Agent::PromptResult r;
+    r.status = Agent::PromptStatus::Error;
+    r.userMessage = std::move(message);
+    return r;
+}
+
+Agent::PinChangePromptResult changeErrorResult(std::string message)
+{
+    Agent::PinChangePromptResult r;
     r.status = Agent::PromptStatus::Error;
     r.userMessage = std::move(message);
     return r;
@@ -138,6 +171,64 @@ Agent::PromptResult MacPrompterClient::requestCan(const Agent::PromptOptions& op
 Agent::PromptResult MacPrompterClient::requestMrz(const Agent::PromptOptions& options)
 {
     return request(wire::PromptKind::Mrz, options);
+}
+
+Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::PromptOptions& options)
+{
+    wire::UniqueFd fd = connectPrompter(m_socketPath);
+    if (!fd) {
+        return changeErrorResult("prompter unavailable");
+    }
+
+    const auto body = wire::toCbor(buildChangeRequest(options)).encode();
+    if (!wire::sendFrame(fd.get(), body).has_value()) {
+        return changeErrorResult("prompter send failed");
+    }
+    auto frame = wire::recvFrame(fd.get());
+    if (!frame.has_value()) {
+        return changeErrorResult("prompter recv failed");
+    }
+    auto reply = wire::parseMultiPromptReply(frame->body);
+    // The raw frame body carries BOTH secrets inline for Ok replies; zero it
+    // the moment it is parsed, whatever the outcome (parseMultiPromptReply
+    // scrubbed its own decoded intermediates, and decode() zeroed the
+    // canonical re-encode).
+    wire::secureZero(frame->body);
+    if (!reply.has_value()) {
+        return changeErrorResult("prompter reply malformed");
+    }
+
+    Agent::PinChangePromptResult result;
+    switch (reply->status) {
+    case wire::PromptReplyStatus::Ok: {
+        result.status = Agent::PromptStatus::Ok;
+        // Scrub each inline secret into a cleansing Secure::String, then zero
+        // its transfer buffer so no plaintext lingers in the CBOR frame.
+        result.current = LibreSCRS::Secure::String(
+            std::string_view(reinterpret_cast<const char*>(reply->primary.data()), reply->primary.size()));
+        std::fill(reply->primary.begin(), reply->primary.end(), std::uint8_t{0});
+        result.newPin = LibreSCRS::Secure::String(
+            std::string_view(reinterpret_cast<const char*>(reply->secondary.data()), reply->secondary.size()));
+        std::fill(reply->secondary.begin(), reply->secondary.end(), std::uint8_t{0});
+        break;
+    }
+    case wire::PromptReplyStatus::Cancelled:
+        result.status = Agent::PromptStatus::Cancelled;
+        break;
+    case wire::PromptReplyStatus::Unauthorized:
+        // We ARE the agent; unauthorized means the prompter rejected our peer
+        // creds — a misconfiguration. Treat as an error (fail closed).
+        result.status = Agent::PromptStatus::Error;
+        result.userMessage = "prompter rejected the agent (unauthorized)";
+        break;
+    case wire::PromptReplyStatus::Error:
+        result.status = Agent::PromptStatus::Error;
+        break;
+    }
+    if (!reply->userMessage.empty() && result.userMessage.empty()) {
+        result.userMessage = reply->userMessage;
+    }
+    return result;
 }
 
 void MacPrompterClient::cancel() noexcept

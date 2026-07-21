@@ -3,13 +3,17 @@
 //
 // AppKit credential window. An NSAlert with a NSSecureTextField accessory, run
 // modally on the main thread. The secret is read out of the field before the
-// window is dismissed, then the field is scrubbed.
+// window is dismissed, then the field is scrubbed. The change variant stacks
+// three secure fields (current / new / confirm) behind the same discipline.
 #include "PromptWindow.h"
 
 #import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
 
+#include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <utility>
 
 namespace LibreSCRS::Darwin {
 
@@ -30,6 +34,61 @@ NSString* nsstr(const std::string& s)
 {
     return [NSString stringWithUTF8String:s.c_str()];
 }
+
+// Shared informative-text chrome (description / requester / artifact) —
+// identical for the single-secret and change prompts.
+NSString* informativeText(const std::string& description, const std::string& requester, const std::string& artifact)
+{
+    NSMutableString* info = [NSMutableString string];
+    if (!description.empty()) {
+        [info appendString:nsstr(description)];
+    }
+    if (!requester.empty()) {
+        [info appendFormat:@"%@Requested by: %@", info.length ? @"\n" : @"", nsstr(requester)];
+    }
+    if (!artifact.empty()) {
+        [info appendFormat:@"%@Document: %@", info.length ? @"\n" : @"", nsstr(artifact)];
+    }
+    return info;
+}
+
+// The change modal's OK gate, pure so it is testable by inspection: current
+// within the primary bounds AND new within the new bounds AND confirm equal
+// to new. Lengths are UTF-8 byte counts — the unit that crosses the wire. A
+// zero bound is "unset" on the wire (the request codec omits zero fields):
+// min 0 imposes no lower limit and max 0 no upper limit, so unknown card
+// policy degrades to "let the card decide" rather than a permanently
+// disabled OK.
+bool withinBounds(std::size_t len, std::uint32_t minLen, std::uint32_t maxLen)
+{
+    return len >= minLen && (maxLen == 0 || len <= maxLen);
+}
+
+bool changeInputsAcceptable(const wire::RequestSecrets& req, std::size_t currentLen, std::size_t newLen,
+                            bool confirmMatchesNew)
+{
+    return withinBounds(currentLen, req.primaryMinLength, req.primaryMaxLength) &&
+           withinBounds(newLen, req.newMinLength, req.newMaxLength) && confirmMatchesNew;
+}
+
+std::size_t utf8Length(NSString* value)
+{
+    return static_cast<std::size_t>([value lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+}
+
+// One captioned secure-entry row inside the change modal's accessory view;
+// `y` is the FIELD's bottom edge (AppKit origin is bottom-left, so rows are
+// laid out bottom-up: caption 16 pt above a 24 pt field, 2 pt apart).
+NSSecureTextField* addSecureRow(NSView* accessory, NSString* caption, CGFloat y, CGFloat width)
+{
+    NSTextField* label = [NSTextField labelWithString:caption];
+    label.frame = NSMakeRect(0, y + 26, width, 16);
+    label.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+    [accessory addSubview:label];
+    NSSecureTextField* field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, y, width, 24)];
+    [accessory addSubview:field];
+    return field;
+}
 } // namespace
 
 wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
@@ -47,17 +106,7 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
                                                                       : "PIN";
           alert.messageText =
               req.title.empty() ? [NSString stringWithFormat:@"Enter your %s", kindLabel] : nsstr(req.title);
-          NSMutableString* info = [NSMutableString string];
-          if (!req.description.empty()) {
-              [info appendString:nsstr(req.description)];
-          }
-          if (!req.requester.empty()) {
-              [info appendFormat:@"%@Requested by: %@", info.length ? @"\n" : @"", nsstr(req.requester)];
-          }
-          if (!req.artifact.empty()) {
-              [info appendFormat:@"%@Document: %@", info.length ? @"\n" : @"", nsstr(req.artifact)];
-          }
-          alert.informativeText = info;
+          alert.informativeText = informativeText(req.description, req.requester, req.artifact);
           [alert addButtonWithTitle:@"OK"];
           [alert addButtonWithTitle:@"Cancel"];
 
@@ -76,6 +125,8 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
               // here; their lifetime is minimised (autoreleasepool around this
               // block) and everything downstream — reply.secret, the CBOR tree,
               // the encoded frame — is zeroed after send (sendPromptReplyScrubbed).
+              // The reply itself leaves by explicit move, so the __block byref
+              // storage keeps no unscrubbed copy of the secret.
               NSString* value = field.stringValue;
               const char* utf8 = value.UTF8String;
               const std::size_t len = utf8 != nullptr ? std::strlen(utf8) : 0;
@@ -87,7 +138,103 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
           }
       }
     });
-    return reply;
+    return std::move(reply);
+}
+
+wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets& req)
+{
+    __block wire::MultiPromptReply reply;
+    reply.status = wire::PromptReplyStatus::Error;
+    // Fail closed on a flow this window does not implement (`kind` is an open
+    // discriminator at the wire layer): no UI, no secrets.
+    if (req.kind != "change_pin") {
+        reply.userMessage = "unsupported RequestSecrets kind";
+        return reply;
+    }
+    Impl* impl = m_impl;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+      @autoreleasepool {
+          [NSApp activateIgnoringOtherApps:YES];
+          NSAlert* alert = [[NSAlert alloc] init];
+          alert.messageText = req.title.empty() ? @"Change your PIN" : nsstr(req.title);
+          alert.informativeText = informativeText(req.description, req.requester, req.artifact);
+          [alert addButtonWithTitle:@"OK"];
+          [alert addButtonWithTitle:@"Cancel"];
+
+          const CGFloat width = 260;
+          NSView* accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, 142)];
+          NSSecureTextField* currentField = addSecureRow(accessory, @"Current PIN", 100, width);
+          NSSecureTextField* newField = addSecureRow(accessory, @"New PIN", 50, width);
+          NSSecureTextField* confirmField = addSecureRow(accessory, @"Confirm new PIN", 0, width);
+          currentField.nextKeyView = newField;
+          newField.nextKeyView = confirmField;
+          confirmField.nextKeyView = currentField;
+          alert.accessoryView = accessory;
+          [alert.window setInitialFirstResponder:currentField];
+
+          // Per-role length gating: OK stays disabled until every field
+          // passes changeInputsAcceptable (current within the primary bounds,
+          // new within the new bounds, confirm equal to new). The equality
+          // check is the confirm entry's ONLY consumer — its value never
+          // leaves the window.
+          NSButton* okButton = alert.buttons.firstObject;
+          bool (^inputsAcceptable)(void) = ^{
+            return changeInputsAcceptable(req, utf8Length(currentField.stringValue), utf8Length(newField.stringValue),
+                                          [confirmField.stringValue isEqualToString:newField.stringValue]);
+          };
+          okButton.enabled = inputsAcceptable();
+          NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
+          NSMutableArray<id>* observers = [NSMutableArray array];
+          for (NSSecureTextField* field in @[ currentField, newField, confirmField ]) {
+              [observers addObject:[center addObserverForName:NSControlTextDidChangeNotification
+                                                       object:field
+                                                        queue:nil
+                                                   usingBlock:^(NSNotification* note) {
+                                                     (void)note;
+                                                     okButton.enabled = inputsAcceptable();
+                                                   }]];
+          }
+
+          impl->activeAlert = alert;
+          const NSModalResponse resp = [alert runModal];
+          impl->activeAlert = nil;
+          for (id token in observers) {
+              [center removeObserver:token];
+          }
+
+          if (resp == NSAlertFirstButtonReturn) {
+              // Read-before-hide: pull BOTH secrets out of their fields NOW,
+              // then scrub. Documented residual: the NSSecureTextField/
+              // NSString internals (autoreleased, immutable) cannot be
+              // deterministically zeroed from here; their lifetime is
+              // minimised (autoreleasepool around this block) and everything
+              // downstream — reply.primary/reply.secondary, the CBOR tree,
+              // the encoded frame — is zeroed after send
+              // (sendPromptReplyScrubbed). The reply itself leaves by explicit
+              // move, so the __block byref storage keeps no unscrubbed copies.
+              NSString* currentValue = currentField.stringValue;
+              const char* currentUtf8 = currentValue.UTF8String;
+              const std::size_t currentLen = currentUtf8 != nullptr ? std::strlen(currentUtf8) : 0;
+              NSString* newValue = newField.stringValue;
+              const char* newUtf8 = newValue.UTF8String;
+              const std::size_t newLen = newUtf8 != nullptr ? std::strlen(newUtf8) : 0;
+              reply.status = wire::PromptReplyStatus::Ok;
+              reply.primary.assign(currentUtf8, currentUtf8 + currentLen);
+              reply.secondary.assign(newUtf8, newUtf8 + newLen);
+          } else {
+              reply.status = wire::PromptReplyStatus::Cancelled;
+          }
+          // Clear ALL THREE fields after the read, on BOTH outcomes. The
+          // confirm entry was never read into the reply — validation was its
+          // only consumer — but its buffer holds a copy of the new PIN, so
+          // its residual is cleared explicitly too.
+          currentField.stringValue = @"";
+          newField.stringValue = @"";
+          confirmField.stringValue = @"";
+      }
+    });
+    return std::move(reply);
 }
 
 void PromptWindow::dismiss()

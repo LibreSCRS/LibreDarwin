@@ -15,6 +15,9 @@
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Darwin/backend/SystemLifecycle.h>
 
+#include "CardRemovalCaches.h" // invalidateCardRemovalCaches (shared with the removal test)
+#include "FullScrubCaches.h"   // clearFullScrubCaches (shared with the scrub test)
+
 #include <LibreSCRS/Agent/AgentCore.h>
 #include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>
@@ -225,14 +228,16 @@ int main()
         [&frontend](Agent::ObjectId id) { frontend->onWithdrawn(id); },
         [&frontend](Agent::ObjectId r, const Agent::PropertyDelta& d) { frontend->onReaderPropertiesChanged(r, d); });
 
-    // Card removal: scrub the credential/read caches under the per-insertion card
+    // Card removal: drop every per-card cache keyed on the per-insertion card
     // key (the card ObjectId, stringified — the key the typed-op deps + broker
-    // seams use), revoke the card's PKCS#11 leases, and invalidate the reader's
-    // shared CardSession so the next op re-opens against whatever card is next.
+    // seams use); the exact cache set lives in invalidateCardRemovalCaches(),
+    // one source of truth shared with the removal regression test. Then revoke
+    // the card's PKCS#11 leases and invalidate the reader's shared CardSession
+    // so the next op re-opens against whatever card is next.
     core.cardKeyTracker().setOnKeyRemoved([&core, &frontend](Agent::ObjectId cardKey, const std::string& readerName) {
         const std::string key = std::to_string(cardKey.value());
-        core.credentialCache().invalidate(key);
-        core.cardReadCache().invalidate(key);
+        Agent::invalidateCardRemovalCaches(core.credentialCache(), core.cardReadCache(), core.credentialSnapshotCache(),
+                                           key);
         if (frontend) {
             frontend->onCardRemovedForLease(cardKey);
         }
@@ -273,7 +278,9 @@ int main()
     auto fullScrub = [&](wire::QuiesceReason reason) {
         {
             std::lock_guard<std::mutex> lk(stateMutex);
-            core.credentialCache().clear();
+            // The exact cache set lives in clearFullScrubCaches(), one source
+            // of truth shared with the scrub regression test.
+            Agent::clearFullScrubCaches(core.credentialCache(), core.credentialSnapshotCache());
             for (const auto& reader : core.objectRegistry().readers()) {
                 core.operationManager().invalidateReaderSession(reader.id);
             }

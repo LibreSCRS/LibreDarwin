@@ -49,7 +49,10 @@ add_library(LibreDarwinAgentBackend STATIC
     src/operations/ReadIdentityOperation.cpp
     src/operations/GetPhotoOperation.cpp
     src/operations/ReadCertificatesOperation.cpp
-    src/operations/SignOperation.cpp)
+    src/operations/SignOperation.cpp
+    src/operations/ListCredentialsOperation.cpp
+    src/operations/ManagePinOperation.cpp
+    src/operations/ActivateSigningKeyOperation.cpp)
 target_include_directories(LibreDarwinAgentBackend PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE

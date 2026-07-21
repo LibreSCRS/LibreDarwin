@@ -30,6 +30,7 @@
 
 using namespace LibreSCRS::Darwin;
 namespace Ops = ::LibreSCRS::Agent::Operations;
+namespace A = ::LibreSCRS::Agent;
 
 // Allocation-failure injection (this test binary only). A replacement global
 // operator new/delete pair routes through std::malloc/std::free; setting
@@ -233,6 +234,139 @@ TEST(SocketOperationChannel, SignResultRidesAnScmRightsFd)
     const ssize_t n = ::pread(fd, buf, sizeof(buf), 0);
     ASSERT_EQ(n, 6);
     EXPECT_EQ(std::string(buf, 6), "SIGNED");
+
+    ::close(w.client);
+    w.tr.reset();
+    std::filesystem::remove(w.path);
+}
+
+// Failed-mutation payload (InvalidPin, retriesLeft=2, blocked=false, records
+// empty): the frame decodes to the wire::CredentialsResult shape and
+// delivery is inline (no fd) with emitResult returning true.
+TEST(SocketOperationChannel, CredentialsResultInvalidPinMutationDecodes)
+{
+    Wired w = wireUp();
+    ASSERT_NE(w.connId, 0u);
+    auto state = std::make_shared<Ops::OperationState>();
+    SocketOperationChannel channel(*w.tr, w.connId, 21, state);
+
+    A::CredentialOpResult op;
+    op.outcome = A::CredentialOutcome::InvalidPin;
+    op.retriesLeft = 2;
+    op.blocked = false;
+    const Ops::CredentialResult payload{op, {}};
+    EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{payload}));
+
+    auto frame = wire::recvFrame(w.client);
+    ASSERT_TRUE(frame.has_value());
+    EXPECT_TRUE(frame->fds.empty()); // inline delivery: no fd, no seal step
+    const auto decoded = wire::decode(frame->body);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(*decoded->find("t")->asText(), "OpResultReady");
+    EXPECT_EQ(decoded->find("op")->asUInt(), 21u);
+
+    const auto* res = decoded->find("result");
+    ASSERT_NE(res, nullptr);
+    EXPECT_EQ(*res->find("kind")->asText(), "Credentials");
+
+    const auto* credOp = res->find("result");
+    ASSERT_NE(credOp, nullptr);
+    EXPECT_EQ(*credOp->find("outcome")->asText(), "invalidPin");
+    EXPECT_EQ(credOp->find("retriesLeft")->asUInt(), 2u);
+    EXPECT_EQ(*credOp->find("blocked")->asBool(), false);
+    EXPECT_EQ(credOp->find("pinActivated"), nullptr); // omitted: nullopt on the source
+
+    const auto* recordsVal = res->find("records");
+    ASSERT_NE(recordsVal, nullptr);
+    const auto* records = recordsVal->asArray();
+    ASSERT_NE(records, nullptr);
+    EXPECT_TRUE(records->empty());
+
+    ::close(w.client);
+    w.tr.reset();
+    std::filesystem::remove(w.path);
+}
+
+// Ok listing payload (2 records): the frame decodes with the records intact.
+TEST(SocketOperationChannel, CredentialsResultOkListingCarriesRecords)
+{
+    Wired w = wireUp();
+    ASSERT_NE(w.connId, 0u);
+    auto state = std::make_shared<Ops::OperationState>();
+    SocketOperationChannel channel(*w.tr, w.connId, 22, state);
+
+    A::CredentialOpResult op;
+    op.outcome = A::CredentialOutcome::Ok;
+
+    A::CredentialRecord user;
+    user.id = "user:0x11";
+    user.label = "User PIN";
+    user.kind = "user";
+    user.state = "operational";
+    user.retriesLeft = 3;
+
+    A::CredentialRecord sign;
+    sign.id = "sign:0x12";
+    sign.label = "Signing PIN";
+    sign.kind = "sign";
+    sign.state = "blocked";
+
+    const Ops::CredentialResult payload{op, {user, sign}};
+    EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{payload}));
+
+    auto frame = wire::recvFrame(w.client);
+    ASSERT_TRUE(frame.has_value());
+    const auto decoded = wire::decode(frame->body);
+    ASSERT_TRUE(decoded.has_value());
+
+    const auto* res = decoded->find("result");
+    ASSERT_NE(res, nullptr);
+    EXPECT_EQ(*res->find("kind")->asText(), "Credentials");
+    const auto* credOp = res->find("result");
+    ASSERT_NE(credOp, nullptr);
+    EXPECT_EQ(*credOp->find("outcome")->asText(), "ok");
+
+    const auto* recordsVal = res->find("records");
+    ASSERT_NE(recordsVal, nullptr);
+    const auto* records = recordsVal->asArray();
+    ASSERT_NE(records, nullptr);
+    ASSERT_EQ(records->size(), 2u);
+    EXPECT_EQ(*(*records)[0].find("id")->asText(), "user:0x11");
+    EXPECT_EQ(*(*records)[0].find("label")->asText(), "User PIN");
+    EXPECT_EQ(*(*records)[0].find("kind")->asText(), "user");
+    EXPECT_EQ(*(*records)[0].find("state")->asText(), "operational");
+    EXPECT_EQ((*records)[0].find("retriesLeft")->asUInt(), 3u);
+    EXPECT_EQ(*(*records)[1].find("id")->asText(), "sign:0x12");
+    EXPECT_EQ(*(*records)[1].find("kind")->asText(), "sign");
+    EXPECT_EQ(*(*records)[1].find("state")->asText(), "blocked");
+
+    ::close(w.client);
+    w.tr.reset();
+    std::filesystem::remove(w.path);
+}
+
+// Ordering: the result frame is enqueued before a subsequent emitFinished
+// frame, so the client observes OpResultReady strictly before OpFinished.
+TEST(SocketOperationChannel, CredentialsResultEnqueuedBeforeFinished)
+{
+    Wired w = wireUp();
+    ASSERT_NE(w.connId, 0u);
+    auto state = std::make_shared<Ops::OperationState>();
+    SocketOperationChannel channel(*w.tr, w.connId, 23, state);
+
+    A::CredentialOpResult op;
+    op.outcome = A::CredentialOutcome::Ok;
+    const Ops::CredentialResult payload{op, {}};
+    EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{payload}));
+    channel.emitFinished(Ops::OperationStatus::Ok, A::ErrorCode::None, "k", "f");
+
+    const auto first = recvEvent(w.client);
+    EXPECT_EQ(*first.find("t")->asText(), "OpResultReady");
+    EXPECT_EQ(first.find("op")->asUInt(), 23u);
+
+    const auto second = recvEvent(w.client);
+    EXPECT_EQ(*second.find("t")->asText(), "OpFinished");
+    EXPECT_EQ(second.find("op")->asUInt(), 23u);
 
     ::close(w.client);
     w.tr.reset();

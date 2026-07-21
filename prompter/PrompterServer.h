@@ -21,15 +21,16 @@ namespace LibreSCRS::Darwin {
 // prompter.sock, PEER-AUTHENTICATES that the connecting client is the agent
 // (fail-closed "unauthorized" otherwise — a same-uid process must not be able
 // to drive the credential window and harvest a secret), and dispatches each
-// RequestSecret to an injected SecretProvider (the AppKit window) /
+// RequestSecret to an injected SecretProvider (the AppKit window), each
+// RequestSecrets to a MultiSecretProvider (the change modal) and each
 // CancelCurrent to a CancelHandler. LM-free (links wire-core only); the
-// provider + peer-auth are seams so the server logic is unit-testable without
+// providers + peer-auth are seams so the server logic is unit-testable without
 // a display or real code signing.
 //
 // Event-driven on GCD dispatch sources (mirroring the agent SocketTransport):
 // one serial queue hosts the accept source, every per-connection read source,
-// and the connection registry; the BLOCKING SecretProvider call (the modal)
-// runs on a separate concurrent worker queue. A CancelCurrent arriving on a
+// and the connection registry; the BLOCKING provider call (the modal) runs on
+// a separate concurrent worker queue. A CancelCurrent arriving on a
 // second connection is therefore read and dispatched WHILE a modal raised by a
 // first connection is still up — the modal blocks the worker and the main
 // queue, never the serial queue. One request is served per connection; the
@@ -41,6 +42,10 @@ public:
     // Show the credential window for `req`, return the outcome. Called on the
     // concurrent worker queue; the window impl marshals UI to the main thread.
     using SecretProvider = std::function<wire::PromptReply(const wire::PromptRequest& req)>;
+    // Show the multi-secret change window for `req` (RequestSecrets, kind
+    // "change_pin"), return the outcome. Same worker-queue calling convention
+    // as SecretProvider.
+    using MultiSecretProvider = std::function<wire::MultiPromptReply(const wire::RequestSecrets& req)>;
     // Dismiss whatever modal is currently up (CancelCurrent). Called inline on
     // the serial queue; must not block (the window impl dispatches abortModal
     // asynchronously to the main queue).
@@ -48,7 +53,8 @@ public:
     // Is this connecting peer the agent? (real impl: SecTask signing-id match).
     using PeerAuthorized = std::function<bool(const PeerCredentials&)>;
 
-    PrompterServer(std::string socketPath, SecretProvider provider, CancelHandler cancel, PeerAuthorized peerAuth);
+    PrompterServer(std::string socketPath, SecretProvider provider, MultiSecretProvider multiProvider,
+                   CancelHandler cancel, PeerAuthorized peerAuth);
     ~PrompterServer();
     PrompterServer(const PrompterServer&) = delete;
     PrompterServer& operator=(const PrompterServer&) = delete;
@@ -83,6 +89,7 @@ private:
 
     std::string m_socketPath;
     SecretProvider m_provider;
+    MultiSecretProvider m_multiProvider;
     CancelHandler m_cancel;
     PeerAuthorized m_peerAuth;
     wire::UniqueFd m_listen;

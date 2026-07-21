@@ -5,11 +5,12 @@
 
 namespace LibreSCRS::Darwin {
 
-// The AppKit secure-credential window (NSSecureTextField). showPrompt marshals to
-// the MAIN thread (dispatch_sync) so it is safe to call from the server's accept
-// thread; it reads the entered secret out of the field BEFORE tearing the window
-// down (read-before-hide) and scrubs the field. dismiss() aborts the active modal
-// so an in-flight showPrompt returns Cancelled (the CancelCurrent path).
+// The AppKit secure-credential window (NSSecureTextField). showPrompt and
+// showChangePrompt marshal to the MAIN thread (dispatch_sync) so they are safe
+// to call from the server's worker queue; they read the entered secrets out of
+// the fields BEFORE tearing the window down (read-before-hide) and scrub the
+// fields. dismiss() aborts the active modal so an in-flight
+// showPrompt/showChangePrompt returns Cancelled (the CancelCurrent path).
 class PromptWindow
 {
 public:
@@ -19,6 +20,11 @@ public:
     PromptWindow& operator=(const PromptWindow&) = delete;
 
     [[nodiscard]] wire::PromptReply showPrompt(const wire::PromptRequest& req);
+    // The multi-secret change modal (RequestSecrets, kind "change_pin"): three
+    // secure fields — current / new / confirm — with per-role length gating on
+    // OK. The confirm entry is validation-only and never leaves the window;
+    // kinds this window does not implement return Error without any UI.
+    [[nodiscard]] wire::MultiPromptReply showChangePrompt(const wire::RequestSecrets& req);
     void dismiss();
 
 private:

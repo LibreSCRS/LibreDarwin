@@ -206,6 +206,108 @@ CborValue encodeSignMeta(const SignMeta& s)
     return CborValue(std::move(m));
 }
 
+// CredentialOutcome -> its camelCase wire token. Exhaustive switch, NO default:
+// with -Werror=switch an appended outcome is a compile error until it is named
+// here. The agent only ENCODES outcomes (the client decodes them fail-closed).
+const char* credOutcomeToken(LibreSCRS::Agent::CredentialOutcome o) noexcept
+{
+    using LibreSCRS::Agent::CredentialOutcome;
+    switch (o) {
+    case CredentialOutcome::Unspecified:
+        return "unspecified";
+    case CredentialOutcome::Ok:
+        return "ok";
+    case CredentialOutcome::UserCancelled:
+        return "userCancelled";
+    case CredentialOutcome::MissingFields:
+        return "missingFields";
+    case CredentialOutcome::InvalidPin:
+        return "invalidPin";
+    case CredentialOutcome::Blocked:
+        return "blocked";
+    case CredentialOutcome::PluginError:
+        return "pluginError";
+    case CredentialOutcome::Unsupported:
+        return "unsupported";
+    case CredentialOutcome::KeyActivationFailed:
+        return "keyActivationFailed";
+    case CredentialOutcome::CardRemoved:
+        return "cardRemoved";
+    }
+    return "unspecified"; // unreachable (all enumerators handled)
+}
+
+// cred-result = { outcome, ? retriesLeft, blocked, ? pinActivated, ? keyActivated }.
+// Optional numeric/bool keys are OMITTED when nullopt; `blocked` is always written.
+CborValue encodeCredResult(const LibreSCRS::Agent::CredentialOpResult& r)
+{
+    Map m;
+    m.emplace("outcome", CborValue(credOutcomeToken(r.outcome)));
+    if (r.retriesLeft) {
+        m.emplace("retriesLeft", CborValue::uint(static_cast<std::uint64_t>(*r.retriesLeft)));
+    }
+    m.emplace("blocked", CborValue(r.blocked));
+    if (r.pinActivated) {
+        m.emplace("pinActivated", CborValue(*r.pinActivated));
+    }
+    if (r.keyActivated) {
+        m.emplace("keyActivated", CborValue(*r.keyActivated));
+    }
+    return CborValue(std::move(m));
+}
+
+// cred-record: 22 camelCase keys mirroring CredentialRecord. The four enum-valued
+// fields (kind/state/unblockStyle/recovery) are already token STRINGS on the
+// record (produced upstream via detail::*Token), written verbatim. Optional
+// numeric + guidance keys are OMITTED when nullopt; booleans are always written.
+CborValue encodeCredRecord(const LibreSCRS::Agent::CredentialRecord& rec)
+{
+    Map m;
+    m.emplace("id", CborValue(rec.id));
+    m.emplace("label", CborValue(rec.label));
+    m.emplace("kind", CborValue(rec.kind));
+    m.emplace("state", CborValue(rec.state));
+    if (rec.retriesLeft) {
+        m.emplace("retriesLeft", CborValue::uint(static_cast<std::uint64_t>(*rec.retriesLeft)));
+    }
+    if (rec.retriesMax) {
+        m.emplace("retriesMax", CborValue::uint(static_cast<std::uint64_t>(*rec.retriesMax)));
+    }
+    if (rec.usesLeft) {
+        m.emplace("usesLeft", CborValue::uint(static_cast<std::uint64_t>(*rec.usesLeft)));
+    }
+    if (rec.unblocksLeft) {
+        m.emplace("unblocksLeft", CborValue::uint(static_cast<std::uint64_t>(*rec.unblocksLeft)));
+    }
+    if (rec.minLength) {
+        m.emplace("minLength", CborValue::uint(static_cast<std::uint64_t>(*rec.minLength)));
+    }
+    if (rec.maxLength) {
+        m.emplace("maxLength", CborValue::uint(static_cast<std::uint64_t>(*rec.maxLength)));
+    }
+    m.emplace("canChange", CborValue(rec.canChange));
+    m.emplace("unblockable", CborValue(rec.unblockable));
+    m.emplace("unblockStyle", CborValue(rec.unblockStyle));
+    m.emplace("activatable", CborValue(rec.activatable));
+    m.emplace("keyActivationPending", CborValue(rec.keyActivationPending));
+    m.emplace("keyActivatable", CborValue(rec.keyActivatable));
+    m.emplace("recovery", CborValue(rec.recovery));
+    m.emplace("probeSafe", CborValue(rec.probeSafe));
+    if (rec.blockedGuidanceKey) {
+        m.emplace("blockedGuidanceKey", CborValue(*rec.blockedGuidanceKey));
+    }
+    if (rec.blockedGuidanceFallback) {
+        m.emplace("blockedGuidanceFallback", CborValue(*rec.blockedGuidanceFallback));
+    }
+    if (rec.keyActivationGuidanceKey) {
+        m.emplace("keyActivationGuidanceKey", CborValue(*rec.keyActivationGuidanceKey));
+    }
+    if (rec.keyActivationGuidanceFallback) {
+        m.emplace("keyActivationGuidanceFallback", CborValue(*rec.keyActivationGuidanceFallback));
+    }
+    return CborValue(std::move(m));
+}
+
 CborValue encodeOpResult(const OpResult& r)
 {
     return std::visit(
@@ -249,10 +351,19 @@ CborValue encodeOpResult(const OpResult& r)
                     certs.push_back(encodeCertInfo(c));
                 }
                 m.emplace("certs", CborValue(std::move(certs)));
-            } else { // SignResult
+            } else if constexpr (std::is_same_v<T, SignResult>) {
                 m.emplace("kind", CborValue("Sign"));
                 m.emplace("artifact", CborValue::uint(arm.artifact));
                 m.emplace("meta", encodeSignMeta(arm.meta));
+            } else { // CredentialsResult
+                m.emplace("kind", CborValue("Credentials"));
+                m.emplace("result", encodeCredResult(arm.result));
+                Array records;
+                records.reserve(arm.records.size());
+                for (const auto& rec : arm.records) {
+                    records.push_back(encodeCredRecord(rec));
+                }
+                m.emplace("records", CborValue(std::move(records)));
             }
             return CborValue(std::move(m));
         },
@@ -323,11 +434,25 @@ CborValue encodeRequestBody(const Request& body)
                 m.emplace("reader", CborValue(r.reader));
                 m.emplace("cert", CborValue(r.cert));
                 m.emplace("data", CborValue(r.data));
-            } else { // PkDecrypt
+            } else if constexpr (std::is_same_v<T, PkDecrypt>) {
                 m.emplace("t", CborValue("Pkcs11.Decrypt"));
                 m.emplace("reader", CborValue(r.reader));
                 m.emplace("cert", CborValue(r.cert));
                 m.emplace("data", CborValue(r.data));
+            } else if constexpr (std::is_same_v<T, ListCredentials>) {
+                m.emplace("t", CborValue("ListCredentials"));
+                m.emplace("card", CborValue(r.card));
+            } else if constexpr (std::is_same_v<T, ManagePin>) {
+                m.emplace("t", CborValue("ManagePin"));
+                m.emplace("card", CborValue(r.card));
+                m.emplace("pinId", CborValue(r.pinId));
+                m.emplace("verb", CborValue(r.verb));
+                if (r.activateKey) {
+                    m.emplace("activateKey", CborValue(*r.activateKey));
+                }
+            } else { // ActivateSigningKey
+                m.emplace("t", CborValue("ActivateSigningKey"));
+                m.emplace("card", CborValue(r.card));
             }
             return CborValue(std::move(m));
         },
@@ -378,6 +503,10 @@ std::string_view syncErrorName(SyncError e) noexcept
         return "InputTooLarge";
     case SyncError::RateLimited:
         return "RateLimited";
+    case SyncError::UnknownCredential:
+        return "UnknownCredential";
+    case SyncError::InvalidRequest:
+        return "InvalidRequest";
     }
     return "UnknownCard"; // unreachable (all enumerators handled)
 }
@@ -542,6 +671,39 @@ std::expected<RequestEnvelope, WireError> parseRequest(std::span<const std::uint
         } else {
             env.body = PkDecrypt{std::move(*reader), std::move(*cert), std::move(*data)};
         }
+    } else if (t == "ListCredentials") {
+        auto card = oneString("card");
+        if (!card) {
+            return std::unexpected(card.error());
+        }
+        env.body = ListCredentials{std::move(*card)};
+    } else if (t == "ManagePin") {
+        // pinId/verb are strings; the verb is validated against the closed
+        // cred-verb set (and the activateKey/verb combination) at the frontend
+        // entry gate, not here — the parser only models the shape, fail closed.
+        auto card = fText(*m, "card");
+        if (!card) {
+            return std::unexpected(card.error());
+        }
+        auto pinId = fText(*m, "pinId");
+        if (!pinId) {
+            return std::unexpected(pinId.error());
+        }
+        auto verb = fText(*m, "verb");
+        if (!verb) {
+            return std::unexpected(verb.error());
+        }
+        auto activateKey = fOptBool(*m, "activateKey");
+        if (!activateKey) {
+            return std::unexpected(activateKey.error());
+        }
+        env.body = ManagePin{std::move(*card), std::move(*pinId), std::move(*verb), *activateKey};
+    } else if (t == "ActivateSigningKey") {
+        auto card = oneString("card");
+        if (!card) {
+            return std::unexpected(card.error());
+        }
+        env.body = ActivateSigningKey{std::move(*card)};
     } else {
         return std::unexpected(WireError::UnknownMessage);
     }

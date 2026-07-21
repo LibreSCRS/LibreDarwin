@@ -3,7 +3,7 @@
 #pragma once
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h> // PromptKind
 
-#include <LibreSCRS/Agent/backend/PromptTypes.h>        // PromptOptions, PromptResult
+#include <LibreSCRS/Agent/backend/PromptTypes.h>        // PromptOptions, PromptResult, PinChangePromptResult
 #include <LibreSCRS/Agent/backend/PrompterClientBase.h> // Operations::PrompterClientBase
 
 #include <string>
@@ -32,6 +32,11 @@ public:
     [[nodiscard]] Agent::PromptResult requestPin(const Agent::PromptOptions& options) override;
     [[nodiscard]] Agent::PromptResult requestCan(const Agent::PromptOptions& options) override;
     [[nodiscard]] Agent::PromptResult requestMrz(const Agent::PromptOptions& options) override;
+    // Two-secret change prompt: current + new PIN captured in ONE modal (the
+    // confirm re-entry never leaves the prompter). Both secrets return inline
+    // and are scrubbed into cleansing Secure::Strings exactly like the
+    // single-secret path.
+    [[nodiscard]] Agent::PinChangePromptResult requestPinChange(const Agent::PromptOptions& options) override;
     void cancel() noexcept override;
 
 private:

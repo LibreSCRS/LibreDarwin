@@ -21,6 +21,10 @@
 
 using namespace LibreSCRS::Darwin::wire;
 
+using LibreSCRS::Agent::CredentialOpResult;
+using LibreSCRS::Agent::CredentialOutcome;
+using LibreSCRS::Agent::CredentialRecord;
+
 namespace {
 
 // Encode an envelope to canonical frame bytes, then parse it back.
@@ -37,6 +41,49 @@ void expectStable(const RequestEnvelope& env)
     EXPECT_EQ(*parsed, env);
     // Byte-stable: re-encoding the parsed envelope reproduces the same bytes.
     EXPECT_EQ(toCbor(*parsed).encode(), toCbor(env).encode());
+}
+
+// A credential record with EVERY optional present (exercises all 22 wire keys).
+CredentialRecord makeFullCredentialRecord()
+{
+    CredentialRecord rec;
+    rec.id = "sign:0x92";
+    rec.label = "Signing PIN";
+    rec.kind = "sign";
+    rec.state = "operational";
+    rec.retriesLeft = 3;
+    rec.retriesMax = 3;
+    rec.usesLeft = 5;
+    rec.unblocksLeft = 10;
+    rec.minLength = 4;
+    rec.maxLength = 8;
+    rec.canChange = true;
+    rec.unblockable = true;
+    rec.unblockStyle = "unblockAndChange";
+    rec.activatable = true;
+    rec.keyActivationPending = true;
+    rec.keyActivatable = true;
+    rec.recovery = "holderViaPuk";
+    rec.probeSafe = true;
+    rec.blockedGuidanceKey = "guidance.blocked.key";
+    rec.blockedGuidanceFallback = "Blocked; contact issuer";
+    rec.keyActivationGuidanceKey = "guidance.activate.key";
+    rec.keyActivationGuidanceFallback = "Activate your signing key";
+    return rec;
+}
+
+// A credential record with EVERY optional absent (only the 12 required keys).
+CredentialRecord makeBareCredentialRecord()
+{
+    CredentialRecord rec;
+    rec.id = "unknown:0x00";
+    rec.label = "";
+    rec.kind = "unknown";
+    rec.state = "unknown";
+    rec.unblockStyle = "unknown";
+    rec.recovery = "unknown";
+    // all optionals nullopt (default); all bools false (default)
+    return rec;
 }
 
 TEST(MessagesRoundTrip, EveryRequestType)
@@ -71,6 +118,156 @@ TEST(MessagesRoundTrip, SetConfigCarriesAnyValue)
     CborValue::Array tsl;
     tsl.push_back(CborValue(std::string("https://example/tl.xml")));
     expectStable({20, SetConfig{"TsaUrls", CborValue(std::move(tsl))}});
+}
+
+TEST(MessagesRoundTrip, CredentialManagementRequestsRoundTrip)
+{
+    expectStable({30, ListCredentials{"reader/0:card/0"}});
+    // ManagePin with activateKey ABSENT (verb "change").
+    expectStable({31, ManagePin{"reader/0:card/0", "sign:0x92", "change", std::nullopt}});
+    // ManagePin with activateKey PRESENT=true (verb "activate_pin").
+    expectStable({32, ManagePin{"reader/0:card/0", "user:0x01", "activate_pin", std::optional<bool>{true}}});
+    // ManagePin with activateKey PRESENT=false (round-trip keeps the explicit false).
+    expectStable({33, ManagePin{"reader/0:card/0", "user:0x01", "unblock", std::optional<bool>{false}}});
+    expectStable({34, ActivateSigningKey{"reader/0:card/0"}});
+}
+
+// Tolerant decode: an unknown EXTRA map key inside a known request is ignored
+// (mirrors the wire-wide tolerant decode; the parsed body drops the extra key).
+TEST(MessagesRoundTrip, IgnoresUnknownRequestMapKeys)
+{
+    CborValue::Map m;
+    m.emplace("t", CborValue("ManagePin"));
+    m.emplace("req", CborValue::uint(7));
+    m.emplace("card", CborValue(std::string("reader/0:card/0")));
+    m.emplace("pinId", CborValue(std::string("sign:0x92")));
+    m.emplace("verb", CborValue(std::string("change")));
+    m.emplace("futureField", CborValue(std::string("ignored"))); // unknown extra key
+    const auto r = parseRequest(CborValue(std::move(m)).encode());
+    ASSERT_TRUE(r.has_value());
+    EXPECT_EQ(r->req, 7u);
+    ASSERT_TRUE(std::holds_alternative<ManagePin>(r->body));
+    EXPECT_EQ(std::get<ManagePin>(r->body), (ManagePin{"reader/0:card/0", "sign:0x92", "change", std::nullopt}));
+}
+
+// The two credential-management named errors carry their exact wire names.
+TEST(MessagesRoundTrip, SyncErrorNamesForCredentialErrors)
+{
+    EXPECT_EQ(syncErrorName(SyncError::UnknownCredential), "UnknownCredential");
+    EXPECT_EQ(syncErrorName(SyncError::InvalidRequest), "InvalidRequest");
+
+    const auto reply = makeErrorReply(7, ErrInfo{SyncError::UnknownCredential, std::nullopt, std::nullopt});
+    const auto* err = reply.find("err");
+    ASSERT_NE(err, nullptr);
+    ASSERT_NE(err->find("name"), nullptr);
+    EXPECT_EQ(*err->find("name")->asText(), "UnknownCredential");
+    EXPECT_EQ(err->find("code"), nullptr); // named error, never numeric
+}
+
+// An Ok listing result: two records, one with every optional present (22 keys)
+// and one with every optional absent (only the 12 required keys). The agent only
+// ENCODES results, so this inspects the built frame (no decode side).
+TEST(MessagesRoundTrip, CredentialsResultOkListingEncodesEveryRecordKey)
+{
+    CredentialsResult listing;
+    listing.result.outcome = CredentialOutcome::Ok;
+    listing.result.blocked = false;
+    listing.records = {makeFullCredentialRecord(), makeBareCredentialRecord()};
+
+    const CborValue c = toCbor(OpResultReady{40, listing});
+    EXPECT_EQ(*c.find("t")->asText(), "OpResultReady");
+    const auto* result = c.find("result");
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(*result->find("kind")->asText(), "Credentials");
+
+    // cred-result: outcome "ok", blocked written, optional numerics omitted.
+    const auto* cr = result->find("result");
+    ASSERT_NE(cr, nullptr);
+    EXPECT_EQ(*cr->find("outcome")->asText(), "ok");
+    ASSERT_NE(cr->find("blocked"), nullptr);
+    EXPECT_EQ(cr->find("blocked")->asBool(), false);
+    EXPECT_EQ(cr->find("retriesLeft"), nullptr);
+    EXPECT_EQ(cr->find("pinActivated"), nullptr);
+    EXPECT_EQ(cr->find("keyActivated"), nullptr);
+
+    const auto* records = result->find("records");
+    ASSERT_NE(records, nullptr);
+    ASSERT_NE(records->asArray(), nullptr);
+    ASSERT_EQ(records->asArray()->size(), 2u);
+
+    // Record 0: all 22 keys present.
+    const auto& full = (*records->asArray())[0];
+    ASSERT_NE(full.asMap(), nullptr);
+    EXPECT_EQ(full.asMap()->size(), 22u);
+    EXPECT_EQ(*full.find("id")->asText(), "sign:0x92");
+    EXPECT_EQ(*full.find("kind")->asText(), "sign");
+    EXPECT_EQ(*full.find("state")->asText(), "operational");
+    EXPECT_EQ(full.find("retriesLeft")->asUInt(), 3u);
+    EXPECT_EQ(full.find("minLength")->asUInt(), 4u);
+    EXPECT_EQ(full.find("maxLength")->asUInt(), 8u);
+    EXPECT_EQ(full.find("canChange")->asBool(), true);
+    EXPECT_EQ(full.find("probeSafe")->asBool(), true);
+    EXPECT_EQ(*full.find("unblockStyle")->asText(), "unblockAndChange");
+    EXPECT_EQ(*full.find("recovery")->asText(), "holderViaPuk");
+    EXPECT_EQ(*full.find("blockedGuidanceKey")->asText(), "guidance.blocked.key");
+    EXPECT_EQ(*full.find("keyActivationGuidanceFallback")->asText(), "Activate your signing key");
+
+    // Record 1: only the 12 required keys; every optional omitted.
+    const auto& bare = (*records->asArray())[1];
+    ASSERT_NE(bare.asMap(), nullptr);
+    EXPECT_EQ(bare.asMap()->size(), 12u);
+    for (const char* omitted :
+         {"retriesLeft", "retriesMax", "usesLeft", "unblocksLeft", "minLength", "maxLength", "blockedGuidanceKey",
+          "blockedGuidanceFallback", "keyActivationGuidanceKey", "keyActivationGuidanceFallback"}) {
+        EXPECT_EQ(bare.find(omitted), nullptr) << "expected optional key '" << omitted << "' to be omitted";
+    }
+    // Required keys present even when default-valued.
+    EXPECT_EQ(*bare.find("kind")->asText(), "unknown");
+    EXPECT_EQ(bare.find("canChange")->asBool(), false);
+}
+
+// A failed mutation: outcome invalidPin, retriesLeft=2, blocked=false, records=[].
+TEST(MessagesRoundTrip, CredentialsResultFailedMutationEncoding)
+{
+    CredentialsResult failed;
+    failed.result.outcome = CredentialOutcome::InvalidPin;
+    failed.result.retriesLeft = 2;
+    failed.result.blocked = false;
+
+    const CborValue c = toCbor(OpResultReady{41, failed});
+    const auto* result = c.find("result");
+    ASSERT_NE(result, nullptr);
+    EXPECT_EQ(*result->find("kind")->asText(), "Credentials");
+    const auto* cr = result->find("result");
+    ASSERT_NE(cr, nullptr);
+    EXPECT_EQ(*cr->find("outcome")->asText(), "invalidPin");
+    EXPECT_EQ(cr->find("retriesLeft")->asUInt(), 2u);
+    EXPECT_EQ(cr->find("blocked")->asBool(), false);
+    // A mutation carries an always-present (empty) records array.
+    const auto* records = result->find("records");
+    ASSERT_NE(records, nullptr);
+    ASSERT_NE(records->asArray(), nullptr);
+    EXPECT_TRUE(records->asArray()->empty());
+}
+
+// Partial signing-key bring-up: keyActivationFailed with pinActivated=true,
+// keyActivated=false (both booleans present because they are engaged).
+TEST(MessagesRoundTrip, CredentialsResultKeyActivationFailedEncoding)
+{
+    CredentialsResult keyFail;
+    keyFail.result.outcome = CredentialOutcome::KeyActivationFailed;
+    keyFail.result.blocked = false;
+    keyFail.result.pinActivated = true;
+    keyFail.result.keyActivated = false;
+
+    const CborValue c = toCbor(OpResultReady{42, keyFail});
+    const auto* cr = c.find("result")->find("result");
+    ASSERT_NE(cr, nullptr);
+    EXPECT_EQ(*cr->find("outcome")->asText(), "keyActivationFailed");
+    ASSERT_NE(cr->find("pinActivated"), nullptr);
+    EXPECT_EQ(cr->find("pinActivated")->asBool(), true);
+    ASSERT_NE(cr->find("keyActivated"), nullptr);
+    EXPECT_EQ(cr->find("keyActivated")->asBool(), false);
 }
 
 TEST(MessagesRoundTrip, RejectsUnknownTag)
@@ -232,6 +429,14 @@ int dumpFixtures(const std::filesystem::path& dir)
         dir, "ErrCode",
         makeErrorReply(9, ErrInfo{ErrorCode::CardRemoved, std::string("cardRemoved"), std::string("Card removed")}));
     writeFixture(dir, "ErrName", makeErrorReply(10, ErrInfo{SyncError::UnknownCard, std::nullopt, std::nullopt}));
+    writeFixture(dir, "ErrNameUnknownCredential",
+                 makeErrorReply(11, ErrInfo{SyncError::UnknownCredential, std::nullopt, std::nullopt}));
+
+    // ---- requests (client -> agent; the Swift client mirrors encode(req: 1)) ----
+    writeFixture(dir, "ListCredentials", toCbor(RequestEnvelope{1, ListCredentials{"reader/0:card/0"}}));
+    writeFixture(dir, "ManagePin",
+                 toCbor(RequestEnvelope{1, ManagePin{"reader/0:card/0", "sign:0x92", "change", std::nullopt}}));
+    writeFixture(dir, "ActivateSigningKey", toCbor(RequestEnvelope{1, ActivateSigningKey{"reader/0:card/0"}}));
 
     // ---- events ----
     writeFixture(dir, "ReaderAdded", toCbor(ReaderAdded{ReaderState{"r1", "Reader One", false, std::nullopt}}));
@@ -264,6 +469,22 @@ int dumpFixtures(const std::filesystem::path& dir)
     // fd index (never inline bytes) for the signed artifact.
     writeFixture(dir, "OpResultReadySign",
                  toCbor(OpResultReady{23, SignResult{5, SignMeta{"pades", "b-lta", true, true}}}));
+    {
+        // Ok listing: one fully-populated record (exercises all 22 cred-record keys).
+        CredentialsResult listing;
+        listing.result.outcome = CredentialOutcome::Ok;
+        listing.result.blocked = false;
+        listing.records.push_back(makeFullCredentialRecord());
+        writeFixture(dir, "OpResultReadyCredentialsList", toCbor(OpResultReady{25, listing}));
+    }
+    {
+        // Failed mutation: invalidPin, retriesLeft=2, blocked=false, records=[].
+        CredentialsResult failed;
+        failed.result.outcome = CredentialOutcome::InvalidPin;
+        failed.result.retriesLeft = 2;
+        failed.result.blocked = false;
+        writeFixture(dir, "OpResultReadyCredentialsFailed", toCbor(OpResultReady{26, failed}));
+    }
     writeFixture(dir, "OpFinished",
                  toCbor(OpFinished{24, OperationStatus::Error, ErrorCode::CardRemoved, "op.failed", "Card removed"}));
     writeFixture(dir, "AgentQuiesced", toCbor(AgentQuiesced{QuiesceReason::ScreenLocked}));

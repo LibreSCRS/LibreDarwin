@@ -93,6 +93,7 @@ int main(int /*argc*/, char** /*argv*/)
         LibreSCRS::Darwin::PrompterServer server(
             prompterSocketPath(),
             [window](const LibreSCRS::Darwin::wire::PromptRequest& req) { return window->showPrompt(req); },
+            [window](const LibreSCRS::Darwin::wire::RequestSecrets& req) { return window->showChangePrompt(req); },
             [window] { window->dismiss(); }, makePeerAuth());
 
         if (auto started = server.start(); !started) {

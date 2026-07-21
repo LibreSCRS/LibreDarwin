@@ -19,6 +19,7 @@
 #include <cerrno>
 #include <cstring>
 #include <format>
+#include <type_traits>
 #include <utility>
 #include <variant>
 
@@ -54,12 +55,19 @@ void setNoSigPipe(int fd) noexcept
     ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 }
 
+// Exhaustiveness guard for the PrompterRequest visit below: instantiated only
+// inside a discarded if-constexpr branch, so it fires ONLY if a future
+// PrompterRequest alternative reaches the final else without an explicit arm
+// above it (compile-break honesty in place of an else-arm assumption).
+template <class>
+inline constexpr bool always_false_v = false;
+
 } // namespace
 
-PrompterServer::PrompterServer(std::string socketPath, SecretProvider provider, CancelHandler cancel,
-                               PeerAuthorized peerAuth)
-    : m_socketPath(std::move(socketPath)), m_provider(std::move(provider)), m_cancel(std::move(cancel)),
-      m_peerAuth(std::move(peerAuth))
+PrompterServer::PrompterServer(std::string socketPath, SecretProvider provider, MultiSecretProvider multiProvider,
+                               CancelHandler cancel, PeerAuthorized peerAuth)
+    : m_socketPath(std::move(socketPath)), m_provider(std::move(provider)), m_multiProvider(std::move(multiProvider)),
+      m_cancel(std::move(cancel)), m_peerAuth(std::move(peerAuth))
 {}
 
 PrompterServer::~PrompterServer()
@@ -229,29 +237,54 @@ void PrompterServer::onReadReady(std::uint64_t connId)
     if (!parsed.has_value()) {
         return; // malformed; fail closed — the detached fd share drops here
     }
-    if (std::holds_alternative<wire::PromptCancel>(*parsed)) {
-        // Inline on the serial queue — which a modal never blocks (the modal
-        // blocks the worker + main queues), so a cross-connection cancel can
-        // always dismiss it. The handler dispatches abortModal asynchronously.
-        // CancelCurrent has no reply.
-        m_cancel();
-        return;
-    }
 
-    // The blocking provider call (dispatch_sync(main) + runModal) runs on the
-    // concurrent worker. The block holds its own copies (provider, request, fd
-    // share) and never touches `this`, so a stop()/destruction while the modal
-    // is up cannot dangle; the reply is sent + scrubbed on the worker and the
-    // fd closes with its last share. The fd turns blocking for the send: the
-    // read side is retired, and a reply near the 8 KiB cap may not fit the
-    // socket buffer in one non-blocking write.
-    const wire::PromptRequest req = std::get<wire::PromptRequest>(std::move(*parsed));
-    const SecretProvider provider = m_provider;
-    dispatch_async(m_worker, ^{
-      wire::PromptReply reply = provider(req);
-      clearNonBlocking(*fd);
-      wire::sendPromptReplyScrubbed(*fd, reply);
-    });
+    // Fail-closed dispatch totality: EVERY PrompterRequest alternative has an
+    // explicit if-constexpr arm; a wire alternative added without one breaks
+    // the compile (static_assert below) instead of throwing
+    // bad_variant_access at runtime.
+    std::visit(
+        [this, &fd](auto&& msg) {
+            using T = std::decay_t<decltype(msg)>;
+            if constexpr (std::is_same_v<T, wire::PromptCancel>) {
+                // Inline on the serial queue — which a modal never blocks (the
+                // modal blocks the worker + main queues), so a cross-connection
+                // cancel can always dismiss it. The handler dispatches
+                // abortModal asynchronously. CancelCurrent has no reply.
+                m_cancel();
+            } else if constexpr (std::is_same_v<T, wire::PromptRequest>) {
+                // The blocking provider call (dispatch_sync(main) + runModal)
+                // runs on the concurrent worker. The block holds its own copies
+                // (provider, request, fd share) and never touches `this`, so a
+                // stop()/destruction while the modal is up cannot dangle; the
+                // reply is sent + scrubbed on the worker and the fd closes with
+                // its last share. The fd turns blocking for the send: the read
+                // side is retired, and a reply near the 8 KiB cap may not fit
+                // the socket buffer in one non-blocking write.
+                const wire::PromptRequest req = std::move(msg);
+                const SecretProvider provider = m_provider;
+                const std::shared_ptr<int> connFd = fd;
+                dispatch_async(m_worker, ^{
+                  wire::PromptReply reply = provider(req);
+                  clearNonBlocking(*connFd);
+                  wire::sendPromptReplyScrubbed(*connFd, reply);
+                });
+            } else if constexpr (std::is_same_v<T, wire::RequestSecrets>) {
+                // Same worker discipline as PromptRequest: the change modal
+                // blocks identically, and the reply — BOTH secrets inline —
+                // goes out through the scrubbing multi overload.
+                const wire::RequestSecrets req = std::move(msg);
+                const MultiSecretProvider provider = m_multiProvider;
+                const std::shared_ptr<int> connFd = fd;
+                dispatch_async(m_worker, ^{
+                  wire::MultiPromptReply reply = provider(req);
+                  clearNonBlocking(*connFd);
+                  wire::sendPromptReplyScrubbed(*connFd, reply);
+                });
+            } else {
+                static_assert(always_false_v<T>, "PrompterServer::onReadReady: unhandled PrompterRequest arm");
+            }
+        },
+        std::move(*parsed));
 }
 
 void PrompterServer::closeConnection(std::uint64_t connId)

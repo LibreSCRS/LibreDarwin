@@ -15,7 +15,9 @@
 // A tiny CBOR request/reply over the 0600 prompter.sock. LM-free (wire-core) so
 // the agent-owned prompter helper reuses it without linking the card stack. The
 // secret returns INLINE over the local 0600 socket (no dbus-daemon buffer to
-// bypass; scrubbed into a Secure::String on receipt, buffer zeroed).
+// bypass; scrubbed into a Secure::String on receipt, buffer zeroed). The
+// multi-secret change flow (RequestSecrets) returns BOTH secrets inline the
+// same way.
 
 namespace LibreSCRS::Darwin::wire {
 
@@ -59,7 +61,27 @@ struct PromptCancel
     bool operator==(const PromptCancel&) const = default;
 };
 
-using PrompterRequest = std::variant<PromptRequest, PromptCancel>;
+// RequestSecrets (agent -> prompter): ask the user for a linked secret pair in
+// one modal — the current credential plus its replacement. `kind` is an open
+// flow discriminator at the wire layer ("change_pin" today); the server
+// rejects kinds it does not implement. Per-role bounds: primary* applies to
+// the CURRENT credential field, new* to both the new and confirm fields. The
+// confirm value never crosses the wire.
+struct RequestSecrets
+{
+    std::string kind; // "change_pin"
+    std::string title;
+    std::string description;
+    std::string requester; // human-readable client identity (the named requester)
+    std::string artifact;  // display label for what the change applies to
+    std::uint32_t primaryMinLength{0};
+    std::uint32_t primaryMaxLength{0};
+    std::uint32_t newMinLength{0};
+    std::uint32_t newMaxLength{0};
+    bool operator==(const RequestSecrets&) const = default;
+};
+
+using PrompterRequest = std::variant<PromptRequest, PromptCancel, RequestSecrets>;
 
 // The reply (prompter -> agent). `secret` is present iff status == Ok.
 struct PromptReply
@@ -69,10 +91,24 @@ struct PromptReply
     std::string userMessage;
 };
 
+// The multi-secret reply (prompter -> agent). Both secrets are present iff
+// status == Ok: `primary` carries the CURRENT credential, `secondary` the NEW
+// one — inline over the same 0600 socket, scrubbed on receipt like the
+// single-secret reply.
+struct MultiPromptReply
+{
+    PromptReplyStatus status{PromptReplyStatus::Error};
+    std::vector<std::uint8_t> primary;   // current credential; present iff Ok
+    std::vector<std::uint8_t> secondary; // new credential; present iff Ok
+    std::string userMessage;
+};
+
 // --- encode (build the CBOR body; the caller frames it) ----------------------
 [[nodiscard]] CborValue toCbor(const PromptRequest& r);
 [[nodiscard]] CborValue toCbor(const PromptCancel&);
+[[nodiscard]] CborValue toCbor(const RequestSecrets& r);
 [[nodiscard]] CborValue toCbor(const PromptReply& r);
+[[nodiscard]] CborValue toCbor(const MultiPromptReply& r);
 
 // --- decode (strict; fail closed) --------------------------------------------
 [[nodiscard]] std::expected<PrompterRequest, PrompterParseError>
@@ -81,6 +117,12 @@ parsePrompterRequest(std::span<const std::uint8_t> body);
 // decoded intermediates on every exit; the caller still owns (and must zero)
 // the raw frame body and the returned reply.secret after use.
 [[nodiscard]] std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const std::uint8_t> body);
+// Multi-secret variant: rejects EITHER secret over kMaxSecretBytes
+// (SecretTooLarge), per secret. Scrubs its own decoded intermediates on every
+// exit; the caller still owns (and must zero) the raw frame body — it carries
+// BOTH secrets — and the returned reply.primary / reply.secondary after use.
+[[nodiscard]] std::expected<MultiPromptReply, PrompterParseError>
+parseMultiPromptReply(std::span<const std::uint8_t> body);
 
 // Encode + send one prompter reply on a connected fd, then zero every
 // secret-bearing buffer this side created: the CBOR tree copy, the encoded
@@ -88,5 +130,8 @@ parsePrompterRequest(std::span<const std::uint8_t> body);
 // peer just times out); the scrub always runs. Shared by every prompter send
 // path.
 void sendPromptReplyScrubbed(int connFd, PromptReply& reply) noexcept;
+// Multi-secret overload: same encode-send-zero core, then zeroes BOTH
+// reply.primary and reply.secondary.
+void sendPromptReplyScrubbed(int connFd, MultiPromptReply& reply) noexcept;
 
 } // namespace LibreSCRS::Darwin::wire
