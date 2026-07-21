@@ -43,7 +43,7 @@ void expectStable(const RequestEnvelope& env)
     EXPECT_EQ(toCbor(*parsed).encode(), toCbor(env).encode());
 }
 
-// A credential record with EVERY optional present (exercises all 22 wire keys).
+// A credential record with EVERY optional present (exercises all 23 wire keys).
 CredentialRecord makeFullCredentialRecord()
 {
     CredentialRecord rec;
@@ -54,6 +54,7 @@ CredentialRecord makeFullCredentialRecord()
     rec.retriesLeft = 3;
     rec.retriesMax = 3;
     rec.usesLeft = 5;
+    rec.usesMax = 20;
     rec.unblocksLeft = 10;
     rec.minLength = 4;
     rec.maxLength = 8;
@@ -164,7 +165,7 @@ TEST(MessagesRoundTrip, SyncErrorNamesForCredentialErrors)
     EXPECT_EQ(err->find("code"), nullptr); // named error, never numeric
 }
 
-// An Ok listing result: two records, one with every optional present (22 keys)
+// An Ok listing result: two records, one with every optional present (23 keys)
 // and one with every optional absent (only the 12 required keys). The agent only
 // ENCODES results, so this inspects the built frame (no decode side).
 TEST(MessagesRoundTrip, CredentialsResultOkListingEncodesEveryRecordKey)
@@ -195,10 +196,10 @@ TEST(MessagesRoundTrip, CredentialsResultOkListingEncodesEveryRecordKey)
     ASSERT_NE(records->asArray(), nullptr);
     ASSERT_EQ(records->asArray()->size(), 2u);
 
-    // Record 0: all 22 keys present.
+    // Record 0: all 23 keys present.
     const auto& full = (*records->asArray())[0];
     ASSERT_NE(full.asMap(), nullptr);
-    EXPECT_EQ(full.asMap()->size(), 22u);
+    EXPECT_EQ(full.asMap()->size(), 23u);
     EXPECT_EQ(*full.find("id")->asText(), "sign:0x92");
     EXPECT_EQ(*full.find("kind")->asText(), "sign");
     EXPECT_EQ(*full.find("state")->asText(), "operational");
@@ -216,9 +217,9 @@ TEST(MessagesRoundTrip, CredentialsResultOkListingEncodesEveryRecordKey)
     const auto& bare = (*records->asArray())[1];
     ASSERT_NE(bare.asMap(), nullptr);
     EXPECT_EQ(bare.asMap()->size(), 12u);
-    for (const char* omitted :
-         {"retriesLeft", "retriesMax", "usesLeft", "unblocksLeft", "minLength", "maxLength", "blockedGuidanceKey",
-          "blockedGuidanceFallback", "keyActivationGuidanceKey", "keyActivationGuidanceFallback"}) {
+    for (const char* omitted : {"retriesLeft", "retriesMax", "usesLeft", "usesMax", "unblocksLeft", "minLength",
+                                "maxLength", "blockedGuidanceKey", "blockedGuidanceFallback",
+                                "keyActivationGuidanceKey", "keyActivationGuidanceFallback"}) {
         EXPECT_EQ(bare.find(omitted), nullptr) << "expected optional key '" << omitted << "' to be omitted";
     }
     // Required keys present even when default-valued.
@@ -470,7 +471,7 @@ int dumpFixtures(const std::filesystem::path& dir)
     writeFixture(dir, "OpResultReadySign",
                  toCbor(OpResultReady{23, SignResult{5, SignMeta{"pades", "b-lta", true, true}}}));
     {
-        // Ok listing: one fully-populated record (exercises all 22 cred-record keys).
+        // Ok listing: one fully-populated record (exercises all 23 cred-record keys).
         CredentialsResult listing;
         listing.result.outcome = CredentialOutcome::Ok;
         listing.result.blocked = false;

@@ -6,3 +6,5 @@ build/
 DerivedData/
 build-asan/
 build-release/
+build-cc/
+build-*/

@@ -409,15 +409,16 @@ static_assert(kCredVerbs.size() == 3u, "wire contract: cred-verb has 3 tokens");
 
 // --- CDDL `cred-record` map keys (camelCase; == CredentialRecord field names) -
 // The full ordered key set, shared with the codec test's cred-record
-// expectations. NOTE: this is 22 keys — CredentialRecord has 22 fields and the
-// D-Bus a{sv} lists 22 keys.
-constexpr std::array<std::string_view, 22> kCredRecordKeys{"id",
+// expectations. NOTE: this is 23 keys — CredentialRecord has 23 fields and the
+// D-Bus a{sv} lists 23 keys.
+constexpr std::array<std::string_view, 23> kCredRecordKeys{"id",
                                                            "label",
                                                            "kind",
                                                            "state",
                                                            "retriesLeft",
                                                            "retriesMax",
                                                            "usesLeft",
+                                                           "usesMax",
                                                            "unblocksLeft",
                                                            "minLength",
                                                            "maxLength",
@@ -433,7 +434,7 @@ constexpr std::array<std::string_view, 22> kCredRecordKeys{"id",
                                                            "blockedGuidanceFallback",
                                                            "keyActivationGuidanceKey",
                                                            "keyActivationGuidanceFallback"};
-static_assert(kCredRecordKeys.size() == 22u, "wire contract: cred-record has 22 keys");
+static_assert(kCredRecordKeys.size() == 23u, "wire contract: cred-record has 23 keys");
 
 // --- CDDL message `t:` tags: presence + count drift guard --------------------
 // The socket message vocabulary (request + event `t:` tags) has no upstream enum

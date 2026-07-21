@@ -256,7 +256,7 @@ CborValue encodeCredResult(const LibreSCRS::Agent::CredentialOpResult& r)
     return CborValue(std::move(m));
 }
 
-// cred-record: 22 camelCase keys mirroring CredentialRecord. The four enum-valued
+// cred-record: 23 camelCase keys mirroring CredentialRecord. The four enum-valued
 // fields (kind/state/unblockStyle/recovery) are already token STRINGS on the
 // record (produced upstream via detail::*Token), written verbatim. Optional
 // numeric + guidance keys are OMITTED when nullopt; booleans are always written.
@@ -275,6 +275,9 @@ CborValue encodeCredRecord(const LibreSCRS::Agent::CredentialRecord& rec)
     }
     if (rec.usesLeft) {
         m.emplace("usesLeft", CborValue::uint(static_cast<std::uint64_t>(*rec.usesLeft)));
+    }
+    if (rec.usesMax) {
+        m.emplace("usesMax", CborValue::uint(static_cast<std::uint64_t>(*rec.usesMax)));
     }
     if (rec.unblocksLeft) {
         m.emplace("unblocksLeft", CborValue::uint(static_cast<std::uint64_t>(*rec.unblocksLeft)));

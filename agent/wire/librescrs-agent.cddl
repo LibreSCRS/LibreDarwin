@@ -201,8 +201,9 @@ sign-meta = { format: tstr, level: tstr, tsaUsed: bool, chainComplete: bool }
 ; emits EXACTLY ONE op-result-ready per operation — for EVERY completed
 ; attempt, including invalidPin/blocked/userCancelled — always BEFORE
 ; op-finished (one attempt per op; a retry is a new request); its
-; records are always []. A LIST op emits op-result-ready iff it
-; completes Ok; a failed/cancelled list finishes WITHOUT a result.
+; records are always []. A LIST op likewise emits exactly one
+; op-result-ready for every completed attempt; records are populated
+; only on Ok (empty otherwise), always BEFORE op-finished.
 ; Ordering holds modulo channel allocation failure, which fails the op
 ; closed. No GetResult analog: the unicast-FIFO delivery invariant
 ; above removes the D-Bus late-subscribe race that justifies it.
@@ -218,7 +219,7 @@ cred-outcome = "unspecified" / "ok" / "userCancelled" / "missingFields" /
                "keyActivationFailed" / "cardRemoved"
 cred-record = { id: tstr, label: tstr, kind: cred-kind, state: cred-state,
                 ? retriesLeft: uint, ? retriesMax: uint, ? usesLeft: uint,
-                ? unblocksLeft: uint, ? minLength: uint, ? maxLength: uint,
+                ? usesMax: uint, ? unblocksLeft: uint, ? minLength: uint, ? maxLength: uint,
                 canChange: bool, unblockable: bool, unblockStyle: unblock-style,
                 activatable: bool, keyActivationPending: bool,
                 keyActivatable: bool, recovery: cred-recovery, probeSafe: bool,
