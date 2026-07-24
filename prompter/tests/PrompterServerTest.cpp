@@ -9,7 +9,7 @@
 // exercised manually / in the HW gate.
 #include "PrompterServer.h"
 
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
 #include <gtest/gtest.h>
@@ -27,6 +27,7 @@
 #include <vector>
 
 using namespace LibreSCRS::Darwin;
+namespace Agent = ::LibreSCRS::Agent;
 
 namespace {
 
@@ -122,9 +123,9 @@ TEST(PrompterServer, AuthorizedRequestGetsProviderReply)
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn, kPinRequestBytes()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn, kPinRequestBytes()).has_value());
 
-    auto reply = wire::recvFrame(conn);
+    auto reply = Agent::Wire::recvFrame(conn);
     ASSERT_TRUE(reply.has_value());
     auto parsed = wire::parsePromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
@@ -153,17 +154,17 @@ TEST(PrompterServer, CancelOnASecondConnectionDismissesWhileModalIsUp)
     ASSERT_TRUE(server.start().has_value());
 
     const int conn1 = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn1, kPinRequestBytes()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn1, kPinRequestBytes()).has_value());
     ASSERT_TRUE(providerEntered.wait(1, std::chrono::seconds(2))); // the modal is up and blocked
 
     // The old accept-thread design could never read this frame while the
     // provider blocked; now it MUST fire with connection 1 still pending.
     const int conn2 = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn2, wire::toCbor(wire::PromptCancel{}).encode()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn2, wire::toCbor(wire::PromptCancel{}).encode()).has_value());
     ASSERT_TRUE(cancelSeen.wait(1, std::chrono::seconds(2)));
 
     releaseProvider.signal();
-    auto reply = wire::recvFrame(conn1); // connection 1 still receives its reply
+    auto reply = Agent::Wire::recvFrame(conn1); // connection 1 still receives its reply
     ASSERT_TRUE(reply.has_value());
     auto parsed = wire::parsePromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
@@ -192,7 +193,7 @@ TEST(PrompterServer, StopReturnsPromptlyWithAModalPending)
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn, kPinRequestBytes()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn, kPinRequestBytes()).has_value());
     ASSERT_TRUE(providerEntered.wait(1, std::chrono::seconds(2)));
 
     // The old design joined a thread blocked in accept()/the provider: stop()
@@ -205,7 +206,7 @@ TEST(PrompterServer, StopReturnsPromptlyWithAModalPending)
     // The detached provider call still completes and delivers its reply over
     // the fd share it co-owns.
     releaseProvider.signal();
-    auto reply = wire::recvFrame(conn);
+    auto reply = Agent::Wire::recvFrame(conn);
     ASSERT_TRUE(reply.has_value());
     auto parsed = wire::parsePromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
@@ -230,7 +231,7 @@ TEST(PrompterServer, UnauthorizedPeerFailsClosedWithNoProviderCall)
 
     // The rejection arrives at accept time, before any request is read.
     const int conn = connectClient(path);
-    auto reply = wire::recvFrame(conn);
+    auto reply = Agent::Wire::recvFrame(conn);
     ASSERT_TRUE(reply.has_value());
     auto parsed = wire::parsePromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
@@ -264,13 +265,13 @@ TEST(PrompterServer, ChangeRequestRoutesToMultiProviderAndReplyRoundTrips)
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn, wire::toCbor(kChangeRequest()).encode()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn, wire::toCbor(kChangeRequest()).encode()).has_value());
 
     // Fail-closed dispatch totality: before the visit restructure this frame
     // hit an unconditional std::get<PromptRequest> (bad_variant_access, dead
     // prompter). Receiving a served reply at all pins that EVERY variant
     // alternative is dispatched, not assumed.
-    auto reply = wire::recvFrame(conn);
+    auto reply = Agent::Wire::recvFrame(conn);
     ASSERT_TRUE(reply.has_value());
     auto parsed = wire::parseMultiPromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
@@ -306,18 +307,18 @@ TEST(PrompterServer, CancelOnASecondConnectionDismissesWhileChangeModalIsUp)
     ASSERT_TRUE(server.start().has_value());
 
     const int conn1 = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn1, wire::toCbor(kChangeRequest()).encode()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn1, wire::toCbor(kChangeRequest()).encode()).has_value());
     ASSERT_TRUE(providerEntered.wait(1, std::chrono::seconds(2))); // the change modal is up and blocked
 
     // The change arm must run on the worker exactly like the single-secret
     // arm: an inline (serial-queue) provider call could never read this frame
     // while the provider blocks.
     const int conn2 = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn2, wire::toCbor(wire::PromptCancel{}).encode()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn2, wire::toCbor(wire::PromptCancel{}).encode()).has_value());
     ASSERT_TRUE(cancelSeen.wait(1, std::chrono::seconds(2)));
 
     releaseProvider.signal();
-    auto reply = wire::recvFrame(conn1); // connection 1 still receives its reply
+    auto reply = Agent::Wire::recvFrame(conn1); // connection 1 still receives its reply
     ASSERT_TRUE(reply.has_value());
     auto parsed = wire::parseMultiPromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
@@ -360,10 +361,10 @@ TEST(PrompterServer, UnknownKindChangeRequestFailsClosedWithNoModal)
     auto request = kChangeRequest();
     request.kind = "unexpected_kind"; // an open wire discriminator: it parses, the window rejects it
     const int conn = connectClient(path);
-    ASSERT_TRUE(wire::sendFrame(conn, wire::toCbor(request).encode()).has_value());
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn, wire::toCbor(request).encode()).has_value());
 
     // The rejection is still a well-formed reply on the change flow's parser.
-    auto reply = wire::recvFrame(conn);
+    auto reply = Agent::Wire::recvFrame(conn);
     ASSERT_TRUE(reply.has_value());
     auto parsed = wire::parseMultiPromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
@@ -400,9 +401,9 @@ TEST(PrompterServer, UnauthorizedPeerFailsClosedForChangeRequestsToo)
     // effort — the point is that a change request on the wire changes nothing.
     int on = 1;
     ::setsockopt(conn, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
-    (void)wire::sendFrame(conn, wire::toCbor(kChangeRequest()).encode());
+    (void)Agent::Wire::sendFrame(conn, wire::toCbor(kChangeRequest()).encode());
 
-    auto reply = wire::recvFrame(conn);
+    auto reply = Agent::Wire::recvFrame(conn);
     ASSERT_TRUE(reply.has_value());
     // The change flow parses with the MULTI parser: the status-only rejection
     // map must be recognized as unauthorized there as well.

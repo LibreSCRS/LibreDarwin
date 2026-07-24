@@ -8,7 +8,7 @@
 // dispatched while a modal is up.
 #include "PrompterServer.h"
 
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
 
 #include <fcntl.h>
 #include <sys/socket.h>
@@ -96,7 +96,7 @@ std::expected<void, std::string> PrompterServer::start()
     if (fd < 0) {
         return std::unexpected(std::format("socket(): {}", std::strerror(errno)));
     }
-    m_listen = wire::UniqueFd(fd);
+    m_listen = Agent::Wire::UniqueFd(fd);
     makeNonBlockingCloexec(fd);
     setNoSigPipe(fd);
     sockaddr_un addr{};
@@ -175,7 +175,7 @@ void PrompterServer::onAcceptReady()
 
 void PrompterServer::acceptOne(int connFd)
 {
-    wire::UniqueFd fd(connFd);
+    Agent::Wire::UniqueFd fd(connFd);
     makeNonBlockingCloexec(connFd);
     setNoSigPipe(connFd);
 
@@ -219,9 +219,9 @@ void PrompterServer::onReadReady(std::uint64_t connId)
         return;
     }
     Connection& conn = *it->second;
-    wire::PumpResult pumped = conn.reassembler.pump(*conn.fd);
+    Agent::Wire::PumpResult pumped = conn.reassembler.pump(*conn.fd);
     if (pumped.frames.empty()) {
-        if (pumped.status != wire::PumpStatus::Ok) {
+        if (pumped.status != Agent::Wire::PumpStatus::Ok) {
             closeConnection(connId); // EOF / protocol error before a request
         }
         return;
@@ -230,7 +230,7 @@ void PrompterServer::onReadReady(std::uint64_t connId)
     // One request per connection: detach the fd share for the reply path and
     // retire the read side before dispatching anything.
     std::shared_ptr<int> fd = conn.fd;
-    wire::Frame frame = std::move(pumped.frames.front());
+    Agent::Wire::Frame frame = std::move(pumped.frames.front());
     closeConnection(connId); // cancels the read source; `conn` is gone
 
     auto parsed = wire::parsePrompterRequest(frame.body);

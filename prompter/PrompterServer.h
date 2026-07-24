@@ -2,9 +2,10 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
-#include <LibreSCRS/Darwin/backend/wire/FrameReassembler.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
-#include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
+
+#include <LibreSCRS/Agent/wire/FrameReassembler.h>
+#include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <dispatch/dispatch.h>
 
@@ -78,7 +79,7 @@ private:
         // the worker block, so the fd outlives GCD's kevent teardown and the
         // reply send (the SocketTransport::Connection::fd discipline).
         std::shared_ptr<int> fd;
-        wire::FrameReassembler reassembler;
+        Agent::Wire::FrameReassembler reassembler;
         dispatch_source_t readSource{nullptr};
     };
 
@@ -92,7 +93,7 @@ private:
     MultiSecretProvider m_multiProvider;
     CancelHandler m_cancel;
     PeerAuthorized m_peerAuth;
-    wire::UniqueFd m_listen;
+    Agent::Wire::UniqueFd m_listen;
     dispatch_queue_t m_queue{nullptr};  // serial: accept + reads + registry
     dispatch_queue_t m_worker{nullptr}; // concurrent: blocking provider calls
     dispatch_source_t m_acceptSource{nullptr};
