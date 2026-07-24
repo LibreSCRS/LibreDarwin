@@ -25,7 +25,7 @@
 #include <LibreSCRS/Agent/presence/PluginCapabilityResolver.h>
 #include <LibreSCRS/Plugin/CardPluginService.h>
 
-#include <LibreSCRS/Darwin/backend/wire/Messages.h> // wire::QuiesceReason
+#include <LibreSCRS/Agent/wire/Messages.h> // wire::QuiesceReason
 
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
@@ -57,7 +57,7 @@ namespace {
 namespace fs = std::filesystem;
 namespace Agent = LibreSCRS::Agent;
 namespace Darwin = LibreSCRS::Darwin;
-namespace wire = LibreSCRS::Darwin::wire;
+namespace wire = LibreSCRS::Agent::Wire;
 
 std::string envOr(const char* key, const std::string& fallback)
 {

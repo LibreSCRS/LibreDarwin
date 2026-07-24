@@ -118,46 +118,46 @@ ReadDoc readDocument(int fd, std::size_t cap)
 
 // Pkcs11Broker::CryptoOutcome -> wire sync error. CardError/Cancelled fail
 // closed to CommunicationError (no dedicated cancelled sync error).
-wire::SyncError mapCryptoOutcome(A::Pkcs11Broker::CryptoOutcome oc) noexcept
+A::Wire::SyncError mapCryptoOutcome(A::Pkcs11Broker::CryptoOutcome oc) noexcept
 {
     using CO = A::Pkcs11Broker::CryptoOutcome;
     switch (oc) {
     case CO::KeyNotFound:
-        return wire::SyncError::KeyNotFound;
+        return A::Wire::SyncError::KeyNotFound;
     case CO::AuthFailed:
-        return wire::SyncError::AuthFailed;
+        return A::Wire::SyncError::AuthFailed;
     case CO::NotSupported:
-        return wire::SyncError::NotSupported;
+        return A::Wire::SyncError::NotSupported;
     case CO::UnknownCard:
-        return wire::SyncError::UnknownCard;
+        return A::Wire::SyncError::UnknownCard;
     case CO::UserNotLoggedIn:
-        return wire::SyncError::UserNotLoggedIn;
+        return A::Wire::SyncError::UserNotLoggedIn;
     case CO::RateLimited:
-        return wire::SyncError::RateLimited;
+        return A::Wire::SyncError::RateLimited;
     case CO::Ok:
     case CO::Cancelled:
     case CO::CardError:
         break;
     }
-    return wire::SyncError::CommunicationError;
+    return A::Wire::SyncError::CommunicationError;
 }
 
-wire::SyncError mapLoginOutcome(A::Pkcs11Broker::LoginOutcome oc) noexcept
+A::Wire::SyncError mapLoginOutcome(A::Pkcs11Broker::LoginOutcome oc) noexcept
 {
     using LO = A::Pkcs11Broker::LoginOutcome;
     switch (oc) {
     case LO::NotAuthorizedByCard:
-        return wire::SyncError::AuthFailed;
+        return A::Wire::SyncError::AuthFailed;
     case LO::UnknownCard:
-        return wire::SyncError::UnknownCard;
+        return A::Wire::SyncError::UnknownCard;
     case LO::NotAuthorized:
-        return wire::SyncError::NotAuthorized;
+        return A::Wire::SyncError::NotAuthorized;
     case LO::Ok:
     case LO::Cancelled:
     case LO::CardError:
         break;
     }
-    return wire::SyncError::CommunicationError;
+    return A::Wire::SyncError::CommunicationError;
 }
 
 // Map a validatePinManageRequest EntryError onto its typed wire error. UnknownVerb
@@ -165,22 +165,22 @@ wire::SyncError mapLoginOutcome(A::Pkcs11Broker::LoginOutcome oc) noexcept
 // UnknownCredential (bad or unlisted pinId, incl. the never-listed case) is its own
 // name so a client can distinguish "re-list and retry" from "fix your request".
 // (Mirror of LibreLinux CardObject's throwEntryError.)
-wire::SyncError mapEntryError(A::EntryError err) noexcept
+A::Wire::SyncError mapEntryError(A::EntryError err) noexcept
 {
     switch (err) {
     case A::EntryError::UnknownCredential:
-        return wire::SyncError::UnknownCredential;
+        return A::Wire::SyncError::UnknownCredential;
     case A::EntryError::UnknownVerb:
     case A::EntryError::UnknownOption:
     case A::EntryError::InvalidCombination:
     case A::EntryError::AmbiguousCredential: // non-unique label: the seam must never guess
         break;
     }
-    return wire::SyncError::InvalidRequest;
+    return A::Wire::SyncError::InvalidRequest;
 }
 
 // Extract a std::string from a CBOR text value; nullopt on a type mismatch.
-std::optional<std::string> asString(const wire::CborValue& v)
+std::optional<std::string> asString(const A::Wire::CborValue& v)
 {
     if (const auto* s = v.asText()) {
         return *s;
@@ -194,13 +194,13 @@ std::optional<std::string> asString(const wire::CborValue& v)
 // be after the frontend is freed; capturing only the long-lived transport pointer
 // (taken on the loop at reply construction, while the frontend is alive) keeps
 // that path lifetime-safe without relying on the loop-quiesce drop.
-void postReply(SocketTransport* tr, std::uint64_t connId, wire::CborValue message)
+void postReply(SocketTransport* tr, std::uint64_t connId, A::Wire::CborValue message)
 {
     tr->post([tr, connId, message] { tr->sendTo(connId, message); });
 }
-void postErr(SocketTransport* tr, std::uint64_t connId, std::uint64_t req, wire::SyncError code)
+void postErr(SocketTransport* tr, std::uint64_t connId, std::uint64_t req, A::Wire::SyncError code)
 {
-    postReply(tr, connId, wire::makeErrorReply(req, wire::ErrInfo{code, std::nullopt, std::nullopt}));
+    postReply(tr, connId, A::Wire::makeErrorReply(req, A::Wire::ErrInfo{code, std::nullopt, std::nullopt}));
 }
 
 } // namespace
@@ -222,14 +222,14 @@ std::string SocketFrontend::requesterLabel(const A::CallerToken& caller) const
     return {};
 }
 
-void SocketFrontend::sendReplyOnLoop(std::uint64_t connId, wire::CborValue message)
+void SocketFrontend::sendReplyOnLoop(std::uint64_t connId, A::Wire::CborValue message)
 {
     m_transport.sendTo(connId, message);
 }
 
-void SocketFrontend::replyError(std::uint64_t connId, std::uint64_t req, wire::SyncError code)
+void SocketFrontend::replyError(std::uint64_t connId, std::uint64_t req, A::Wire::SyncError code)
 {
-    sendReplyOnLoop(connId, wire::makeErrorReply(req, wire::ErrInfo{code, std::nullopt, std::nullopt}));
+    sendReplyOnLoop(connId, A::Wire::makeErrorReply(req, A::Wire::ErrInfo{code, std::nullopt, std::nullopt}));
 }
 
 void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
@@ -239,75 +239,75 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
     const A::CallerToken caller = in.caller;
     auto& body = in.request.body;
 
-    if (const auto* m = std::get_if<wire::Hello>(&body)) {
+    if (const auto* m = std::get_if<A::Wire::Hello>(&body)) {
         handleHello(connId, req, *m);
-    } else if (std::get_if<wire::GetState>(&body)) {
+    } else if (std::get_if<A::Wire::GetState>(&body)) {
         handleGetState(connId, req);
-    } else if (const auto* m = std::get_if<wire::ReadIdentity>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::ReadIdentity>(&body)) {
         handleReadIdentity(in, *m);
-    } else if (const auto* m = std::get_if<wire::GetPhoto>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::GetPhoto>(&body)) {
         handleGetPhoto(in, *m);
-    } else if (const auto* m = std::get_if<wire::ReadCertificates>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::ReadCertificates>(&body)) {
         handleReadCertificates(in, *m);
-    } else if (const auto* m = std::get_if<wire::Sign>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::Sign>(&body)) {
         handleSign(in, *m);
-    } else if (const auto* m = std::get_if<wire::ListCredentials>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::ListCredentials>(&body)) {
         handleListCredentials(in, *m);
-    } else if (const auto* m = std::get_if<wire::ManagePin>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::ManagePin>(&body)) {
         handleManagePin(in, *m);
-    } else if (const auto* m = std::get_if<wire::ActivateSigningKey>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::ActivateSigningKey>(&body)) {
         handleActivateSigningKey(in, *m);
-    } else if (const auto* m = std::get_if<wire::GetCertDer>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::GetCertDer>(&body)) {
         handleCertDer(connId, req, *m, caller);
-    } else if (std::get_if<wire::GetConfig>(&body)) {
+    } else if (std::get_if<A::Wire::GetConfig>(&body)) {
         handleGetConfig(connId, req);
-    } else if (const auto* m = std::get_if<wire::SetConfig>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::SetConfig>(&body)) {
         handleSetConfig(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::ResetConfig>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::ResetConfig>(&body)) {
         handleResetConfig(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::CancelOp>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::CancelOp>(&body)) {
         handleCancel(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::GetSignResult>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::GetSignResult>(&body)) {
         handleGetSignResult(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::PkLogin>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::PkLogin>(&body)) {
         handlePkLogin(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::PkLogout>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::PkLogout>(&body)) {
         handlePkLogout(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::PkPublicKey>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::PkPublicKey>(&body)) {
         handlePkPublicKey(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::PkSignRaw>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::PkSignRaw>(&body)) {
         handlePkSignRaw(connId, req, *m, caller);
-    } else if (const auto* m = std::get_if<wire::PkDecrypt>(&body)) {
+    } else if (const auto* m = std::get_if<A::Wire::PkDecrypt>(&body)) {
         handlePkDecrypt(connId, req, *m, caller);
     }
 }
 
-void SocketFrontend::handleHello(std::uint64_t connId, std::uint64_t req, const wire::Hello& /*msg*/)
+void SocketFrontend::handleHello(std::uint64_t connId, std::uint64_t req, const A::Wire::Hello& /*msg*/)
 {
-    wire::HelloAck ack;
+    A::Wire::HelloAck ack;
     ack.agentVer = m_version;
     ack.features = {"identity", "certificates", "photo", "sign", "pkcs11", "config", "credentials"};
-    sendReplyOnLoop(connId, wire::makeReply(req, ack));
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, ack));
 }
 
 void SocketFrontend::handleGetState(std::uint64_t connId, std::uint64_t req)
 {
-    sendReplyOnLoop(connId, wire::makeReply(req, m_transport.currentState()));
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, m_transport.currentState()));
 }
 
 // --- card operations ---------------------------------------------------------
 
-void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const wire::ReadIdentity& msg)
+void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const A::Wire::ReadIdentity& msg)
 {
     const std::uint64_t connId = in.connId;
     const std::uint64_t req = in.request.req;
     const auto routing = m_transport.cardRouting(msg.card);
     if (!routing) {
-        replyError(connId, req, wire::SyncError::UnknownCard);
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
         return;
     }
     if ((routing->caps & kIdentityCapBit) == 0) {
-        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
     const std::string requester = requesterLabel(in.caller);
@@ -345,23 +345,23 @@ void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const wire
                 return op;
             });
         m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
     }
 }
 
-void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const wire::GetPhoto& msg)
+void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const A::Wire::GetPhoto& msg)
 {
     const std::uint64_t connId = in.connId;
     const std::uint64_t req = in.request.req;
     const auto routing = m_transport.cardRouting(msg.card);
     if (!routing) {
-        replyError(connId, req, wire::SyncError::UnknownCard);
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
         return;
     }
     if ((routing->caps & kIdentityCapBit) == 0) {
-        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
     const std::string requester = requesterLabel(in.caller);
@@ -399,23 +399,23 @@ void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const wire::Ge
                 return op;
             });
         m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
     }
 }
 
-void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const wire::ReadCertificates& msg)
+void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const A::Wire::ReadCertificates& msg)
 {
     const std::uint64_t connId = in.connId;
     const std::uint64_t req = in.request.req;
     const auto routing = m_transport.cardRouting(msg.card);
     if (!routing) {
-        replyError(connId, req, wire::SyncError::UnknownCard);
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
         return;
     }
     if ((routing->caps & kPkiCapBit) == 0) {
-        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
     const std::string requester = requesterLabel(in.caller);
@@ -453,61 +453,61 @@ void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const 
                 return op;
             });
         m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
     }
 }
 
-void SocketFrontend::handleSign(SocketTransport::Inbound& in, const wire::Sign& msg)
+void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sign& msg)
 {
     const std::uint64_t connId = in.connId;
     const std::uint64_t req = in.request.req;
     const auto routing = m_transport.cardRouting(msg.card);
     if (!routing) {
-        replyError(connId, req, wire::SyncError::UnknownCard);
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
         return;
     }
     if ((routing->caps & kPkiCapBit) == 0) {
-        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
     if (msg.cert.empty()) {
-        replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
 
     // Authorize the CLIENT then apply the sign-flood rate-limit BEFORE ingesting
     // the document (a rejected caller never makes the agent read up to 256 MiB).
     if (!m_core.authorizer().authorize(A::kActionSign, in.caller)) {
-        replyError(connId, req, wire::SyncError::NotAuthorized);
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
         return;
     }
 
     // The input document rides SCM_RIGHTS as fd-index msg.inFd into in.fds.
     if (msg.inFd >= in.fds.size()) {
-        replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
     auto doc = readDocument(in.fds[msg.inFd].get(), kMaxInputBytes);
     if (doc.status == ReadStatus::NotRegular) {
-        replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
     if (doc.status == ReadStatus::TooLarge) {
-        replyError(connId, req, wire::SyncError::InputTooLarge);
+        replyError(connId, req, A::Wire::SyncError::InputTooLarge);
         return;
     }
     if (doc.status == ReadStatus::Error) {
-        replyError(connId, req, wire::SyncError::CommunicationError); // internal read failure
+        replyError(connId, req, A::Wire::SyncError::CommunicationError); // internal read failure
         return;
     }
     if (doc.bytes.empty()) {
-        replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter); // empty document
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter); // empty document
         return;
     }
 
@@ -517,13 +517,13 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const wire::Sign& 
     if (format == "auto" || format.empty()) {
         const auto sniffed = sp::sniffFormat(doc.bytes);
         if (!sniffed) {
-            replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter);
+            replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
             return;
         }
         format = *sniffed;
     }
     if (!sp::isKnownFormat(format)) {
-        replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
     std::optional<std::string> requestedLevel;
@@ -533,7 +533,7 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const wire::Sign& 
     std::string level = sp::resolveSignLevel(requestedLevel, m_core.configStore().defaultLevel(),
                                              !m_core.configStore().tsaUrls().empty());
     if (!sp::isKnownLevel(level) || !sp::isImplementedSignLevel(level)) {
-        replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
     std::string packaging = msg.opts.packaging;
@@ -541,7 +541,7 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const wire::Sign& 
         packaging = sp::defaultPackagingFor(format);
     }
     if (!sp::isKnownPackaging(packaging)) {
-        replyError(connId, req, wire::SyncError::UnsupportedSignatureParameter);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
 
@@ -600,15 +600,15 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const wire::Sign& 
                 return op;
             });
         m_opOwners[id.value()] = owner;
-        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
     }
 }
 
 // --- credentials (PIN/PUK management) ----------------------------------------
 
-void SocketFrontend::handleListCredentials(SocketTransport::Inbound& in, const wire::ListCredentials& msg)
+void SocketFrontend::handleListCredentials(SocketTransport::Inbound& in, const A::Wire::ListCredentials& msg)
 {
     // A read of the card's PIN credentials. Gates on PinManagement (no listing is
     // meaningful without it) but is NOT rate-limited — no card-state mutation.
@@ -616,11 +616,11 @@ void SocketFrontend::handleListCredentials(SocketTransport::Inbound& in, const w
     const std::uint64_t req = in.request.req;
     const auto routing = m_transport.cardRouting(msg.card);
     if (!routing) {
-        replyError(connId, req, wire::SyncError::UnknownCard);
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
         return;
     }
     if ((routing->caps & kPinManagementCapBit) == 0) {
-        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
     const std::string requester = requesterLabel(in.caller);
@@ -658,13 +658,13 @@ void SocketFrontend::handleListCredentials(SocketTransport::Inbound& in, const w
                 return op;
             });
         m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
     }
 }
 
-void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const wire::ManagePin& msg)
+void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const A::Wire::ManagePin& msg)
 {
     // Entry gating: capability -> authorize -> rate-limit -> validation, all
     // BEFORE any Operation (and thus any prompt) exists — the same matrix and
@@ -673,21 +673,21 @@ void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const wire::M
     const std::uint64_t req = in.request.req;
     const auto routing = m_transport.cardRouting(msg.card);
     if (!routing) {
-        replyError(connId, req, wire::SyncError::UnknownCard);
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
         return;
     }
     if ((routing->caps & kPinManagementCapBit) == 0) {
-        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
 
     // Authorize + rate-limit (BEFORE any prompt), same posture + ordering as Sign.
     if (!m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
-        replyError(connId, req, wire::SyncError::NotAuthorized);
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
         return;
     }
 
@@ -696,7 +696,7 @@ void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const wire::M
     // verb that cannot carry it. Checked BEFORE the optional is flattened into
     // the request (the flatten would erase a stray `activateKey: false`).
     if (msg.activateKey.has_value() && msg.verb != kVerbActivatePin) {
-        replyError(connId, req, wire::SyncError::InvalidRequest);
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
         return;
     }
 
@@ -755,13 +755,13 @@ void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const wire::M
                 return op;
             });
         m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
     }
 }
 
-void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, const wire::ActivateSigningKey& msg)
+void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, const A::Wire::ActivateSigningKey& msg)
 {
     // Authorize + rate-limit (BEFORE any prompt). No client-supplied arguments to
     // validate — the addressed signing-key record is resolved inside the operation
@@ -770,19 +770,19 @@ void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, cons
     const std::uint64_t req = in.request.req;
     const auto routing = m_transport.cardRouting(msg.card);
     if (!routing) {
-        replyError(connId, req, wire::SyncError::UnknownCard);
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
         return;
     }
     if ((routing->caps & kPinManagementCapBit) == 0) {
-        replyError(connId, req, wire::SyncError::UnsupportedOnThisCard);
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
     if (!m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
-        replyError(connId, req, wire::SyncError::NotAuthorized);
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
         return;
     }
 
@@ -823,13 +823,13 @@ void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, cons
                 return op;
             });
         m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, wire::makeReply(req, wire::OpStarted{id.value()}));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
     } catch (const Ops::QueueFull&) {
-        replyError(connId, req, wire::SyncError::RateLimited);
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
     }
 }
 
-void SocketFrontend::handleCancel(std::uint64_t connId, std::uint64_t req, const wire::CancelOp& msg,
+void SocketFrontend::handleCancel(std::uint64_t connId, std::uint64_t req, const A::Wire::CancelOp& msg,
                                   const A::CallerToken& caller)
 {
     // Owner-scope the cancel: op ids are small + enumerable, so an unscoped cancel
@@ -839,7 +839,7 @@ void SocketFrontend::handleCancel(std::uint64_t connId, std::uint64_t req, const
     if (it != m_opOwners.end() && it->second == caller) {
         m_core.operationManager().cancel(A::OperationId{msg.op});
     }
-    sendReplyOnLoop(connId, wire::makeReply(req, wire::AckReply{}));
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
 }
 
 void SocketFrontend::stashSignArtifact(std::uint64_t opId, const A::CallerToken& owner,
@@ -866,7 +866,7 @@ std::function<void(std::uint64_t)> SocketFrontend::makeOpFinishedSink()
     return [tr, this](std::uint64_t oid) { tr->post([this, oid] { m_opOwners.erase(oid); }); };
 }
 
-void SocketFrontend::handleGetSignResult(std::uint64_t connId, std::uint64_t req, const wire::GetSignResult& msg,
+void SocketFrontend::handleGetSignResult(std::uint64_t connId, std::uint64_t req, const A::Wire::GetSignResult& msg,
                                          const A::CallerToken& caller)
 {
     const auto it = m_signResults.find(msg.op);
@@ -874,21 +874,21 @@ void SocketFrontend::handleGetSignResult(std::uint64_t connId, std::uint64_t req
     // op ids are enumerable, so a requester that did not initiate the op must get
     // the same KeyNotFound as a truly-absent op (no disclosure, no oracle).
     if (it == m_signResults.end() || !(it->second.owner == caller)) {
-        replyError(connId, req, wire::SyncError::KeyNotFound);
+        replyError(connId, req, A::Wire::SyncError::KeyNotFound);
         return;
     }
     auto fd = wire::anonFdFromBytes(it->second.artifact.bytes);
     if (!fd) {
-        replyError(connId, req, wire::SyncError::CommunicationError);
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
-    wire::SignResult result;
+    A::Wire::SignResult result;
     result.artifact = 0; // fd-index into the reply's SCM_RIGHTS vector
-    result.meta = wire::SignMeta{it->second.artifact.meta.format, it->second.artifact.meta.level,
-                                 it->second.artifact.meta.tsaUsed, it->second.artifact.meta.chainComplete};
-    std::vector<wire::UniqueFd> fds;
+    result.meta = A::Wire::SignMeta{it->second.artifact.meta.format, it->second.artifact.meta.level,
+                                    it->second.artifact.meta.tsaUsed, it->second.artifact.meta.chainComplete};
+    std::vector<A::Wire::UniqueFd> fds;
     fds.push_back(std::move(*fd));
-    m_transport.sendTo(connId, wire::makeSignRecoveryReply(req, result), std::move(fds));
+    m_transport.sendTo(connId, A::Wire::makeSignRecoveryReply(req, result), std::move(fds));
 }
 
 // --- config ------------------------------------------------------------------
@@ -896,51 +896,51 @@ void SocketFrontend::handleGetSignResult(std::uint64_t connId, std::uint64_t req
 void SocketFrontend::handleGetConfig(std::uint64_t connId, std::uint64_t req)
 {
     auto& cfg = m_core.configStore();
-    wire::ConfigReply reply;
-    reply.entries.emplace("DefaultLevel", wire::CborValue(cfg.defaultLevel()));
+    A::Wire::ConfigReply reply;
+    reply.entries.emplace("DefaultLevel", A::Wire::CborValue(cfg.defaultLevel()));
     {
-        wire::CborValue::Array urls;
+        A::Wire::CborValue::Array urls;
         for (auto& u : cfg.tsaUrls()) {
             urls.emplace_back(u);
         }
-        reply.entries.emplace("TsaUrls", wire::CborValue(std::move(urls)));
+        reply.entries.emplace("TsaUrls", A::Wire::CborValue(std::move(urls)));
     }
-    reply.entries.emplace("LastTsaUrl", wire::CborValue(cfg.lastTsaUrl()));
+    reply.entries.emplace("LastTsaUrl", A::Wire::CborValue(cfg.lastTsaUrl()));
     {
-        wire::CborValue::Array sources;
+        A::Wire::CborValue::Array sources;
         for (const auto& s : cfg.tslSources()) {
-            wire::CborValue::Map m;
-            m.emplace("url", wire::CborValue(s.url));
-            m.emplace("isLotl", wire::CborValue(s.isLotl));
-            m.emplace("eager", wire::CborValue(s.eager));
+            A::Wire::CborValue::Map m;
+            m.emplace("url", A::Wire::CborValue(s.url));
+            m.emplace("isLotl", A::Wire::CborValue(s.isLotl));
+            m.emplace("eager", A::Wire::CborValue(s.eager));
             sources.emplace_back(std::move(m));
         }
-        reply.entries.emplace("TslSources", wire::CborValue(std::move(sources)));
+        reply.entries.emplace("TslSources", A::Wire::CborValue(std::move(sources)));
     }
-    reply.entries.emplace("TslCacheDir", wire::CborValue(cfg.tslCacheDir()));
-    reply.entries.emplace("AiaCacheDir", wire::CborValue(cfg.aiaCacheDir()));
-    reply.entries.emplace("DefaultReason", wire::CborValue(cfg.defaultReason()));
-    reply.entries.emplace("DefaultLocation", wire::CborValue(cfg.defaultLocation()));
-    reply.entries.emplace("PluginDir", wire::CborValue(cfg.pluginDir()));
-    sendReplyOnLoop(connId, wire::makeReply(req, reply));
+    reply.entries.emplace("TslCacheDir", A::Wire::CborValue(cfg.tslCacheDir()));
+    reply.entries.emplace("AiaCacheDir", A::Wire::CborValue(cfg.aiaCacheDir()));
+    reply.entries.emplace("DefaultReason", A::Wire::CborValue(cfg.defaultReason()));
+    reply.entries.emplace("DefaultLocation", A::Wire::CborValue(cfg.defaultLocation()));
+    reply.entries.emplace("PluginDir", A::Wire::CborValue(cfg.pluginDir()));
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
 }
 
-void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, const wire::SetConfig& msg,
+void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, const A::Wire::SetConfig& msg,
                                      const A::CallerToken& caller)
 {
     const auto mut = A::Config::ConfigStore::mutability(msg.key);
     if (!mut) {
-        replyError(connId, req, wire::SyncError::UnknownConfigKey);
+        replyError(connId, req, A::Wire::SyncError::UnknownConfigKey);
         return;
     }
     if (*mut == A::Config::Mutability::FileOnly || *mut == A::Config::Mutability::ReadOnly) {
-        replyError(connId, req, wire::SyncError::ReadOnlyConfig);
+        replyError(connId, req, A::Wire::SyncError::ReadOnlyConfig);
         return;
     }
     const char* action =
         (*mut == A::Config::Mutability::DbusMutableTrust) ? A::kActionConfigureTrust : A::kActionConfigure;
     if (!m_core.authorizer().authorize(action, caller)) {
-        replyError(connId, req, wire::SyncError::NotAuthorized);
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
         return;
     }
 
@@ -949,35 +949,35 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
     if (msg.key == "DefaultLevel") {
         auto v = asString(msg.value);
         if (!v) {
-            replyError(connId, req, wire::SyncError::InvalidConfigValue);
+            replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
             return;
         }
         r = cfg.setDefaultLevel(*v);
     } else if (msg.key == "DefaultReason") {
         auto v = asString(msg.value);
         if (!v) {
-            replyError(connId, req, wire::SyncError::InvalidConfigValue);
+            replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
             return;
         }
         r = cfg.setDefaultReason(*v);
     } else if (msg.key == "DefaultLocation") {
         auto v = asString(msg.value);
         if (!v) {
-            replyError(connId, req, wire::SyncError::InvalidConfigValue);
+            replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
             return;
         }
         r = cfg.setDefaultLocation(*v);
     } else if (msg.key == "TsaUrls") {
         const auto* arr = msg.value.asArray();
         if (!arr) {
-            replyError(connId, req, wire::SyncError::InvalidConfigValue);
+            replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
             return;
         }
         std::vector<std::string> urls;
         for (const auto& e : *arr) {
             auto s = asString(e);
             if (!s) {
-                replyError(connId, req, wire::SyncError::InvalidConfigValue);
+                replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
                 return;
             }
             urls.push_back(std::move(*s));
@@ -986,14 +986,14 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
     } else if (msg.key == "TslSources") {
         const auto* arr = msg.value.asArray();
         if (!arr) {
-            replyError(connId, req, wire::SyncError::InvalidConfigValue);
+            replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
             return;
         }
         std::vector<A::Config::TslSource> sources;
         for (const auto& e : *arr) {
             const auto* m = e.asMap();
             if (!m) {
-                replyError(connId, req, wire::SyncError::InvalidConfigValue);
+                replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
                 return;
             }
             A::Config::TslSource src;
@@ -1001,7 +1001,7 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
             const auto* isLotl = e.find("isLotl");
             const auto* eager = e.find("eager");
             if (url == nullptr || !url->asText()) {
-                replyError(connId, req, wire::SyncError::InvalidConfigValue);
+                replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
                 return;
             }
             src.url = *url->asText();
@@ -1011,115 +1011,117 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
         }
         r = cfg.setTslSources(std::move(sources));
     } else {
-        replyError(connId, req, wire::SyncError::UnknownConfigKey);
+        replyError(connId, req, A::Wire::SyncError::UnknownConfigKey);
         return;
     }
 
     if (!r.ok) {
-        replyError(connId, req, wire::SyncError::InvalidConfigValue);
+        replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
         return;
     }
-    sendReplyOnLoop(connId, wire::makeReply(req, wire::AckReply{}));
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
 }
 
-void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, const wire::ResetConfig& msg,
+void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, const A::Wire::ResetConfig& msg,
                                        const A::CallerToken& caller)
 {
     const auto mut = A::Config::ConfigStore::mutability(msg.key);
     if (!mut) {
-        replyError(connId, req, wire::SyncError::UnknownConfigKey);
+        replyError(connId, req, A::Wire::SyncError::UnknownConfigKey);
         return;
     }
     if (*mut == A::Config::Mutability::FileOnly || *mut == A::Config::Mutability::ReadOnly) {
-        replyError(connId, req, wire::SyncError::ReadOnlyConfig);
+        replyError(connId, req, A::Wire::SyncError::ReadOnlyConfig);
         return;
     }
     const char* action =
         (*mut == A::Config::Mutability::DbusMutableTrust) ? A::kActionConfigureTrust : A::kActionConfigure;
     if (!m_core.authorizer().authorize(action, caller)) {
-        replyError(connId, req, wire::SyncError::NotAuthorized);
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
         return;
     }
     const auto r = m_core.configStore().resetKey(msg.key, /*fromDbus=*/true);
     if (!r.ok) {
-        replyError(connId, req, wire::SyncError::InvalidConfigValue);
+        replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
         return;
     }
-    sendReplyOnLoop(connId, wire::makeReply(req, wire::AckReply{}));
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
 }
 
 // --- pkcs11 / cert-der (async broker handoff) --------------------------------
 
-void SocketFrontend::handleCertDer(std::uint64_t connId, std::uint64_t req, const wire::GetCertDer& msg,
+void SocketFrontend::handleCertDer(std::uint64_t connId, std::uint64_t req, const A::Wire::GetCertDer& msg,
                                    const A::CallerToken& caller)
 {
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& der) {
-            postReply(tr, connId, wire::makeReply(req, wire::CertDerReply{der}));
+            postReply(tr, connId, A::Wire::makeReply(req, A::Wire::CertDerReply{der}));
         },
         [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().certDer(msg.reader, msg.cert, c, reply);
 }
 
-void SocketFrontend::handlePkPublicKey(std::uint64_t connId, std::uint64_t req, const wire::PkPublicKey& msg,
+void SocketFrontend::handlePkPublicKey(std::uint64_t connId, std::uint64_t req, const A::Wire::PkPublicKey& msg,
                                        const A::CallerToken& caller)
 {
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& n, const std::vector<std::uint8_t>& e) {
-            wire::PublicKeyReply pk = wire::RsaPublicKey{n, e};
-            postReply(tr, connId, wire::makeReply(req, pk));
+            A::Wire::PublicKeyReply pk = A::Wire::RsaPublicKey{n, e};
+            postReply(tr, connId, A::Wire::makeReply(req, pk));
         },
         [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().publicKey(msg.reader, msg.cert, c, reply);
 }
 
-void SocketFrontend::handlePkLogin(std::uint64_t connId, std::uint64_t req, const wire::PkLogin& msg,
+void SocketFrontend::handlePkLogin(std::uint64_t connId, std::uint64_t req, const A::Wire::PkLogin& msg,
                                    const A::CallerToken& caller)
 {
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::LoginOutcome, std::uint32_t> reply{
-        [tr, connId, req](std::uint32_t /*flags*/) { postReply(tr, connId, wire::makeReply(req, wire::AckReply{})); },
+        [tr, connId, req](std::uint32_t /*flags*/) {
+            postReply(tr, connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
+        },
         [tr, connId, req](A::Pkcs11Broker::LoginOutcome oc) { postErr(tr, connId, req, mapLoginOutcome(oc)); },
         A::Pkcs11Broker::LoginOutcome::CardError};
     m_core.pkcs11().login(msg.reader, c, reply);
 }
 
-void SocketFrontend::handlePkLogout(std::uint64_t connId, std::uint64_t req, const wire::PkLogout& msg,
+void SocketFrontend::handlePkLogout(std::uint64_t connId, std::uint64_t req, const A::Wire::PkLogout& msg,
                                     const A::CallerToken& caller)
 {
     m_core.pkcs11().logout(msg.reader, A::Pkcs11Broker::Caller{caller, requesterLabel(caller)});
-    sendReplyOnLoop(connId, wire::makeReply(req, wire::AckReply{}));
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
 }
 
-void SocketFrontend::handlePkSignRaw(std::uint64_t connId, std::uint64_t req, const wire::PkSignRaw& msg,
+void SocketFrontend::handlePkSignRaw(std::uint64_t connId, std::uint64_t req, const A::Wire::PkSignRaw& msg,
                                      const A::CallerToken& caller)
 {
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& sig) {
-            postReply(tr, connId, wire::makeReply(req, wire::RawSignatureReply{sig}));
+            postReply(tr, connId, A::Wire::makeReply(req, A::Wire::RawSignatureReply{sig}));
         },
         [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().signRaw(msg.reader, msg.cert, A::Mechanism::RsaPkcs1Sign, A::MechParamsEmpty{}, msg.data, c, reply);
 }
 
-void SocketFrontend::handlePkDecrypt(std::uint64_t connId, std::uint64_t req, const wire::PkDecrypt& msg,
+void SocketFrontend::handlePkDecrypt(std::uint64_t connId, std::uint64_t req, const A::Wire::PkDecrypt& msg,
                                      const A::CallerToken& caller)
 {
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& plain) {
-            postReply(tr, connId, wire::makeReply(req, wire::RawSignatureReply{plain}));
+            postReply(tr, connId, A::Wire::makeReply(req, A::Wire::RawSignatureReply{plain}));
         },
         [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
@@ -1193,7 +1195,8 @@ void SocketFrontend::scheduleCardResolve(const A::CardState& card)
     }
 }
 
-void SocketFrontend::applyCardResolution(A::CardState card, std::uint32_t caps, wire::PreReadAuthMethod preAuth)
+void SocketFrontend::applyCardResolution(A::CardState card, std::uint32_t caps,
+                                         LibreSCRS::Auth::PreReadAuthMethod preAuth)
 {
     const auto it = m_pendingCards.find(card.id.value());
     if (it == m_pendingCards.end()) {

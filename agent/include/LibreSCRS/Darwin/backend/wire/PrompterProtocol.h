@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
-#include <LibreSCRS/Darwin/backend/wire/Cbor.h>
+#include <LibreSCRS/Agent/wire/Cbor.h>
 
 #include <cstddef>
 #include <cstdint>
@@ -20,6 +20,8 @@
 // same way.
 
 namespace LibreSCRS::Darwin::wire {
+
+using LibreSCRS::Agent::Wire::CborValue;
 
 enum class PromptKind : std::uint8_t { Pin, Can, Mrz };
 

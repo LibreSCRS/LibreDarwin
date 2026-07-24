@@ -5,7 +5,7 @@
 // unknown inputs fail closed. Secret hygiene: the 8 KiB inbound cap and the
 // scrub-after-send path are exercised over a real socketpair — for the single
 // secret and for the two-secret change flow (RequestSecrets / MultiPromptReply).
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
 #include <gtest/gtest.h>
@@ -17,6 +17,10 @@
 #include <vector>
 
 using namespace LibreSCRS::Darwin::wire;
+// The codec/framing primitives (decode/sendFrame/recvFrame/CborValue/etc.) now
+// live in the shared LibreAgent::Wire library; PromptKind/PromptRequest/etc.
+// above stay Darwin-local.
+using namespace LibreSCRS::Agent::Wire;
 
 namespace {
 

@@ -42,9 +42,6 @@ find_package(LibreMiddleware 4.2 REQUIRED CONFIG)
 # with its D-Bus backend.
 include(cmake/FindOrUseLibreAgent.cmake)
 
-# Vendored CBOR codec (QCBOR) for the socket wire transport.
-include(cmake/FetchQCBOR.cmake)
-
 enable_testing()
 
 add_subdirectory(agent)

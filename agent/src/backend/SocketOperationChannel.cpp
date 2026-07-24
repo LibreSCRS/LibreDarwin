@@ -9,8 +9,8 @@
 
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Darwin/backend/wire/AnonFd.h>
-#include <LibreSCRS/Darwin/backend/wire/Messages.h>
-#include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
+#include <LibreSCRS/Agent/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <LibreSCRS/Agent/backend/Logging.h>
 
@@ -48,16 +48,16 @@ std::string_view fieldTypeName(A::FieldType t)
 }
 
 // CardReadSnapshot -> wire IdentityResult (photos stripped; they ride GetPhoto).
-wire::IdentityResult toIdentityResult(const A::CardReadSnapshot& snap)
+A::Wire::IdentityResult toIdentityResult(const A::CardReadSnapshot& snap)
 {
-    wire::IdentityResult out;
+    A::Wire::IdentityResult out;
     for (const auto& group : snap.groups) {
-        std::map<std::string, wire::IdentityField> fields;
+        std::map<std::string, A::Wire::IdentityField> fields;
         for (const auto& f : group.fields) {
             if (f.type == A::FieldType::Photo) {
                 continue; // Identity1 omits photos
             }
-            wire::IdentityField cell;
+            A::Wire::IdentityField cell;
             cell.labelKey = f.labelKey;
             cell.labelFallback = f.labelFallback;
             cell.type = std::string(fieldTypeName(f.type));
@@ -76,9 +76,9 @@ wire::IdentityResult toIdentityResult(const A::CardReadSnapshot& snap)
 }
 
 // CertSnapshot -> wire CertInfo (grouped (ssv) fields, all string values).
-wire::CertInfo toCertInfo(const A::CertSnapshot& c)
+A::Wire::CertInfo toCertInfo(const A::CertSnapshot& c)
 {
-    wire::CertInfo out;
+    A::Wire::CertInfo out;
     out.certId = c.certId;
     out.signingCapable = c.signingCapable;
     out.keyUsageBits = c.keyUsageBits;
@@ -86,15 +86,76 @@ wire::CertInfo toCertInfo(const A::CertSnapshot& c)
     out.chainSubjectCns = c.chainSubjectCns;
     out.trustStatus = c.trustStatus;
     for (const auto& group : c.fields) {
-        std::map<std::string, wire::CertField> fields;
+        std::map<std::string, A::Wire::CertField> fields;
         for (const auto& f : group.fields) {
-            wire::CertField cell;
+            A::Wire::CertField cell;
             cell.labelKey = f.labelKey;
             cell.labelFallback = f.labelFallback;
             cell.value = f.textValue; // cert fields are all Text
             fields.emplace(f.fieldKey, std::move(cell));
         }
         out.fields.emplace(group.groupKey, std::move(fields));
+    }
+    return out;
+}
+
+// A::CredentialRecord -> the wire mirror: a plain field-for-field copy. Both
+// sides are std-only value types with identical field names/types by
+// construction (LibreAgent's WireParityChecks statically asserts it), so
+// there is no LM-facing conversion here — just the wire-shape hop.
+A::Wire::CredentialRecord toWireCredentialRecord(const A::CredentialRecord& r)
+{
+    A::Wire::CredentialRecord out;
+    out.id = r.id;
+    out.label = r.label;
+    out.kind = r.kind;
+    out.state = r.state;
+    out.retriesLeft = r.retriesLeft;
+    out.retriesMax = r.retriesMax;
+    out.usesLeft = r.usesLeft;
+    out.usesMax = r.usesMax;
+    out.unblocksLeft = r.unblocksLeft;
+    out.minLength = r.minLength;
+    out.maxLength = r.maxLength;
+    out.canChange = r.canChange;
+    out.unblockable = r.unblockable;
+    out.unblockStyle = r.unblockStyle;
+    out.activatable = r.activatable;
+    out.keyActivationPending = r.keyActivationPending;
+    out.keyActivatable = r.keyActivatable;
+    out.recovery = r.recovery;
+    out.probeSafe = r.probeSafe;
+    out.blockedGuidanceKey = r.blockedGuidanceKey;
+    out.blockedGuidanceFallback = r.blockedGuidanceFallback;
+    out.keyActivationGuidanceKey = r.keyActivationGuidanceKey;
+    out.keyActivationGuidanceFallback = r.keyActivationGuidanceFallback;
+    return out;
+}
+
+// A::CredentialOpResult -> the wire mirror. `outcome` crosses via static_cast:
+// same enumerator values as A::CredentialOutcome (WireParityChecks pins them
+// in lockstep), but no longer the same TYPE now that Wire::CredentialOutcome
+// is its own std-only mirror.
+A::Wire::CredentialOpResult toWireCredentialOpResult(const A::CredentialOpResult& r)
+{
+    A::Wire::CredentialOpResult out;
+    out.outcome = static_cast<A::Wire::CredentialOutcome>(r.outcome);
+    out.retriesLeft = r.retriesLeft;
+    out.blocked = r.blocked;
+    out.pinActivated = r.pinActivated;
+    out.keyActivated = r.keyActivated;
+    return out;
+}
+
+// Ops::CredentialResult -> wire CredentialsResult (op + the listing records, if
+// any — a mutation's records are always empty).
+A::Wire::CredentialsResult toWireCredentialsResult(const Ops::CredentialResult& r)
+{
+    A::Wire::CredentialsResult out;
+    out.result = toWireCredentialOpResult(r.op);
+    out.records.reserve(r.records.size());
+    for (const auto& record : r.records) {
+        out.records.push_back(toWireCredentialRecord(record));
     }
     return out;
 }
@@ -123,7 +184,7 @@ void SocketOperationChannel::emitPropertiesChanged() noexcept
     // an allocation failure degrades to a dropped progress event, never
     // std::terminate.
     try {
-        wire::OpProgress ev;
+        A::Wire::OpProgress ev;
         ev.op = m_opId;
         ev.phase = static_cast<Ops::OperationPhase>(m_state ? m_state->phase.load() : 0u);
         if (m_state) {
@@ -131,7 +192,7 @@ void SocketOperationChannel::emitPropertiesChanged() noexcept
             ev.indeterminate = m_state->isIndeterminate.load();
             ev.watchdogSecs = m_state->watchdogTimeoutSec.load();
         }
-        const wire::CborValue msg = wire::toCbor(ev);
+        const A::Wire::CborValue msg = A::Wire::toCbor(ev);
         const std::uint64_t connId = m_connId;
         SocketTransport* t = &m_transport;
         t->post([t, connId, msg] { t->sendTo(connId, msg); });
@@ -144,13 +205,13 @@ void SocketOperationChannel::emitFinished(Ops::OperationStatus status, A::ErrorC
                                           std::string_view msgFallback) noexcept
 {
     try {
-        wire::OpFinished ev;
+        A::Wire::OpFinished ev;
         ev.op = m_opId;
         ev.status = status;
         ev.code = code;
         ev.msgKey = std::string(msgKey);
         ev.msgFallback = std::string(msgFallback);
-        const wire::CborValue msg = wire::toCbor(ev);
+        const A::Wire::CborValue msg = A::Wire::toCbor(ev);
         const std::uint64_t connId = m_connId;
         SocketTransport* t = &m_transport;
         t->post([t, connId, msg] { t->sendTo(connId, msg); });
@@ -172,9 +233,9 @@ void SocketOperationChannel::emitFinished(Ops::OperationStatus status, A::ErrorC
 
 bool SocketOperationChannel::emitResult(const Ops::ResultPayload& result) noexcept
 try {
-    wire::OpResultReady ev;
+    A::Wire::OpResultReady ev;
     ev.op = m_opId;
-    std::vector<wire::UniqueFd> fds;
+    std::vector<A::Wire::UniqueFd> fds;
 
     bool ok = true;
     std::visit(
@@ -183,20 +244,20 @@ try {
             if constexpr (std::is_same_v<T, A::CardReadSnapshot>) {
                 ev.result = toIdentityResult(arm);
             } else if constexpr (std::is_same_v<T, std::vector<A::CertSnapshot>>) {
-                wire::CertListResult clr;
+                A::Wire::CertListResult clr;
                 for (const auto& c : arm) {
                     clr.certs.push_back(toCertInfo(c));
                 }
                 ev.result = std::move(clr);
             } else if constexpr (std::is_same_v<T, Ops::PhotoResult>) {
-                wire::PhotoResult pr;
+                A::Wire::PhotoResult pr;
                 for (const auto& photo : arm) {
                     auto fd = wire::anonFdFromBytes(photo.bytes);
                     if (!fd) {
                         ok = false;
                         return;
                     }
-                    pr.photos.push_back(wire::PhotoItem{photo.key, static_cast<std::uint64_t>(fds.size())});
+                    pr.photos.push_back(A::Wire::PhotoItem{photo.key, static_cast<std::uint64_t>(fds.size())});
                     fds.push_back(std::move(*fd));
                 }
                 ev.result = std::move(pr);
@@ -206,20 +267,21 @@ try {
                     ok = false;
                     return;
                 }
-                wire::SignResult sr;
+                A::Wire::SignResult sr;
                 sr.artifact = static_cast<std::uint64_t>(fds.size());
-                sr.meta = wire::SignMeta{arm.meta.format, arm.meta.level, arm.meta.tsaUsed, arm.meta.chainComplete};
+                sr.meta = A::Wire::SignMeta{arm.meta.format, arm.meta.level, arm.meta.tsaUsed, arm.meta.chainComplete};
                 fds.push_back(std::move(*fd));
                 ev.result = std::move(sr);
                 if (m_onSignArtifact) {
                     m_onSignArtifact(m_opId, arm); // stash for GetSignResult recovery
                 }
             } else if constexpr (std::is_same_v<T, Ops::CredentialResult>) {
-                // Member copy: the wire type carries the agent value types
-                // directly (the codec, not this channel, maps them to their
-                // wire tokens/keys). Delivered inline, exactly like
+                // Field-for-field hop onto the wire mirror types (LibreAgent's
+                // WireParityChecks pins them in lockstep with the agent value
+                // types below): the codec, not this channel, maps them to
+                // their wire tokens/keys. Delivered inline, exactly like
                 // Identity/Certificates — no fd, no seal step.
-                ev.result = wire::CredentialsResult{arm.op, arm.records};
+                ev.result = toWireCredentialsResult(arm);
             } else {
                 static_assert(always_false_v<T>, "SocketOperationChannel::emitResult: unhandled ResultPayload arm");
             }
@@ -230,11 +292,11 @@ try {
         return false; // REQUIRED fd materialization failed
     }
 
-    const wire::CborValue msg = wire::toCbor(ev);
+    const A::Wire::CborValue msg = A::Wire::toCbor(ev);
     const std::uint64_t connId = m_connId;
     SocketTransport* t = &m_transport;
     // Move the fds into the posted send; sendTo dups them into the peer.
-    auto shared = std::make_shared<std::vector<wire::UniqueFd>>(std::move(fds));
+    auto shared = std::make_shared<std::vector<A::Wire::UniqueFd>>(std::move(fds));
     t->post([t, connId, msg, shared] { t->sendTo(connId, msg, std::move(*shared)); });
     return true;
 } catch (...) {

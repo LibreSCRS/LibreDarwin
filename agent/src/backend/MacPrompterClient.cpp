@@ -6,8 +6,8 @@
 // and zeroing the transfer buffer. The secret never transits a client.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
-#include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <LibreSCRS/Secure/String.h>
 
@@ -24,7 +24,7 @@
 namespace LibreSCRS::Darwin {
 namespace {
 
-wire::UniqueFd connectPrompter(const std::string& path)
+Agent::Wire::UniqueFd connectPrompter(const std::string& path)
 {
     if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
         return {};
@@ -33,7 +33,7 @@ wire::UniqueFd connectPrompter(const std::string& path)
     if (c < 0) {
         return {};
     }
-    wire::UniqueFd fd(c);
+    Agent::Wire::UniqueFd fd(c);
     ::fcntl(c, F_SETFD, FD_CLOEXEC);
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
@@ -106,16 +106,16 @@ MacPrompterClient::~MacPrompterClient() = default;
 
 Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agent::PromptOptions& options)
 {
-    wire::UniqueFd fd = connectPrompter(m_socketPath);
+    Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
     if (!fd) {
         return errorResult("prompter unavailable");
     }
 
     const auto body = wire::toCbor(buildRequest(kind, options)).encode();
-    if (!wire::sendFrame(fd.get(), body).has_value()) {
+    if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return errorResult("prompter send failed");
     }
-    auto frame = wire::recvFrame(fd.get());
+    auto frame = Agent::Wire::recvFrame(fd.get());
     if (!frame.has_value()) {
         return errorResult("prompter recv failed");
     }
@@ -123,7 +123,7 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
     // The raw frame body carries the secret inline for Ok replies; zero it the
     // moment it is parsed, whatever the outcome (parsePromptReply scrubbed its
     // own decoded intermediates, and decode() zeroed the canonical re-encode).
-    wire::secureZero(frame->body);
+    Agent::Wire::secureZero(frame->body);
     if (!reply.has_value()) {
         return errorResult("prompter reply malformed");
     }
@@ -175,16 +175,16 @@ Agent::PromptResult MacPrompterClient::requestMrz(const Agent::PromptOptions& op
 
 Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::PromptOptions& options)
 {
-    wire::UniqueFd fd = connectPrompter(m_socketPath);
+    Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
     if (!fd) {
         return changeErrorResult("prompter unavailable");
     }
 
     const auto body = wire::toCbor(buildChangeRequest(options)).encode();
-    if (!wire::sendFrame(fd.get(), body).has_value()) {
+    if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return changeErrorResult("prompter send failed");
     }
-    auto frame = wire::recvFrame(fd.get());
+    auto frame = Agent::Wire::recvFrame(fd.get());
     if (!frame.has_value()) {
         return changeErrorResult("prompter recv failed");
     }
@@ -193,7 +193,7 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
     // the moment it is parsed, whatever the outcome (parseMultiPromptReply
     // scrubbed its own decoded intermediates, and decode() zeroed the
     // canonical re-encode).
-    wire::secureZero(frame->body);
+    Agent::Wire::secureZero(frame->body);
     if (!reply.has_value()) {
         return changeErrorResult("prompter reply malformed");
     }
@@ -234,12 +234,12 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
 void MacPrompterClient::cancel() noexcept
 {
     // Best-effort cross-connection dismiss of whatever modal is up.
-    wire::UniqueFd fd = connectPrompter(m_socketPath);
+    Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
     if (!fd) {
         return;
     }
     const auto body = wire::toCbor(wire::PromptCancel{}).encode();
-    static_cast<void>(wire::sendFrame(fd.get(), body));
+    static_cast<void>(Agent::Wire::sendFrame(fd.get(), body));
 }
 
 } // namespace LibreSCRS::Darwin

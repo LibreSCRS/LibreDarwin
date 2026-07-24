@@ -23,9 +23,9 @@
 //                                  when unset (see ensurePkcs11ModuleEnv).
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
-#include <LibreSCRS/Darwin/backend/wire/Cbor.h>
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
-#include <LibreSCRS/Darwin/backend/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/Cbor.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Messages.h>
 
 #include <LibreSCRS/Agent/AgentCore.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
@@ -238,16 +238,16 @@ struct HwRig
 // Unsolicited event frames (presence/property broadcasts, "t"-tagged) and
 // stale earlier replies ride the same stream and must be skipped — reading
 // exactly one frame desyncs the whole session after the first broadcast.
-wire::CborValue sendReq(int client, std::uint64_t req, wire::Request body, std::vector<int> fds = {})
+Agent::Wire::CborValue sendReq(int client, std::uint64_t req, Agent::Wire::Request body, std::vector<int> fds = {})
 {
-    const auto bytes = wire::toCbor(wire::RequestEnvelope{req, std::move(body)}).encode();
-    EXPECT_TRUE(wire::sendFrame(client, bytes, fds).has_value());
+    const auto bytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{req, std::move(body)}).encode();
+    EXPECT_TRUE(Agent::Wire::sendFrame(client, bytes, fds).has_value());
     for (int i = 0; i < 200; ++i) {
-        const auto frame = wire::recvFrame(client);
+        const auto frame = Agent::Wire::recvFrame(client);
         if (!frame) {
             break;
         }
-        const auto decoded = wire::decode(frame->body);
+        const auto decoded = Agent::Wire::decode(frame->body);
         if (!decoded) {
             continue;
         }
@@ -256,19 +256,20 @@ wire::CborValue sendReq(int client, std::uint64_t req, wire::Request body, std::
         }
     }
     ADD_FAILURE() << "no reply correlated to req=" << req;
-    return wire::CborValue{};
+    return Agent::Wire::CborValue{};
 }
 
 // After an OpStarted reply, read event frames until OpFinished; return the
 // terminal OpFinished map (and capture the last OpResultReady if seen).
-wire::CborValue driveToFinished(int client, wire::CborValue* resultOut, std::vector<wire::UniqueFd>* resultFds)
+Agent::Wire::CborValue driveToFinished(int client, Agent::Wire::CborValue* resultOut,
+                                       std::vector<Agent::Wire::UniqueFd>* resultFds)
 {
     for (int i = 0; i < 200; ++i) {
-        auto frame = wire::recvFrame(client);
+        auto frame = Agent::Wire::recvFrame(client);
         if (!frame) {
             break;
         }
-        auto decoded = wire::decode(frame->body);
+        auto decoded = Agent::Wire::decode(frame->body);
         if (!decoded || decoded->find("t") == nullptr) {
             continue;
         }
@@ -284,14 +285,14 @@ wire::CborValue driveToFinished(int client, wire::CborValue* resultOut, std::vec
             return *decoded;
         }
     }
-    return wire::CborValue{};
+    return Agent::Wire::CborValue{};
 }
 
 // Poll GetState until a card is present (the monitor pump is async), or timeout.
 std::optional<std::string> waitForCard(int client)
 {
     for (int i = 0; i < 40; ++i) {
-        const auto reply = sendReq(client, 1000 + i, wire::GetState{});
+        const auto reply = sendReq(client, 1000 + i, Agent::Wire::GetState{});
         const auto* cards = reply.find("cards");
         if (cards != nullptr && cards->asArray() != nullptr && !cards->asArray()->empty()) {
             const auto& first = cards->asArray()->front();
@@ -313,7 +314,7 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     const int client = connectClient(rig.path);
 
     // Hello -> HelloAck.
-    const auto hello = sendReq(client, 1, wire::Hello{1, std::string("hw-smoke")});
+    const auto hello = sendReq(client, 1, Agent::Wire::Hello{1, std::string("hw-smoke")});
     ASSERT_NE(hello.find("agentVer"), nullptr);
 
     // Presence: wait for the monitor to surface a card.
@@ -324,18 +325,18 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     }
 
     // ReadCertificates -> pick a signing-capable cert id.
-    const auto certReply = sendReq(client, 2, wire::ReadCertificates{*card});
+    const auto certReply = sendReq(client, 2, Agent::Wire::ReadCertificates{*card});
     if (certReply.find("err") != nullptr) {
         ::close(client);
         GTEST_SKIP() << "card has no PKI capability (ReadCertificates rejected)";
     }
     ASSERT_NE(certReply.find("op"), nullptr) << "ReadCertificates should mint an op";
-    wire::CborValue certResult;
+    Agent::Wire::CborValue certResult;
     const auto certFinished = driveToFinished(client, &certResult, nullptr);
     ASSERT_NE(certFinished.find("status"), nullptr);
 
     // OpResultReady nests the typed payload under "result" (kind="Certificates",
-    // certs=[…]) — see wire::toCbor(OpResultReady). Read the cert list there, not
+    // certs=[…]) — see Agent::Wire::toCbor(OpResultReady). Read the cert list there, not
     // at the frame's top level.
     std::string certId;
     std::string inventory; // dumped on skip — the triage evidence for a miss
@@ -379,15 +380,15 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     const int docFd = ::open(docPath.c_str(), O_RDONLY);
     ASSERT_GE(docFd, 0);
 
-    const auto signReply =
-        sendReq(client, 3, wire::Sign{*card, certId, 0, wire::SignOpts{"pades", "b-b", "enveloped"}}, {docFd});
+    const auto signReply = sendReq(
+        client, 3, Agent::Wire::Sign{*card, certId, 0, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, {docFd});
     ::close(docFd);
     ASSERT_EQ(signReply.find("err"), nullptr)
         << "Sign method-entry rejected: " << (signReply.find("err") ? "see err" : "");
     ASSERT_NE(signReply.find("op"), nullptr) << "Sign should mint an op";
 
-    wire::CborValue signResult;
-    std::vector<wire::UniqueFd> artifactFds;
+    Agent::Wire::CborValue signResult;
+    std::vector<Agent::Wire::UniqueFd> artifactFds;
     const auto signFinished = driveToFinished(client, &signResult, &artifactFds);
     ASSERT_NE(signFinished.find("status"), nullptr);
     const auto status = signFinished.find("status")->asUInt().value_or(999);

@@ -50,7 +50,7 @@ void setNoSigPipe(int fd) noexcept
     ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 }
 
-std::expected<wire::UniqueFd, std::string> bindContainerSocket(const std::string& path)
+std::expected<Agent::Wire::UniqueFd, std::string> bindContainerSocket(const std::string& path)
 {
     if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
         return std::unexpected(std::format("socket path exceeds sun_path limit ({} bytes)", path.size()));
@@ -63,7 +63,7 @@ std::expected<wire::UniqueFd, std::string> bindContainerSocket(const std::string
     if (fd < 0) {
         return std::unexpected(std::format("socket(): {}", std::strerror(errno)));
     }
-    wire::UniqueFd owned(fd);
+    Agent::Wire::UniqueFd owned(fd);
     makeNonBlockingCloexec(fd);
     setNoSigPipe(fd);
 
@@ -80,7 +80,7 @@ std::expected<wire::UniqueFd, std::string> bindContainerSocket(const std::string
     return owned;
 }
 
-std::optional<wire::UniqueFd> inheritActivatedSocket(const std::string& name)
+std::optional<Agent::Wire::UniqueFd> inheritActivatedSocket(const std::string& name)
 {
     int* fds = nullptr;
     size_t count = 0;
@@ -90,7 +90,7 @@ std::optional<wire::UniqueFd> inheritActivatedSocket(const std::string& name)
         }
         return std::nullopt;
     }
-    wire::UniqueFd owned(fds[0]);
+    Agent::Wire::UniqueFd owned(fds[0]);
     for (size_t i = 1; i < count; ++i) {
         ::close(fds[i]);
     }
@@ -106,7 +106,7 @@ SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
     // Guard the fixed ancillary buffer (sized for kMaxFrameFds) against an
     // over-count outbound frame before writing into it — a stack overflow
     // otherwise. Fail the send CLOSED; the caller drops the connection.
-    if (f.fds.size() > wire::kMaxFrameFds) {
+    if (f.fds.size() > Agent::Wire::kMaxFrameFds) {
         return SendState::Error;
     }
     while (f.sent < f.bytes.size()) {
@@ -115,7 +115,8 @@ SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
             iovec iov{};
             iov.iov_base = f.bytes.data() + f.sent;
             iov.iov_len = f.bytes.size() - f.sent;
-            alignas(struct cmsghdr) std::array<std::uint8_t, CMSG_SPACE(sizeof(int) * wire::kMaxFrameFds)> control{};
+            alignas(struct cmsghdr) std::array<std::uint8_t, CMSG_SPACE(sizeof(int) * Agent::Wire::kMaxFrameFds)>
+                control{};
             msghdr msg{};
             msg.msg_iov = &iov;
             msg.msg_iovlen = 1;
@@ -155,7 +156,7 @@ SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
 std::expected<std::unique_ptr<SocketTransport>, std::string>
 SocketTransport::create(std::string socketPath, std::optional<std::string> socketActivationName)
 {
-    wire::UniqueFd listenFd;
+    Agent::Wire::UniqueFd listenFd;
     bool ownsSocketFile = true;
 
     if (socketActivationName) {
@@ -180,7 +181,7 @@ SocketTransport::create(std::string socketPath, std::optional<std::string> socke
     return t;
 }
 
-SocketTransport::SocketTransport(dispatch_queue_t queue, wire::UniqueFd listenFd, std::string socketPath,
+SocketTransport::SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath,
                                  bool ownsSocketFile)
     : m_queue(queue), m_listenFd(std::move(listenFd)), m_socketPath(std::move(socketPath)),
       m_ownsSocketFile(ownsSocketFile)
@@ -255,7 +256,7 @@ void SocketTransport::onAcceptReady()
 
 void SocketTransport::acceptOne(int connFd)
 {
-    wire::UniqueFd fd(connFd);
+    Agent::Wire::UniqueFd fd(connFd);
     if (m_connections.size() >= kMaxConnections) {
         log::warn("transport: connection cap reached; refusing a new connection");
         return; // fd closed by UniqueFd
@@ -346,14 +347,14 @@ void SocketTransport::onReadReady(std::uint64_t connId)
     // leaving `conn` dangling. pump() can also yield multiple frames per call, so a
     // mid-loop close must not be dereferenced on the next iteration.
     const Agent::CallerToken caller = conn.caller;
-    wire::PumpResult pumped = conn.reassembler.pump(*conn.fd);
+    Agent::Wire::PumpResult pumped = conn.reassembler.pump(*conn.fd);
     if (!pumped.frames.empty() && !conn.sawFirstFrame) {
         conn.sawFirstFrame = true;
         cancelFirstFrameTimer(conn); // the slow-loris window is satisfied
     }
 
     for (auto& frame : pumped.frames) {
-        auto env = wire::parseRequest(frame.body);
+        auto env = Agent::Wire::parseRequest(frame.body);
         if (!env) {
             log::warn("transport: malformed request; dropping connection");
             closeConnection(connId);
@@ -373,7 +374,7 @@ void SocketTransport::onReadReady(std::uint64_t connId)
             m_sink(std::move(in));
         }
     }
-    if (pumped.status != wire::PumpStatus::Ok) {
+    if (pumped.status != Agent::Wire::PumpStatus::Ok) {
         closeConnection(connId);
     }
 }
@@ -406,7 +407,8 @@ void SocketTransport::closeConnection(std::uint64_t connId)
     }
 }
 
-void SocketTransport::enqueueSend(Connection& conn, std::vector<std::uint8_t> framed, std::vector<wire::UniqueFd> fds)
+void SocketTransport::enqueueSend(Connection& conn, std::vector<std::uint8_t> framed,
+                                  std::vector<Agent::Wire::UniqueFd> fds)
 {
     OutFrame f;
     f.bytes = std::move(framed);
@@ -455,19 +457,20 @@ void SocketTransport::flushWrites(Connection& conn)
     }
 }
 
-void SocketTransport::sendTo(std::uint64_t connId, const wire::CborValue& message, std::vector<wire::UniqueFd> fds)
+void SocketTransport::sendTo(std::uint64_t connId, const Agent::Wire::CborValue& message,
+                             std::vector<Agent::Wire::UniqueFd> fds)
 {
     const auto it = m_connections.find(connId);
     if (it == m_connections.end()) {
         return;
     }
-    auto framed = wire::encodeFrame(message.encode(), static_cast<std::uint32_t>(fds.size()));
+    auto framed = Agent::Wire::encodeFrame(message.encode(), static_cast<std::uint32_t>(fds.size()));
     enqueueSend(*it->second, std::move(framed), std::move(fds));
 }
 
-void SocketTransport::broadcast(const wire::CborValue& event)
+void SocketTransport::broadcast(const Agent::Wire::CborValue& event)
 {
-    const auto framed = wire::encodeFrame(event.encode(), 0);
+    const auto framed = Agent::Wire::encodeFrame(event.encode(), 0);
     // Snapshot the connection ids FIRST: a failed send inside enqueueSend closes +
     // erases the connection (flushWrites -> closeConnection -> m_connections.erase),
     // which would invalidate a live range-for iterator. sendTo re-finds by id and
@@ -499,7 +502,7 @@ std::string SocketTransport::handleFor(Agent::ObjectId id)
 
 void SocketTransport::publishReader(const Agent::ReaderState& reader)
 {
-    wire::ReaderState r;
+    Agent::Wire::ReaderState r;
     r.handle = handleFor(reader.id);
     r.name = reader.name;
     r.hasCard = reader.hasCard;
@@ -507,16 +510,19 @@ void SocketTransport::publishReader(const Agent::ReaderState& reader)
         r.card = handleFor(reader.card);
     }
     m_readers[r.handle] = r;
-    broadcast(wire::toCbor(wire::ReaderAdded{r}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::ReaderAdded{r}));
 }
 
 void SocketTransport::publishCard(const Agent::CardState& card)
 {
-    wire::CardState c;
+    Agent::Wire::CardState c;
     c.handle = handleFor(card.id);
     c.reader = handleFor(card.reader);
     c.caps = card.capabilities;
-    c.preAuth = card.preReadAuth;
+    // Core -> wire-mirror enum: same enumerator values (LibreAgent's
+    // WireParityChecks pins them in lockstep), but no longer the same TYPE now
+    // that Agent::Wire::PreReadAuth is its own std-only mirror.
+    c.preAuth = static_cast<Agent::Wire::PreReadAuth>(card.preReadAuth);
     m_cards[c.handle] = c;
 
     CardRouting routing;
@@ -533,7 +539,7 @@ void SocketTransport::publishCard(const Agent::CardState& card)
     routing.preAuth = card.preReadAuth;
     m_cardRouting[c.handle] = std::move(routing);
 
-    broadcast(wire::toCbor(wire::CardAdded{c}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::CardAdded{c}));
 }
 
 void SocketTransport::withdraw(Agent::ObjectId object)
@@ -544,10 +550,10 @@ void SocketTransport::withdraw(Agent::ObjectId object)
     }
     const std::string handle = it->second;
     if (m_readers.erase(handle) > 0) {
-        broadcast(wire::toCbor(wire::ReaderRemoved{handle}));
+        broadcast(Agent::Wire::toCbor(Agent::Wire::ReaderRemoved{handle}));
     } else if (m_cards.erase(handle) > 0) {
         m_cardRouting.erase(handle);
-        broadcast(wire::toCbor(wire::CardRemoved{handle}));
+        broadcast(Agent::Wire::toCbor(Agent::Wire::CardRemoved{handle}));
     }
     m_idToHandle.erase(it);
     m_handleToId.erase(handle);
@@ -567,12 +573,12 @@ void SocketTransport::updateProperties(Agent::ObjectId reader, const Agent::Prop
     readerIt->second.card =
         delta.hasCard && delta.card.valid() ? std::optional<std::string>(handleFor(delta.card)) : std::nullopt;
 
-    std::map<std::string, wire::CborValue> props;
-    props.emplace("hasCard", wire::CborValue(delta.hasCard));
+    std::map<std::string, Agent::Wire::CborValue> props;
+    props.emplace("hasCard", Agent::Wire::CborValue(delta.hasCard));
     if (readerIt->second.card) {
-        props.emplace("card", wire::CborValue(*readerIt->second.card));
+        props.emplace("card", Agent::Wire::CborValue(*readerIt->second.card));
     }
-    broadcast(wire::toCbor(wire::PropertyChanged{readerIt->first, "Reader1", std::move(props)}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::PropertyChanged{readerIt->first, "Reader1", std::move(props)}));
 }
 
 void SocketTransport::post(std::function<void()> fn)
@@ -618,9 +624,9 @@ void SocketTransport::onClientDisconnect(std::function<void(Agent::CallerToken)>
     m_disconnectHandlers.push_back(std::move(handler));
 }
 
-wire::StateReply SocketTransport::currentState() const
+Agent::Wire::StateReply SocketTransport::currentState() const
 {
-    wire::StateReply state;
+    Agent::Wire::StateReply state;
     for (const auto& [handle, reader] : m_readers) {
         state.readers.push_back(reader);
     }
@@ -665,12 +671,12 @@ std::optional<SocketTransport::ReaderCardInfo> SocketTransport::readerCard(const
 
 void SocketTransport::broadcastConfigChanged(const std::string& key)
 {
-    broadcast(wire::toCbor(wire::ConfigChanged{key}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::ConfigChanged{key}));
 }
 
-void SocketTransport::broadcastQuiesced(wire::QuiesceReason reason)
+void SocketTransport::broadcastQuiesced(Agent::Wire::QuiesceReason reason)
 {
-    broadcast(wire::toCbor(wire::AgentQuiesced{reason}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::AgentQuiesced{reason}));
 }
 
 std::optional<PeerCredentials> SocketTransport::credentialsFor(const Agent::CallerToken& caller) const

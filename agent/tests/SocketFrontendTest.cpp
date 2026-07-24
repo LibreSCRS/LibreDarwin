@@ -11,9 +11,9 @@
 // gate, not here.
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
-#include <LibreSCRS/Darwin/backend/wire/Cbor.h>
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
-#include <LibreSCRS/Darwin/backend/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/Cbor.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Messages.h>
 
 #include "CardRemovalCaches.h" // invalidateCardRemovalCaches (the production removal-invalidation code)
 #include "FullScrubCaches.h"   // clearFullScrubCaches (the production fullScrub cache-clearing code)
@@ -243,17 +243,17 @@ struct Rig
 
     // Send a request envelope, block for its correlated reply, and return the
     // decoded reply map.
-    wire::CborValue roundTrip(std::uint64_t req, wire::Request body)
+    Agent::Wire::CborValue roundTrip(std::uint64_t req, Agent::Wire::Request body)
     {
         const int client = connectClient(path);
-        const auto bytes = wire::toCbor(wire::RequestEnvelope{req, std::move(body)}).encode();
-        EXPECT_TRUE(wire::sendFrame(client, bytes).has_value());
-        const auto frame = wire::recvFrame(client);
+        const auto bytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{req, std::move(body)}).encode();
+        EXPECT_TRUE(Agent::Wire::sendFrame(client, bytes).has_value());
+        const auto frame = Agent::Wire::recvFrame(client);
         EXPECT_TRUE(frame.has_value());
-        const auto decoded = wire::decode(frame->body);
+        const auto decoded = Agent::Wire::decode(frame->body);
         EXPECT_TRUE(decoded.has_value());
         ::close(client);
-        return decoded.value_or(wire::CborValue{});
+        return decoded.value_or(Agent::Wire::CborValue{});
     }
 
     // Inject a reader + card into the transport presence directly (bypassing the
@@ -286,7 +286,7 @@ struct Rig
     }
 };
 
-std::string errName(const wire::CborValue& reply)
+std::string errName(const Agent::Wire::CborValue& reply)
 {
     const auto* err = reply.find("err");
     if (err == nullptr) {
@@ -346,28 +346,28 @@ struct Client
     Client(const Client&) = delete;
     Client& operator=(const Client&) = delete;
 
-    void send(std::uint64_t req, wire::Request body)
+    void send(std::uint64_t req, Agent::Wire::Request body)
     {
-        const auto bytes = wire::toCbor(wire::RequestEnvelope{req, std::move(body)}).encode();
-        EXPECT_TRUE(wire::sendFrame(fd, bytes).has_value());
+        const auto bytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{req, std::move(body)}).encode();
+        EXPECT_TRUE(Agent::Wire::sendFrame(fd, bytes).has_value());
     }
 
-    wire::CborValue recv()
+    Agent::Wire::CborValue recv()
     {
-        const auto frame = wire::recvFrame(fd);
+        const auto frame = Agent::Wire::recvFrame(fd);
         EXPECT_TRUE(frame.has_value());
         if (!frame) {
             return {};
         }
-        const auto decoded = wire::decode(frame->body);
+        const auto decoded = Agent::Wire::decode(frame->body);
         EXPECT_TRUE(decoded.has_value());
-        return decoded.value_or(wire::CborValue{});
+        return decoded.value_or(Agent::Wire::CborValue{});
     }
 
     // Read frames until one tagged @p tag arrives (skipping OpProgress and any
     // other interleaved event), and return it. Bounded so a missing frame fails
     // the test instead of wedging it.
-    wire::CborValue waitFor(std::string_view tag, int maxFrames = 32)
+    Agent::Wire::CborValue waitFor(std::string_view tag, int maxFrames = 32)
     {
         for (int i = 0; i < maxFrames; ++i) {
             auto msg = recv();
@@ -384,7 +384,7 @@ struct Client
 TEST(SocketFrontend, HelloReturnsAck)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(1, wire::Hello{1, std::nullopt});
+    const auto reply = rig.roundTrip(1, Agent::Wire::Hello{1, std::nullopt});
     ASSERT_NE(reply.find("t"), nullptr);
     EXPECT_EQ(*reply.find("t")->asText(), "Reply");
     ASSERT_NE(reply.find("agentVer"), nullptr);
@@ -396,7 +396,7 @@ TEST(SocketFrontend, HelloReturnsAck)
 TEST(SocketFrontend, GetStateReturnsSnapshot)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(2, wire::GetState{});
+    const auto reply = rig.roundTrip(2, Agent::Wire::GetState{});
     ASSERT_NE(reply.find("readers"), nullptr);
     ASSERT_NE(reply.find("cards"), nullptr);
 }
@@ -404,7 +404,7 @@ TEST(SocketFrontend, GetStateReturnsSnapshot)
 TEST(SocketFrontend, ReadIdentityUnknownCardIsUnknownCard)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(3, wire::ReadIdentity{"obj/999"});
+    const auto reply = rig.roundTrip(3, Agent::Wire::ReadIdentity{"obj/999"});
     EXPECT_EQ(errName(reply), "UnknownCard");
 }
 
@@ -412,7 +412,8 @@ TEST(SocketFrontend, SignOnNonPkiCardIsUnsupported)
 {
     Rig rig;
     const std::string card = rig.injectCard(kIdentityCap); // no PKI bit
-    const auto reply = rig.roundTrip(4, wire::Sign{card, "cert-id", 0, wire::SignOpts{"pades", "b-b", "enveloped"}});
+    const auto reply =
+        rig.roundTrip(4, Agent::Wire::Sign{card, "cert-id", 0, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
 }
 
@@ -420,28 +421,31 @@ TEST(SocketFrontend, SignWithEmptyCertIsRejected)
 {
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
-    const auto reply = rig.roundTrip(5, wire::Sign{card, "", 0, wire::SignOpts{"pades", "b-b", "enveloped"}});
+    const auto reply =
+        rig.roundTrip(5, Agent::Wire::Sign{card, "", 0, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
 }
 
 TEST(SocketFrontend, SetReadOnlyConfigKeyIsRejected)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(6, wire::SetConfig{"LastTsaUrl", wire::CborValue(std::string{"x"})});
+    const auto reply = rig.roundTrip(6, Agent::Wire::SetConfig{"LastTsaUrl", Agent::Wire::CborValue(std::string{"x"})});
     EXPECT_EQ(errName(reply), "ReadOnlyConfig");
 }
 
 TEST(SocketFrontend, SetUnknownConfigKeyIsRejected)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(7, wire::SetConfig{"Nonexistent", wire::CborValue(std::string{"x"})});
+    const auto reply =
+        rig.roundTrip(7, Agent::Wire::SetConfig{"Nonexistent", Agent::Wire::CborValue(std::string{"x"})});
     EXPECT_EQ(errName(reply), "UnknownConfigKey");
 }
 
 TEST(SocketFrontend, SetDefaultLevelSucceeds)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(8, wire::SetConfig{"DefaultLevel", wire::CborValue(std::string{"b-t"})});
+    const auto reply =
+        rig.roundTrip(8, Agent::Wire::SetConfig{"DefaultLevel", Agent::Wire::CborValue(std::string{"b-t"})});
     ASSERT_NE(reply.find("ok"), nullptr);
     EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
 }
@@ -449,7 +453,7 @@ TEST(SocketFrontend, SetDefaultLevelSucceeds)
 TEST(SocketFrontend, GetConfigReturnsEntries)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(9, wire::GetConfig{});
+    const auto reply = rig.roundTrip(9, Agent::Wire::GetConfig{});
     const auto* entries = reply.find("entries");
     ASSERT_NE(entries, nullptr);
     ASSERT_NE(entries->asMap(), nullptr);
@@ -459,7 +463,7 @@ TEST(SocketFrontend, GetConfigReturnsEntries)
 TEST(SocketFrontend, CancelReturnsAck)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(10, wire::CancelOp{999});
+    const auto reply = rig.roundTrip(10, Agent::Wire::CancelOp{999});
     ASSERT_NE(reply.find("ok"), nullptr);
     EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
 }
@@ -467,7 +471,7 @@ TEST(SocketFrontend, CancelReturnsAck)
 TEST(SocketFrontend, GetSignResultUnknownOpIsKeyNotFound)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(11, wire::GetSignResult{999});
+    const auto reply = rig.roundTrip(11, Agent::Wire::GetSignResult{999});
     EXPECT_EQ(errName(reply), "KeyNotFound");
 }
 
@@ -476,7 +480,7 @@ TEST(SocketFrontend, GetSignResultUnknownOpIsKeyNotFound)
 TEST(SocketFrontend, HelloAdvertisesCredentialsFeature)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(20, wire::Hello{1, std::nullopt});
+    const auto reply = rig.roundTrip(20, Agent::Wire::Hello{1, std::nullopt});
     const auto* features = reply.find("features");
     ASSERT_NE(features, nullptr);
     ASSERT_NE(features->asArray(), nullptr);
@@ -493,7 +497,7 @@ TEST(SocketFrontend, ManagePinWithoutPinManagementCapIsUnsupported)
 {
     Rig rig;
     const std::string card = rig.injectCard(kIdentityCap); // no PinManagement bit
-    const auto reply = rig.roundTrip(21, wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    const auto reply = rig.roundTrip(21, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
 }
 
@@ -506,13 +510,13 @@ TEST(SocketFrontend, ManagePinEntryValidationRejectsInOrder)
     Rig rig;
     const std::string card = rig.injectCard(kPinMgmtCap);
 
-    const auto badVerb = rig.roundTrip(22, wire::ManagePin{card, "user:0x01", "frobnicate", std::nullopt});
+    const auto badVerb = rig.roundTrip(22, Agent::Wire::ManagePin{card, "user:0x01", "frobnicate", std::nullopt});
     EXPECT_EQ(errName(badVerb), "InvalidRequest");
 
-    const auto badCombo = rig.roundTrip(23, wire::ManagePin{card, "user:0x01", "change", true});
+    const auto badCombo = rig.roundTrip(23, Agent::Wire::ManagePin{card, "user:0x01", "change", true});
     EXPECT_EQ(errName(badCombo), "InvalidRequest");
 
-    const auto noListing = rig.roundTrip(24, wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    const auto noListing = rig.roundTrip(24, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
     EXPECT_EQ(errName(noListing), "UnknownCredential");
 }
 
@@ -524,7 +528,7 @@ TEST(SocketFrontend, ManagePinDeniedCallerIsNotAuthorized)
     Rig rig(&deny);
     const std::string card = rig.injectCard(kPinMgmtCap);
     rig.core->credentialSnapshotCache().put(kInjectedCardKey, makeSnapshot());
-    const auto reply = rig.roundTrip(25, wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    const auto reply = rig.roundTrip(25, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
     EXPECT_EQ(errName(reply), "NotAuthorized");
 }
 
@@ -541,7 +545,7 @@ TEST(SocketFrontend, ManagePinOverCapCallerIsRateLimited)
     for (std::size_t i = 0; i < Agent::Operations::RateLimiter::kMaxPerWindow; ++i) {
         ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
     }
-    const auto reply = rig.roundTrip(26, wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    const auto reply = rig.roundTrip(26, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
     EXPECT_EQ(errName(reply), "RateLimited");
 }
 
@@ -558,7 +562,7 @@ TEST(SocketFrontend, ManagePinDeniedAndOverCapCallerIsNotAuthorized)
     for (std::size_t i = 0; i < Agent::Operations::RateLimiter::kMaxPerWindow; ++i) {
         ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
     }
-    const auto reply = rig.roundTrip(32, wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    const auto reply = rig.roundTrip(32, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
     EXPECT_EQ(errName(reply), "NotAuthorized");
 }
 
@@ -566,7 +570,7 @@ TEST(SocketFrontend, ListCredentialsWithoutPinManagementCapIsUnsupported)
 {
     Rig rig;
     const std::string card = rig.injectCard(kIdentityCap); // no PinManagement bit
-    const auto reply = rig.roundTrip(27, wire::ListCredentials{card});
+    const auto reply = rig.roundTrip(27, Agent::Wire::ListCredentials{card});
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
 }
 
@@ -582,7 +586,7 @@ TEST(SocketFrontend, ListCredentialsIsNotRateLimited)
         ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
     }
     Client client(rig.path);
-    client.send(28, wire::ListCredentials{card});
+    client.send(28, Agent::Wire::ListCredentials{card});
     const auto reply = client.waitFor("Reply");
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("op"), nullptr) << "an over-cap caller must still get a listing op";
@@ -600,7 +604,7 @@ TEST(SocketFrontend, ListCredentialsDeniedCallerStillGetsOp)
     rig.core->operationManager().setSessionFactoryForTest(detachedSessionFactory());
     const std::string card = rig.injectCard(kPinMgmtCap);
     Client client(rig.path);
-    client.send(33, wire::ListCredentials{card});
+    client.send(33, Agent::Wire::ListCredentials{card});
     const auto reply = client.waitFor("Reply");
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("op"), nullptr) << "a policy-denied caller must still get a listing op";
@@ -615,7 +619,7 @@ TEST(SocketFrontend, ActivateSigningKeyWithoutPinManagementCapIsUnsupported)
 {
     Rig rig;
     const std::string card = rig.injectCard(kIdentityCap); // no PinManagement bit
-    const auto reply = rig.roundTrip(34, wire::ActivateSigningKey{card});
+    const auto reply = rig.roundTrip(34, Agent::Wire::ActivateSigningKey{card});
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
 }
 
@@ -628,7 +632,7 @@ TEST(SocketFrontend, ActivateSigningKeyDeniedCallerIsNotAuthorized)
     DenyAllAuthorizer deny;
     Rig rig(&deny);
     const std::string card = rig.injectCard(kPinMgmtCap);
-    const auto reply = rig.roundTrip(35, wire::ActivateSigningKey{card});
+    const auto reply = rig.roundTrip(35, Agent::Wire::ActivateSigningKey{card});
     EXPECT_EQ(errName(reply), "NotAuthorized");
 }
 
@@ -643,7 +647,7 @@ TEST(SocketFrontend, ManagePinCancelledPromptEmitsCredentialsResultThenFinished)
     rig.core->credentialSnapshotCache().put(kInjectedCardKey, makeSnapshot());
 
     Client client(rig.path);
-    client.send(29, wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    client.send(29, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
     const auto reply = client.waitFor("Reply");
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("op"), nullptr) << "a valid ManagePin must mint an op";
@@ -682,7 +686,7 @@ TEST(SocketFrontend, CancelledMidPromptOpResolvesUserCancelledThenCancelledFinis
     rig.core->credentialSnapshotCache().put(kInjectedCardKey, makeSnapshot());
 
     Client client(rig.path);
-    client.send(30, wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    client.send(30, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
     const auto reply = client.waitFor("Reply");
     EXPECT_EQ(errName(reply), "");
     const auto* op = reply.find("op");
@@ -691,7 +695,7 @@ TEST(SocketFrontend, CancelledMidPromptOpResolvesUserCancelledThenCancelledFinis
 
     ASSERT_TRUE(prompter->waitEntered()) << "the change modal must be up before the cancel";
 
-    client.send(31, wire::CancelOp{opId});
+    client.send(31, Agent::Wire::CancelOp{opId});
     const auto ack = client.waitFor("Reply");
     ASSERT_NE(ack.find("ok"), nullptr);
     EXPECT_TRUE(ack.find("ok")->asBool().value_or(false)) << "CancelOp acks silently";

@@ -5,7 +5,7 @@
 // secret is a fake test value (never a real card PIN); it round-trips into a
 // cleansing Secure::String.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
 #include <LibreSCRS/Secure/String.h>
@@ -76,9 +76,9 @@ private:
             if (c < 0) {
                 break;
             }
-            auto req = wire::recvFrame(c);
+            auto req = Agent::Wire::recvFrame(c);
             if (req.has_value()) {
-                static_cast<void>(wire::sendFrame(c, wire::toCbor(m_reply).encode()));
+                static_cast<void>(Agent::Wire::sendFrame(c, wire::toCbor(m_reply).encode()));
             }
             ::close(c);
         }
@@ -159,7 +159,7 @@ private:
             if (c < 0) {
                 break;
             }
-            auto req = wire::recvFrame(c);
+            auto req = Agent::Wire::recvFrame(c);
             if (req.has_value()) {
                 std::lock_guard lock(m_mutex);
                 auto parsed = wire::parsePrompterRequest(req->body);
@@ -169,7 +169,7 @@ private:
                     }
                 }
                 if (m_rawReplyBody.has_value()) {
-                    static_cast<void>(wire::sendFrame(c, *m_rawReplyBody));
+                    static_cast<void>(Agent::Wire::sendFrame(c, *m_rawReplyBody));
                 } else {
                     // Production send path: zeroes the wire copies AND
                     // m_reply's secret vectors — retained for assertion.

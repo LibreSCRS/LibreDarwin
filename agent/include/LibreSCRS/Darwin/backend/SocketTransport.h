@@ -2,11 +2,12 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
-#include <LibreSCRS/Darwin/backend/wire/FrameReassembler.h>
-#include <LibreSCRS/Darwin/backend/wire/Messages.h>
-#include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
+#include <LibreSCRS/Agent/wire/FrameReassembler.h>
+#include <LibreSCRS/Agent/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <LibreSCRS/Agent/backend/AgentTransport.h>
+#include <LibreSCRS/Auth/AuthRequirement.h> // LibreSCRS::Auth::PreReadAuthMethod (CardRouting::preAuth)
 
 #include <dispatch/dispatch.h>
 
@@ -46,8 +47,8 @@ public:
     {
         Agent::CallerToken caller;
         std::uint64_t connId{0};
-        wire::RequestEnvelope request;
-        std::vector<wire::UniqueFd> fds;
+        Agent::Wire::RequestEnvelope request;
+        std::vector<Agent::Wire::UniqueFd> fds;
     };
     using RequestSink = std::function<void(Inbound&&)>;
 
@@ -76,7 +77,11 @@ public:
         std::string readerName;
         std::string cardKey; // == the card wire handle (opaque per-insertion key)
         std::uint32_t caps{0};
-        wire::PreReadAuthMethod preAuth{wire::PreReadAuthMethod::None};
+        // The core's OWN vocabulary (LibreSCRS::Auth::PreReadAuthMethod), not the
+        // wire mirror: CardRouting is Darwin-local routing bookkeeping, built and
+        // consumed straight from Agent::CardState::preReadAuth, and never itself
+        // crosses the CBOR wire (wire::CardState::preAuth is the encoded form).
+        LibreSCRS::Auth::PreReadAuthMethod preAuth{LibreSCRS::Auth::PreReadAuthMethod::None};
     };
     [[nodiscard]] std::optional<CardRouting> cardRouting(const std::string& cardHandle) const;
 
@@ -93,10 +98,11 @@ public:
 
     // Send one CBOR message to a specific connection, optionally taking ownership
     // of fds to pass via SCM_RIGHTS. Loop-thread only (the sink runs there).
-    void sendTo(std::uint64_t connId, const wire::CborValue& message, std::vector<wire::UniqueFd> fds = {});
+    void sendTo(std::uint64_t connId, const Agent::Wire::CborValue& message,
+                std::vector<Agent::Wire::UniqueFd> fds = {});
 
     // The current presence snapshot for a GetState reply. Loop-thread only.
-    [[nodiscard]] wire::StateReply currentState() const;
+    [[nodiscard]] Agent::Wire::StateReply currentState() const;
 
     // Broadcast a Config1.Changed event to every subscribed connection (the
     // frontend's emitConfigChanged path). Loop-thread only.
@@ -105,7 +111,7 @@ public:
     // Broadcast an AgentQuiesced event (system sleep / screen lock / user switch /
     // shutdown) so clients render "card suspended" rather than a bare removal.
     // Loop-thread only (wrap in post() from another thread).
-    void broadcastQuiesced(wire::QuiesceReason reason);
+    void broadcastQuiesced(Agent::Wire::QuiesceReason reason);
 
     // Resolve a live CallerToken to its captured peer credentials (for the
     // Authorizer's SecTask check). Loop-thread only; nullopt if the connection
@@ -143,8 +149,8 @@ public:
 private:
     struct OutFrame
     {
-        std::vector<std::uint8_t> bytes; // full framed bytes (header + body)
-        std::vector<wire::UniqueFd> fds; // owned; sent via SCM_RIGHTS on the first sendmsg
+        std::vector<std::uint8_t> bytes;        // full framed bytes (header + body)
+        std::vector<Agent::Wire::UniqueFd> fds; // owned; sent via SCM_RIGHTS on the first sendmsg
         std::size_t sent{0};
         bool ancillarySent{false};
     };
@@ -160,7 +166,7 @@ private:
         std::shared_ptr<int> fd;
         Agent::CallerToken caller;
         PeerCredentials creds;
-        wire::FrameReassembler reassembler;
+        Agent::Wire::FrameReassembler reassembler;
         dispatch_source_t readSource{nullptr};
         dispatch_source_t writeSource{nullptr};
         // Slow-loris guard: armed on accept, cancelled on the first complete
@@ -176,7 +182,8 @@ private:
     enum class SendState : std::uint8_t { Sent, WouldBlock, Error };
     [[nodiscard]] static SendState trySendFrame(int fd, OutFrame& f);
 
-    SocketTransport(dispatch_queue_t queue, wire::UniqueFd listenFd, std::string socketPath, bool ownsSocketFile);
+    SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath,
+                    bool ownsSocketFile);
     void installAcceptSource();
     void onAcceptReady();
     void acceptOne(int connFd);
@@ -185,16 +192,16 @@ private:
     void armFirstFrameTimer(Connection& conn);
     void onFirstFrameTimeout(std::uint64_t connId);
     static void cancelFirstFrameTimer(Connection& conn) noexcept;
-    void enqueueSend(Connection& conn, std::vector<std::uint8_t> framed, std::vector<wire::UniqueFd> fds);
+    void enqueueSend(Connection& conn, std::vector<std::uint8_t> framed, std::vector<Agent::Wire::UniqueFd> fds);
     void flushWrites(Connection& conn);
-    void broadcast(const wire::CborValue& event);
+    void broadcast(const Agent::Wire::CborValue& event);
 
     // ObjectId <-> opaque wire handle. The handle is a stable per-insertion
     // string ("reader/<n>" / "card/<n>"); NEVER a fingerprint.
     [[nodiscard]] std::string handleFor(Agent::ObjectId id);
 
     dispatch_queue_t m_queue{nullptr};
-    wire::UniqueFd m_listenFd;
+    Agent::Wire::UniqueFd m_listenFd;
     std::string m_socketPath;
     bool m_ownsSocketFile{false};
     dispatch_source_t m_acceptSource{nullptr};
@@ -209,8 +216,8 @@ private:
     std::chrono::microseconds m_firstFrameTimeout{std::chrono::seconds(30)};
 
     // Published presence snapshot, keyed by wire handle.
-    std::map<std::string, wire::ReaderState> m_readers;
-    std::map<std::string, wire::CardState> m_cards;
+    std::map<std::string, Agent::Wire::ReaderState> m_readers;
+    std::map<std::string, Agent::Wire::CardState> m_cards;
     // Card routing (readerId/readerName/caps/preAuth), keyed by card wire handle.
     // Populated alongside m_cards in publishCard; consumed by cardRouting().
     std::map<std::string, CardRouting> m_cardRouting;

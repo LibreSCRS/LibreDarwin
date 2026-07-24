@@ -2,12 +2,13 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
-#include <LibreSCRS/Darwin/backend/wire/Messages.h>
-#include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
+#include <LibreSCRS/Agent/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <LibreSCRS/Agent/Identity.h>
 #include <LibreSCRS/Agent/PresenceTypes.h>
 #include <LibreSCRS/Agent/backend/OperationChannel.h> // Operations::SignedArtifact
+#include <LibreSCRS/Auth/AuthRequirement.h>           // LibreSCRS::Auth::PreReadAuthMethod (applyCardResolution)
 
 #include <cstdint>
 #include <chrono>
@@ -83,47 +84,50 @@ private:
     void dispatch(SocketTransport::Inbound&& in);
 
     // Per-request handlers (loop thread). Each replies via transport.sendTo.
-    void handleHello(std::uint64_t connId, std::uint64_t req, const wire::Hello& msg);
+    void handleHello(std::uint64_t connId, std::uint64_t req, const Agent::Wire::Hello& msg);
     void handleGetState(std::uint64_t connId, std::uint64_t req);
-    void handleReadIdentity(SocketTransport::Inbound& in, const wire::ReadIdentity& msg);
-    void handleGetPhoto(SocketTransport::Inbound& in, const wire::GetPhoto& msg);
-    void handleReadCertificates(SocketTransport::Inbound& in, const wire::ReadCertificates& msg);
-    void handleSign(SocketTransport::Inbound& in, const wire::Sign& msg);
-    void handleListCredentials(SocketTransport::Inbound& in, const wire::ListCredentials& msg);
-    void handleManagePin(SocketTransport::Inbound& in, const wire::ManagePin& msg);
-    void handleActivateSigningKey(SocketTransport::Inbound& in, const wire::ActivateSigningKey& msg);
-    void handleCancel(std::uint64_t connId, std::uint64_t req, const wire::CancelOp& msg,
+    void handleReadIdentity(SocketTransport::Inbound& in, const Agent::Wire::ReadIdentity& msg);
+    void handleGetPhoto(SocketTransport::Inbound& in, const Agent::Wire::GetPhoto& msg);
+    void handleReadCertificates(SocketTransport::Inbound& in, const Agent::Wire::ReadCertificates& msg);
+    void handleSign(SocketTransport::Inbound& in, const Agent::Wire::Sign& msg);
+    void handleListCredentials(SocketTransport::Inbound& in, const Agent::Wire::ListCredentials& msg);
+    void handleManagePin(SocketTransport::Inbound& in, const Agent::Wire::ManagePin& msg);
+    void handleActivateSigningKey(SocketTransport::Inbound& in, const Agent::Wire::ActivateSigningKey& msg);
+    void handleCancel(std::uint64_t connId, std::uint64_t req, const Agent::Wire::CancelOp& msg,
                       const Agent::CallerToken& caller);
-    void handleGetSignResult(std::uint64_t connId, std::uint64_t req, const wire::GetSignResult& msg,
+    void handleGetSignResult(std::uint64_t connId, std::uint64_t req, const Agent::Wire::GetSignResult& msg,
                              const Agent::CallerToken& caller);
     void handleGetConfig(std::uint64_t connId, std::uint64_t req);
-    void handleSetConfig(std::uint64_t connId, std::uint64_t req, const wire::SetConfig& msg,
+    void handleSetConfig(std::uint64_t connId, std::uint64_t req, const Agent::Wire::SetConfig& msg,
                          const Agent::CallerToken& caller);
-    void handleResetConfig(std::uint64_t connId, std::uint64_t req, const wire::ResetConfig& msg,
+    void handleResetConfig(std::uint64_t connId, std::uint64_t req, const Agent::Wire::ResetConfig& msg,
                            const Agent::CallerToken& caller);
-    void handleCertDer(std::uint64_t connId, std::uint64_t req, const wire::GetCertDer& msg,
+    void handleCertDer(std::uint64_t connId, std::uint64_t req, const Agent::Wire::GetCertDer& msg,
                        const Agent::CallerToken& caller);
-    void handlePkLogin(std::uint64_t connId, std::uint64_t req, const wire::PkLogin& msg,
+    void handlePkLogin(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkLogin& msg,
                        const Agent::CallerToken& caller);
-    void handlePkLogout(std::uint64_t connId, std::uint64_t req, const wire::PkLogout& msg,
+    void handlePkLogout(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkLogout& msg,
                         const Agent::CallerToken& caller);
-    void handlePkPublicKey(std::uint64_t connId, std::uint64_t req, const wire::PkPublicKey& msg,
+    void handlePkPublicKey(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkPublicKey& msg,
                            const Agent::CallerToken& caller);
-    void handlePkSignRaw(std::uint64_t connId, std::uint64_t req, const wire::PkSignRaw& msg,
+    void handlePkSignRaw(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkSignRaw& msg,
                          const Agent::CallerToken& caller);
-    void handlePkDecrypt(std::uint64_t connId, std::uint64_t req, const wire::PkDecrypt& msg,
+    void handlePkDecrypt(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkDecrypt& msg,
                          const Agent::CallerToken& caller);
 
     // Reply helpers.
-    void replyError(std::uint64_t connId, std::uint64_t req, wire::SyncError code);
-    void sendReplyOnLoop(std::uint64_t connId, wire::CborValue message);
+    void replyError(std::uint64_t connId, std::uint64_t req, Agent::Wire::SyncError code);
+    void sendReplyOnLoop(std::uint64_t connId, Agent::Wire::CborValue message);
 
     // Best-effort human label for the requesting client (consent-prompt chrome).
     [[nodiscard]] std::string requesterLabel(const Agent::CallerToken& caller) const;
 
     // Presence: the deferred held-session capability resolve (loop thread).
     void scheduleCardResolve(const Agent::CardState& card);
-    void applyCardResolution(Agent::CardState card, std::uint32_t caps, wire::PreReadAuthMethod preAuth);
+    // The core's OWN vocabulary, not the wire mirror: this feeds
+    // A::CardState::preReadAuth (never crosses the CBOR wire from here —
+    // SocketTransport::publishCard does that conversion).
+    void applyCardResolution(Agent::CardState card, std::uint32_t caps, LibreSCRS::Auth::PreReadAuthMethod preAuth);
 
     // A Sign artifact stashed for the grace-window GetSignResult recovery.
     void stashSignArtifact(std::uint64_t opId, const Agent::CallerToken& owner,

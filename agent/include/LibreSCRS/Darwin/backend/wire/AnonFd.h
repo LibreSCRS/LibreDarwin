@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
-#include <LibreSCRS/Darwin/backend/wire/UniqueFd.h>
+#include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <cstdint>
 #include <optional>
 #include <span>
 
 namespace LibreSCRS::Darwin::wire {
+
+using LibreSCRS::Agent::Wire::UniqueFd;
 
 // The memfd_create analog for Darwin (which has none): create a regular file
 // with mkstemp, unlink it immediately (anonymous — no name in the filesystem),

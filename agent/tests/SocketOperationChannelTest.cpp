@@ -6,9 +6,9 @@
 // client reads back.
 #include <LibreSCRS/Darwin/backend/SocketOperationChannel.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
-#include <LibreSCRS/Darwin/backend/wire/Cbor.h>
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
-#include <LibreSCRS/Darwin/backend/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/Cbor.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Messages.h>
 
 #include <gtest/gtest.h>
 
@@ -120,19 +120,19 @@ Wired wireUp()
         cv.notify_all();
     });
     w.client = connectClient(w.path);
-    const auto hello = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
-    EXPECT_TRUE(wire::sendFrame(w.client, hello).has_value());
+    const auto hello = A::Wire::toCbor(A::Wire::RequestEnvelope{1, A::Wire::Hello{1, std::nullopt}}).encode();
+    EXPECT_TRUE(A::Wire::sendFrame(w.client, hello).has_value());
     std::unique_lock<std::mutex> lk(m);
     cv.wait_for(lk, std::chrono::seconds(2), [&] { return id.load() != 0; });
     w.connId = id.load();
     return w;
 }
 
-wire::CborValue recvEvent(int client)
+A::Wire::CborValue recvEvent(int client)
 {
-    auto frame = wire::recvFrame(client);
+    auto frame = A::Wire::recvFrame(client);
     EXPECT_TRUE(frame.has_value());
-    auto decoded = wire::decode(frame->body);
+    auto decoded = A::Wire::decode(frame->body);
     EXPECT_TRUE(decoded.has_value());
     return *decoded;
 }
@@ -217,10 +217,10 @@ TEST(SocketOperationChannel, SignResultRidesAnScmRightsFd)
     artifact.meta = Ops::SignMeta{"pades", "b-lta", true, false};
     EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{artifact}));
 
-    auto frame = wire::recvFrame(w.client);
+    auto frame = A::Wire::recvFrame(w.client);
     ASSERT_TRUE(frame.has_value());
     ASSERT_EQ(frame->fds.size(), 1u); // one artifact fd
-    const auto decoded = wire::decode(frame->body);
+    const auto decoded = A::Wire::decode(frame->body);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(*decoded->find("t")->asText(), "OpResultReady");
     const auto* res = decoded->find("result");
@@ -241,7 +241,7 @@ TEST(SocketOperationChannel, SignResultRidesAnScmRightsFd)
 }
 
 // Failed-mutation payload (InvalidPin, retriesLeft=2, blocked=false, records
-// empty): the frame decodes to the wire::CredentialsResult shape and
+// empty): the frame decodes to the A::Wire::CredentialsResult shape and
 // delivery is inline (no fd) with emitResult returning true.
 TEST(SocketOperationChannel, CredentialsResultInvalidPinMutationDecodes)
 {
@@ -257,10 +257,10 @@ TEST(SocketOperationChannel, CredentialsResultInvalidPinMutationDecodes)
     const Ops::CredentialResult payload{op, {}};
     EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{payload}));
 
-    auto frame = wire::recvFrame(w.client);
+    auto frame = A::Wire::recvFrame(w.client);
     ASSERT_TRUE(frame.has_value());
     EXPECT_TRUE(frame->fds.empty()); // inline delivery: no fd, no seal step
-    const auto decoded = wire::decode(frame->body);
+    const auto decoded = A::Wire::decode(frame->body);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(*decoded->find("t")->asText(), "OpResultReady");
     EXPECT_EQ(decoded->find("op")->asUInt(), 21u);
@@ -314,9 +314,9 @@ TEST(SocketOperationChannel, CredentialsResultOkListingCarriesRecords)
     const Ops::CredentialResult payload{op, {user, sign}};
     EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{payload}));
 
-    auto frame = wire::recvFrame(w.client);
+    auto frame = A::Wire::recvFrame(w.client);
     ASSERT_TRUE(frame.has_value());
-    const auto decoded = wire::decode(frame->body);
+    const auto decoded = A::Wire::decode(frame->body);
     ASSERT_TRUE(decoded.has_value());
 
     const auto* res = decoded->find("result");

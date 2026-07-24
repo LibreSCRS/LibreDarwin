@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
-#include <LibreSCRS/Darwin/backend/wire/AnonFd.h>
+#include <LibreSCRS/Darwin/backend/wire/AnonFd.h> // brings in the UniqueFd using-declaration (Agent::Wire::UniqueFd)
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>

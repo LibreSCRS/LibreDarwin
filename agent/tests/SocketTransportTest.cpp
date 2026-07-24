@@ -7,8 +7,8 @@
 // transport's own serial dispatch queue is serviced by GCD (no run loop needed);
 // loop-affine calls are marshaled with dispatch_sync.
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
-#include <LibreSCRS/Darwin/backend/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Messages.h>
 
 #include <gtest/gtest.h>
 
@@ -78,8 +78,9 @@ TEST(SocketTransport, InboundRequestReachesSinkWithPeerToken)
 
     const int client = connectClient(path);
     // Send a Hello request.
-    const auto helloBytes = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
-    ASSERT_TRUE(wire::sendFrame(client, helloBytes).has_value());
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
 
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
     {
@@ -102,8 +103,9 @@ TEST(SocketTransport, PublishBroadcastsEventToClient)
     tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
 
     const int client = connectClient(path);
-    const auto helloBytes = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
-    ASSERT_TRUE(wire::sendFrame(client, helloBytes).has_value());
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2))); // connection is up
 
     // Publish a reader on the loop; the client should receive a ReaderAdded event.
@@ -116,9 +118,9 @@ TEST(SocketTransport, PublishBroadcastsEventToClient)
       trp->publishReader(r);
     });
 
-    const auto frame = wire::recvFrame(client);
+    const auto frame = Agent::Wire::recvFrame(client);
     ASSERT_TRUE(frame.has_value());
-    const auto decoded = wire::decode(frame->body);
+    const auto decoded = Agent::Wire::decode(frame->body);
     ASSERT_TRUE(decoded.has_value());
     ASSERT_NE(decoded->find("t"), nullptr);
     EXPECT_EQ(*decoded->find("t")->asText(), "ReaderAdded");
@@ -144,8 +146,9 @@ TEST(SocketTransport, DisconnectFiresHandlersInRegistrationOrder)
     tr->onClientDisconnect([&](Agent::CallerToken) { order.push(2); });
 
     const int client = connectClient(path);
-    const auto helloBytes = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
-    ASSERT_TRUE(wire::sendFrame(client, helloBytes).has_value());
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
     ::close(client); // triggers EOF -> closeConnection -> fan-out
@@ -173,10 +176,11 @@ TEST(SocketTransport, ConnectionCapRefusesTheExcessConnection)
     // ack (a burst of raw connects would overflow the listen(16) backlog and
     // fail at connect() before the cap is even exercised).
     std::vector<int> clients;
-    const auto helloBytes = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
     for (std::size_t i = 0; i < 32; ++i) {
         const int c = connectClient(path);
-        ASSERT_TRUE(wire::sendFrame(c, helloBytes).has_value());
+        ASSERT_TRUE(Agent::Wire::sendFrame(c, helloBytes).has_value());
         clients.push_back(c);
         ASSERT_TRUE(sink.waitFor(i + 1, std::chrono::seconds(5)));
     }
@@ -208,8 +212,9 @@ TEST(SocketTransport, WatchdogReapsOnlyThePartialFrameConnection)
 
     // A well-behaved client delivers its first frame inside the window.
     const int good = connectClient(path);
-    const auto helloBytes = wire::toCbor(wire::RequestEnvelope{1, wire::Hello{1, std::nullopt}}).encode();
-    ASSERT_TRUE(wire::sendFrame(good, helloBytes).has_value());
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(good, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
     // A slow-loris client sends half a length prefix and stalls.
@@ -233,9 +238,9 @@ TEST(SocketTransport, WatchdogReapsOnlyThePartialFrameConnection)
       r.hasCard = false;
       trp->publishReader(r);
     });
-    const auto frame = wire::recvFrame(good);
+    const auto frame = Agent::Wire::recvFrame(good);
     ASSERT_TRUE(frame.has_value());
-    const auto decoded = wire::decode(frame->body);
+    const auto decoded = Agent::Wire::decode(frame->body);
     ASSERT_TRUE(decoded.has_value());
     EXPECT_EQ(*decoded->find("t")->asText(), "ReaderAdded");
 

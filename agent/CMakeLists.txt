@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
 # macOS backend for LibreAgent::Core + the librescrs-agent launchd daemon.
-# The backend is the App-Group socket + CBOR + SecCode.
+# The backend is the App-Group socket (CBOR wire via LibreAgent::Wire) + SecCode.
 
 find_library(SECURITY_FRAMEWORK Security REQUIRED)
 find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
@@ -10,15 +10,15 @@ find_library(APPKIT_FRAMEWORK AppKit REQUIRED)   # NSWorkspace / DistributedNoti
 find_library(IOKIT_FRAMEWORK IOKit REQUIRED)     # IORegisterForSystemPower (SystemLifecycle)
 find_library(BSM_LIB bsm REQUIRED) # audit_token_to_pid / _pidversion (PeerIdentity)
 
-# LM-free wire core: the CBOR codec, framing, streaming reassembler, peer
-# identity, and the prompter protocol. Links NO LibreMiddleware/LibreAgent, so
-# the agent-owned prompter (and, later, the PKCS#11 facade) can reuse it
+# Darwin-only wire-adjacent pieces that sit alongside, but are NOT themselves,
+# the shared LibreAgent::Wire codec/framing/message model: anonymous-fd
+# creation (the memfd_create analog), the private agent<->prompter CBOR
+# protocol, and BSM peer identity. Links NO LibreMiddleware/LibreAgent::Core,
+# so the agent-owned prompter (and, later, the PKCS#11 facade) can reuse it
 # without pulling the card stack. -fexperimental-library is still needed for the
-# libc++ std::expected/std::format the wire layer uses on AppleClang.
+# libc++ std::expected/std::format this layer uses on AppleClang (also carried
+# PUBLIC by LibreAgent::Wire itself, linked below).
 add_library(LibreDarwinWireCore STATIC
-    src/backend/wire/Cbor.cpp
-    src/backend/wire/Framing.cpp
-    src/backend/wire/FrameReassembler.cpp
     src/backend/wire/AnonFd.cpp
     src/backend/wire/PrompterProtocol.cpp
     src/backend/PeerIdentity.cpp)
@@ -28,8 +28,9 @@ set_target_properties(LibreDarwinWireCore PROPERTIES POSITION_INDEPENDENT_CODE O
 target_compile_options(LibreDarwinWireCore PUBLIC -fexperimental-library)
 target_link_options(LibreDarwinWireCore PUBLIC -fexperimental-library)
 target_link_libraries(LibreDarwinWireCore
+    PUBLIC
+        LibreAgent::Wire # AnonFd.h/PrompterProtocol.h expose UniqueFd/CborValue in their public API
     PRIVATE
-        qcbor::qcbor # deterministic CBOR codec; not exposed in headers
         ${BSM_LIB})  # PeerIdentity audit_token_to_pid
 
 add_library(LibreDarwinAgentBackend STATIC
@@ -41,7 +42,6 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/SystemLifecycle.mm
     src/backend/OsLogSink.cpp
     src/backend/ProcessHardening.cpp
-    src/backend/wire/Messages.cpp # Messages reuses the LibreAgent value enums
     # Operation subclasses: platform-neutral, so they depend only on core flows +
     # OperationBase + the OperationChannel interface, never on the transport.
     # They are duplicated per host rather than shared from the core; promoting
@@ -62,9 +62,9 @@ set_target_properties(LibreDarwinAgentBackend PROPERTIES POSITION_INDEPENDENT_CO
 target_link_libraries(LibreDarwinAgentBackend
     PUBLIC
         LibreAgent::Core # re-exports LM SmartCard/Plugin PUBLIC
+        LibreAgent::Wire # SocketTransport.h/SocketFrontend.h expose the wire message model in their public API
         LibreDarwinWireCore
     PRIVATE
-        qcbor::qcbor # Messages.cpp encodes via the Cbor seam
         ${SECURITY_FRAMEWORK}
         ${CORE_FOUNDATION_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
@@ -76,12 +76,6 @@ target_link_libraries(LibreDarwinAgentBackend
 # the documented upstream mechanism.
 target_compile_options(LibreDarwinAgentBackend PRIVATE -fexperimental-library)
 target_link_options(LibreDarwinAgentBackend PRIVATE -fexperimental-library)
-
-# The wire contract (CBOR/CDDL) is installed alongside the agent so clients can
-# pin against it. The canonical semantic source stays the D-Bus interface
-# surface; this schema mirrors it rather than forking it.
-install(FILES wire/librescrs-agent.cddl
-    DESTINATION ${CMAKE_INSTALL_DATADIR}/librescrs)
 
 # The daemon: wires the macOS backend into an AgentCore and runs the run loop.
 add_executable(librescrs-agent src/main.cpp)

@@ -6,13 +6,21 @@
 // creates is zeroed before it dies.
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
-#include <LibreSCRS/Darwin/backend/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/Framing.h>
 
 #include <optional>
 #include <string_view>
 #include <utility>
 
 namespace LibreSCRS::Darwin::wire {
+
+// Pulled in unqualified for this TU: the codec/framing primitives now live in
+// the shared LibreAgent::Wire library; PromptKind/PromptRequest/etc. above stay
+// Darwin-local (the private agent<->prompter protocol never left this repo).
+using LibreSCRS::Agent::Wire::decode;
+using LibreSCRS::Agent::Wire::secureZero;
+using LibreSCRS::Agent::Wire::sendFrame;
+
 namespace {
 
 using Map = CborValue::Map;
