@@ -36,6 +36,7 @@
 #include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>
 #include <LibreSCRS/Agent/util/CallerLabel.h>
 #include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialSnapshot, EntryError
+#include <LibreSCRS/Agent/wire/Framing.h>           // kMaxFrameFds (socket per-frame fd budget)
 
 #include <LibreSCRS/Plugin/CardPlugin.h>  // CardPlugin::pluginId() (the single-candidate cardType)
 #include <LibreSCRS/Plugin/PluginTypes.h> // CardCapabilities
@@ -61,6 +62,13 @@ namespace {
 namespace A = LibreSCRS::Agent;
 namespace Ops = LibreSCRS::Agent::Operations;
 namespace sp = LibreSCRS::Agent::Operations::SignatureParams;
+
+// The socket frame fd budget must cover a maximum-size SignBatch: the request
+// leg carries one SCM_RIGHTS fd per document (and the result leg one artifact fd
+// per row). kMaxFrameFds is sized to the D-Bus per-message fd budget so this
+// holds; assert it rather than truncate a batch at send time.
+static_assert(Ops::kMaxBatchDocuments <= A::Wire::kMaxFrameFds,
+              "socket frame fd budget must cover a maximum SignBatch");
 
 constexpr std::uint32_t kIdentityCapBit = static_cast<std::uint32_t>(LibreSCRS::Plugin::CardCapabilities::IdentityData);
 constexpr std::uint32_t kPkiCapBit = static_cast<std::uint32_t>(LibreSCRS::Plugin::CardCapabilities::PKI);

@@ -233,9 +233,15 @@ struct Rig
 
     ~Rig()
     {
-        // Drain the loop first so a worker-posted continuation that captures the
-        // frontend (the op-owner prune sink) runs before the frontend dies —
-        // the same quiesce-then-drain ordering main.cpp's teardown uses.
+        // Quiesce the loop BEFORE draining and releasing the frontend: the
+        // drop-flag makes every subsequently-run posted block — including a sign
+        // worker's op-owner prune continuation that captures the frontend — a
+        // no-op, so the drain then flushes only already-live work and the
+        // frontend dies unreferenced. This is the quiesce-then-drain ordering
+        // main.cpp and SignHwSmokeTest's teardown use; the bare drain alone raced
+        // an in-flight worker's post, running it against a freed frontend
+        // (use-after-free).
+        transport->quiesceLoop();
         dispatch_sync(transport->loopQueue(), ^{
                       });
         frontend.reset();
@@ -622,9 +628,8 @@ TEST(SocketFrontend, SignAcceptsVisualSignatureOnPades)
 // non-finite double is unspecified, and the subsequent int narrowing of an
 // out-of-range double is undefined behaviour. These three vectors mirror
 // LibreLinux's CardObjectOperationsTest twins exactly (+inf width, NaN x,
-// -inf y) — authored only, unverified by a real toolchain here (this repo is
-// Apple-only per CMakeLists.txt's `if(NOT APPLE)` gate; see
-// mac-session-checklist-f2.md for the confirm-list).
+// -inf y). This repo compiles only under Apple (the CMakeLists.txt
+// `if(NOT APPLE)` gate).
 TEST(SocketFrontend, SignRejectsVisualSignatureWithNonFiniteWidth)
 {
     Rig rig;
@@ -863,11 +868,15 @@ TEST(SocketFrontend, CancelReturnsAck)
     EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
 }
 
-TEST(SocketFrontend, GetSignResultUnknownOpIsKeyNotFound)
+// An unknown (or unowned, or grace-evicted) op yields the dedicated NoResult
+// name, not KeyNotFound: handleGetSignResult replies uniformly so an enumerated
+// op id cannot be used as a presence oracle (the IDOR guard). KeyNotFound was
+// the pre-pinning borrow for this outcome.
+TEST(SocketFrontend, GetSignResultUnknownOpIsNoResult)
 {
     Rig rig;
     const auto reply = rig.roundTrip(11, Agent::Wire::GetSignResult{999});
-    EXPECT_EQ(errName(reply), "KeyNotFound");
+    EXPECT_EQ(errName(reply), "NoResult");
 }
 
 // --- credentials (PIN/PUK management over the socket) -------------------------
