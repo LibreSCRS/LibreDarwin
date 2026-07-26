@@ -6,6 +6,7 @@
 #include <LibreSCRS/Agent/operations/IdentityReadFlow.h>
 #include <LibreSCRS/Agent/operations/OperationBase.h>
 #include <LibreSCRS/Agent/operations/Seams.h>
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -37,6 +38,11 @@ public:
         // Resolved at the Card1 method entry; client-supplied, may be empty.
         std::string requester;
         std::string artifact;
+        // Fired with a completed read's CardData::cardType (via
+        // IdentityReadFlowDeps::onCardType) so the caller can push the
+        // authoritative Card1.CardType update through its property-update
+        // path. Default (unset): a no-op, for tests with no such path.
+        std::function<void(const std::string&)> onCardType;
     };
 
     ReadIdentityOperation(std::unique_ptr<OperationChannel> channel, Deps deps, std::shared_ptr<OperationState> state);

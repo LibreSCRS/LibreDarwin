@@ -240,6 +240,77 @@ TEST(SocketOperationChannel, SignResultRidesAnScmRightsFd)
     std::filesystem::remove(w.path);
 }
 
+// A batch of 3 rows — 2 signed, 1 failed mid-batch (the halt shape) — rides
+// 3 SCM_RIGHTS fds in row order; the failed row's fd is a REAL, valid,
+// zero-length descriptor (never omitted, never -1), mirroring the wire's
+// pinned zero-length-sealed-memfd convention for a failed row. Twin of
+// SignResultRidesAnScmRightsFd above, generalized to N rows.
+TEST(SocketOperationChannel, SignBatchResultRidesScmRightsFdsIncludingAZeroLengthFailedRow)
+{
+    Wired w = wireUp();
+    ASSERT_NE(w.connId, 0u);
+    auto state = std::make_shared<Ops::OperationState>();
+    SocketOperationChannel channel(*w.tr, w.connId, 30, state);
+
+    Ops::BatchSignResult rows;
+    rows.push_back(Ops::BatchSignedRow{
+        .displayName = "a.pdf",
+        .bytes = {'A', 'A'},
+        .meta = Ops::SignMeta{"pades", "b-lta", true, false},
+        .code = A::ErrorCode::None,
+    });
+    rows.push_back(Ops::BatchSignedRow{
+        .displayName = "b.pdf",
+        .bytes = {'B', 'B', 'B'},
+        .meta = Ops::SignMeta{"pades", "b-lta", true, false},
+        .code = A::ErrorCode::None,
+    });
+    rows.push_back(Ops::BatchSignedRow{
+        .displayName = "c.pdf",
+        .bytes = {}, // failed row: never signed
+        .meta = Ops::SignMeta{},
+        .code = A::ErrorCode::CredentialWrong,
+    });
+    EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{rows}));
+
+    auto frame = A::Wire::recvFrame(w.client);
+    ASSERT_TRUE(frame.has_value());
+    ASSERT_EQ(frame->fds.size(), 3u); // one fd per row, in row order
+    const auto decoded = A::Wire::decode(frame->body);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(*decoded->find("t")->asText(), "OpResultReady");
+    const auto* res = decoded->find("result");
+    ASSERT_NE(res, nullptr);
+    EXPECT_EQ(*res->find("kind")->asText(), "SignBatch");
+    const auto* rowsVal = res->find("rows");
+    ASSERT_NE(rowsVal, nullptr);
+    const auto* rowsArr = rowsVal->asArray();
+    ASSERT_NE(rowsArr, nullptr);
+    ASSERT_EQ(rowsArr->size(), 3u);
+
+    // Row 0: signed, fd-index 0, 2 bytes.
+    EXPECT_EQ(*(*rowsArr)[0].find("displayName")->asText(), "a.pdf");
+    EXPECT_EQ((*rowsArr)[0].find("artifact")->asUInt(), 0u);
+    EXPECT_EQ((*rowsArr)[0].find("errorCode")->asUInt(), static_cast<std::uint64_t>(A::ErrorCode::None));
+    char buf0[4] = {0};
+    ASSERT_EQ(::pread(frame->fds[0].get(), buf0, sizeof(buf0), 0), 2);
+    EXPECT_EQ(std::string(buf0, 2), "AA");
+
+    // Row 2: the failed row — a REAL, valid fd that reads back ZERO bytes,
+    // never an invalid/-1 descriptor.
+    EXPECT_EQ(*(*rowsArr)[2].find("displayName")->asText(), "c.pdf");
+    EXPECT_EQ((*rowsArr)[2].find("artifact")->asUInt(), 2u);
+    EXPECT_EQ((*rowsArr)[2].find("errorCode")->asUInt(), static_cast<std::uint64_t>(A::ErrorCode::CredentialWrong));
+    const int failedFd = frame->fds[2].get();
+    ASSERT_GE(failedFd, 0);
+    char probe[1] = {0};
+    EXPECT_EQ(::pread(failedFd, probe, sizeof(probe), 0), 0) << "the failed row's fd must be real and zero-length";
+
+    ::close(w.client);
+    w.tr.reset();
+    std::filesystem::remove(w.path);
+}
+
 // Failed-mutation payload (InvalidPin, retriesLeft=2, blocked=false, records
 // empty): the frame decodes to the A::Wire::CredentialsResult shape and
 // delivery is inline (no fd) with emitResult returning true.

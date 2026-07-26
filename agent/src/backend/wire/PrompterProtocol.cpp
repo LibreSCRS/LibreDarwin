@@ -24,6 +24,7 @@ using LibreSCRS::Agent::Wire::sendFrame;
 namespace {
 
 using Map = CborValue::Map;
+using Array = CborValue::Array;
 
 std::string_view kindName(PromptKind k)
 {
@@ -102,6 +103,34 @@ std::optional<std::uint64_t> optUint(const Map& m, std::string_view k)
         return std::uint64_t{0};
     }
     return it->second.asUInt();
+}
+
+// The UNTRUSTED `artifacts` (batch-sign only) option: absent on every prompt
+// that is not a batch sign (an older agent predating this key must not break
+// either), so a missing entry degrades to an empty list, same tolerance as
+// optText/optUint above. A PRESENT value must be an array of tstr like every
+// other array-of-string on this wire — a type mismatch fails closed
+// (nullopt), it is not silently dropped.
+std::optional<std::vector<std::string>> optStringArray(const Map& m, std::string_view k)
+{
+    const auto it = m.find(k);
+    if (it == m.end()) {
+        return std::vector<std::string>{};
+    }
+    const auto* arr = it->second.asArray();
+    if (arr == nullptr) {
+        return std::nullopt;
+    }
+    std::vector<std::string> out;
+    out.reserve(arr->size());
+    for (const auto& item : *arr) {
+        const auto* s = item.asText();
+        if (s == nullptr) {
+            return std::nullopt;
+        }
+        out.push_back(*s);
+    }
+    return out;
 }
 
 // The display metadata shared by both secret-request messages (all optional
@@ -201,6 +230,20 @@ CborValue toCbor(const PromptRequest& r)
     }
     if (r.maxLength != 0) {
         m.emplace("maxLength", CborValue::uint(r.maxLength));
+    }
+    if (!r.artifacts.empty()) {
+        Array arr;
+        arr.reserve(r.artifacts.size());
+        for (const auto& a : r.artifacts) {
+            arr.push_back(CborValue(a));
+        }
+        m.emplace("artifacts", CborValue(std::move(arr)));
+    }
+    if (r.attempt != 0) {
+        m.emplace("attempt", CborValue::uint(r.attempt));
+    }
+    if (!r.lastError.empty()) {
+        m.emplace("lastError", CborValue(r.lastError));
     }
     return CborValue(std::move(m));
 }
@@ -342,7 +385,15 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     auto display = optDisplayFields(m);
     const auto minLen = optUint(m, "minLength");
     const auto maxLen = optUint(m, "maxLength");
-    if (!display || !minLen || !maxLen) {
+    auto artifacts = optStringArray(m, "artifacts");
+    // Retry context: absent on the first-ever prompt for a card (an older
+    // agent predating this key must not break either) -- optUint/optText
+    // already default a missing key to 0/"" the same way minLength/title do;
+    // a PRESENT-but-mistyped value fails the whole request closed like every
+    // other field here.
+    const auto attempt = optUint(m, "attempt");
+    const auto lastError = optText(m, "lastError");
+    if (!display || !minLen || !maxLen || !artifacts || !attempt || !lastError) {
         return std::unexpected(PrompterParseError::WrongType);
     }
     r.title = std::move(display->title);
@@ -351,6 +402,9 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     r.artifact = std::move(display->artifact);
     r.minLength = static_cast<std::uint32_t>(*minLen);
     r.maxLength = static_cast<std::uint32_t>(*maxLen);
+    r.artifacts = std::move(*artifacts);
+    r.attempt = static_cast<std::uint32_t>(*attempt);
+    r.lastError = std::move(*lastError);
     return PrompterRequest{std::move(r)};
 }
 

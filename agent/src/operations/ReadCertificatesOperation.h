@@ -24,6 +24,7 @@ public:
         // worker that serialises this reader's ops (single-threaded; no locking).
         CardSessionHolder* holder{nullptr};
         CertificateReader& certReader;
+        TrustVerifier& trustVerifier;
         PrompterClientBase& prompter;
         PromptSerializer& serializer;
         CredentialCache& credentials;

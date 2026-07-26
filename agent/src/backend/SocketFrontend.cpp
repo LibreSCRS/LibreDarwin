@@ -15,15 +15,19 @@
 #include "operations/ListCredentialsOperation.h"
 #include "operations/ManagePinOperation.h"
 #include "operations/ReadCertificatesOperation.h"
+#include "operations/ReadTokenInfoOperation.h"
 #include "operations/ReadIdentityOperation.h"
 #include "operations/SignOperation.h"
+#include "operations/SignBatchOperation.h"
 
 #include <LibreSCRS/Agent/AgentCore.h>
 #include <LibreSCRS/Agent/CryptoWorkerContext.h>
+#include <LibreSCRS/Agent/FeatureTokens.h>
 #include <LibreSCRS/Agent/Reply.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
 #include <LibreSCRS/Agent/config/ConfigStore.h>
 #include <LibreSCRS/Agent/crypto/Mechanism.h>
+#include <LibreSCRS/Agent/operations/BatchSignFlow.h> // isValidBatchDocumentCount, kMin/kMaxBatchDocuments, BatchDocumentInput
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h>
 #include <LibreSCRS/Agent/operations/LmSeams.h>
 #include <LibreSCRS/Agent/operations/OperationManager.h>
@@ -33,6 +37,7 @@
 #include <LibreSCRS/Agent/util/CallerLabel.h>
 #include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialSnapshot, EntryError
 
+#include <LibreSCRS/Plugin/CardPlugin.h>  // CardPlugin::pluginId() (the single-candidate cardType)
 #include <LibreSCRS/Plugin/PluginTypes.h> // CardCapabilities
 
 #include <fcntl.h>
@@ -43,6 +48,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <expected>
 #include <memory>
 #include <optional>
 #include <utility>
@@ -64,6 +70,7 @@ constexpr std::uint32_t kPinManagementCapBit =
 constexpr const char* kArtifactIdentity = "identity";
 constexpr const char* kArtifactPhoto = "photo";
 constexpr const char* kArtifactCertificates = "certificates";
+constexpr const char* kArtifactTokenInfo = "token";
 constexpr const char* kArtifactCredentials = "credentials";
 
 // The credentials verb that may carry the activateKey wire key (the wire's
@@ -203,6 +210,110 @@ void postErr(SocketTransport* tr, std::uint64_t connId, std::uint64_t req, A::Wi
     postReply(tr, connId, A::Wire::makeErrorReply(req, A::Wire::ErrInfo{code, std::nullopt, std::nullopt}));
 }
 
+// The sign-opts vocabulary resolved to concrete values, shared by Sign and
+// SignBatch so the two entry points can never drift on validation (mirror of
+// LibreLinux CardObject.cpp's own resolveSignOptions extraction).
+struct ResolvedSignOptions
+{
+    std::string format;
+    std::string level;
+    std::string packaging;
+    bool allowExpired{false};
+    std::string reason;
+    std::string location;
+    std::optional<std::string> tsaUrl;
+    std::optional<Ops::VisualParams> visual;
+};
+
+// Resolve format (sniff on auto), level (TSA-derived default), packaging to
+// concrete vocabulary, and validate allowExpired/tsaUrl/visualSignature —
+// out-of-vocabulary is a method-entry rejection, never reaches an Operation.
+// `sniffSource` is the bytes format=auto sniffs off: Sign's own single
+// document; SignBatch shares this ONE resolution across the whole batch,
+// sniffing off the FIRST document only (its own displayName/reason/location
+// defaults still come from `opts` — only the sniff source differs from a
+// single Sign's).
+std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const A::Wire::SignOpts& opts,
+                                                                          const std::vector<std::uint8_t>& sniffSource,
+                                                                          const A::Config::ConfigStore& config)
+{
+    std::string format = opts.format;
+    if (format == "auto" || format.empty()) {
+        const auto sniffed = sp::sniffFormat(sniffSource);
+        if (!sniffed) {
+            return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
+        }
+        format = *sniffed;
+    }
+    if (!sp::isKnownFormat(format)) {
+        return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
+    }
+    std::optional<std::string> requestedLevel;
+    if (!opts.level.empty() && opts.level != "auto") {
+        requestedLevel = opts.level;
+    }
+    std::string level = sp::resolveSignLevel(requestedLevel, config.defaultLevel(), !config.tsaUrls().empty());
+    if (!sp::isKnownLevel(level) || !sp::isImplementedSignLevel(level)) {
+        return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
+    }
+    std::string packaging = opts.packaging;
+    if (packaging == "auto" || packaging.empty()) {
+        packaging = sp::defaultPackagingFor(format);
+    }
+    if (!sp::isKnownPackaging(packaging)) {
+        return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
+    }
+
+    // tsaUrl overrides the configured TSA for THIS sign only — https +
+    // non-empty host, and meaningful only for the timestamped/long-term
+    // family (paired with level "b-b" it is a method-entry rejection, the
+    // same stricter-but-documented posture LibreLinux's CardObject::Sign
+    // takes). The CBOR codec already guarantees opts.tsaUrl is a well-formed
+    // tstr when present (Messages.cpp's parseSignOpts) — only the semantic
+    // https+host+level check happens here.
+    if (opts.tsaUrl) {
+        if (!sp::isValidTsaUrl(*opts.tsaUrl)) {
+            return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
+        }
+        if (level == "b-b") {
+            return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
+        }
+    }
+
+    // visualSignature attaches a PAdES visible-signature appearance; the
+    // codec already guarantees all six nested fields are present and typed
+    // when opts.visualSignature itself is present (Messages.cpp's
+    // parseVisualSignatureOpts) — only the format + geometry checks happen
+    // here.
+    std::optional<Ops::VisualParams> visual;
+    if (opts.visualSignature) {
+        const auto& v = *opts.visualSignature;
+        if (format != "pades" ||
+            !sp::isValidVisualGeometry(static_cast<std::int64_t>(v.page), v.x, v.y, v.width, v.height)) {
+            return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
+        }
+        visual = Ops::VisualParams{
+            .page = static_cast<int>(v.page),
+            .x = static_cast<float>(v.x),
+            .y = static_cast<float>(v.y),
+            .width = static_cast<float>(v.width),
+            .height = static_cast<float>(v.height),
+            .text = v.text,
+        };
+    }
+
+    return ResolvedSignOptions{
+        .format = std::move(format),
+        .level = std::move(level),
+        .packaging = std::move(packaging),
+        .allowExpired = opts.allowExpired.value_or(false),
+        .reason = opts.reason.value_or(config.defaultReason()),
+        .location = opts.location.value_or(config.defaultLocation()),
+        .tsaUrl = opts.tsaUrl,
+        .visual = std::move(visual),
+    };
+}
+
 } // namespace
 
 SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, std::string version)
@@ -249,8 +360,12 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handleGetPhoto(in, *m);
     } else if (const auto* m = std::get_if<A::Wire::ReadCertificates>(&body)) {
         handleReadCertificates(in, *m);
+    } else if (const auto* m = std::get_if<A::Wire::ReadTokenInfo>(&body)) {
+        handleReadTokenInfo(in, *m);
     } else if (const auto* m = std::get_if<A::Wire::Sign>(&body)) {
         handleSign(in, *m);
+    } else if (const auto* m = std::get_if<A::Wire::SignBatch>(&body)) {
+        handleSignBatch(in, *m);
     } else if (const auto* m = std::get_if<A::Wire::ListCredentials>(&body)) {
         handleListCredentials(in, *m);
     } else if (const auto* m = std::get_if<A::Wire::ManagePin>(&body)) {
@@ -279,6 +394,10 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handlePkSignRaw(connId, req, *m, caller);
     } else if (const auto* m = std::get_if<A::Wire::PkDecrypt>(&body)) {
         handlePkDecrypt(connId, req, *m, caller);
+    } else if (const auto* m = std::get_if<A::Wire::LayoutVisual>(&body)) {
+        handleLayoutVisual(connId, req, *m);
+    } else if (std::get_if<A::Wire::GetAppearanceFont>(&body)) {
+        handleGetAppearanceFont(connId, req);
     }
 }
 
@@ -286,13 +405,54 @@ void SocketFrontend::handleHello(std::uint64_t connId, std::uint64_t req, const 
 {
     A::Wire::HelloAck ack;
     ack.agentVer = m_version;
-    ack.features = {"identity", "certificates", "photo", "sign", "pkcs11", "config", "credentials"};
+    // Served verbatim from the single source of truth in LibreAgent core
+    // (LibreSCRS::Agent::kAgentFeatures, FeatureTokens.h) — never a local
+    // literal, so this daemon and the D-Bus backend's Manager1.Features can
+    // never drift on which feature tokens are actually live.
+    ack.features.assign(A::kAgentFeatures.begin(), A::kAgentFeatures.end());
     sendReplyOnLoop(connId, A::Wire::makeReply(req, ack));
 }
 
 void SocketFrontend::handleGetState(std::uint64_t connId, std::uint64_t req)
 {
     sendReplyOnLoop(connId, A::Wire::makeReply(req, m_transport.currentState()));
+}
+
+// --- Card-independent visual-signature layout preview --------------------
+
+void SocketFrontend::handleLayoutVisual(std::uint64_t connId, std::uint64_t req, const A::Wire::LayoutVisual& msg)
+{
+    // Method-entry rejection for a non-finite or non-positive box — the SAME
+    // gate Sign's visualSignature option runs (handleSign below), before
+    // narrowing to LM's integer Rect (SignatureParams::isValidLayoutRect's
+    // own comment documents the UB this avoids).
+    if (!sp::isValidLayoutRect(msg.x, msg.y, msg.width, msg.height)) {
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
+        return;
+    }
+    const Ops::VisualLayoutResult result =
+        Ops::layoutVisualSignature(msg.text, Ops::LayoutBox{msg.x, msg.y, msg.width, msg.height});
+    A::Wire::LayoutReply reply;
+    reply.fontSize = result.fontSize;
+    reply.lineHeight = result.lineHeight;
+    reply.lines = result.lines;
+    reply.clipped = result.clipped;
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
+}
+
+void SocketFrontend::handleGetAppearanceFont(std::uint64_t connId, std::uint64_t req)
+{
+    const std::vector<std::uint8_t> bytes = Ops::appearanceFontBytes();
+    auto fd = wire::anonFdFromBytes(bytes);
+    if (!fd) {
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
+        return;
+    }
+    A::Wire::AppearanceFontReply reply;
+    reply.fd = 0; // fd-index into this reply's SCM_RIGHTS vector
+    std::vector<A::Wire::UniqueFd> fds;
+    fds.push_back(std::move(*fd));
+    m_transport.sendTo(connId, A::Wire::makeReply(req, reply), std::move(fds));
 }
 
 // --- card operations ---------------------------------------------------------
@@ -315,12 +475,16 @@ void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const A::W
     const std::string readerName = routing->readerName;
     const A::ObjectId readerId = routing->readerId;
     auto& core = m_core;
+    // Value-captured (never `this`): safe to invoke from the worker thread at
+    // any later time, mirroring scheduleCardResolve's worker->loop marshal.
+    auto* tr = &m_transport;
+    const std::string cardHandle = msg.card;
 
     try {
         const auto id = core.operationManager().publish(
             readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName,
-             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
+            [this, connId, &core, cardKey, readerName, requester, tr,
+             cardHandle](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
                 auto reader = std::make_shared<Ops::LmCardReader>();
                 auto state = std::make_shared<Ops::OperationState>();
                 auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
@@ -337,6 +501,10 @@ void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const A::W
                     .readerName = readerName,
                     .requester = requester,
                     .artifact = kArtifactIdentity,
+                    .onCardType =
+                        [tr, cardHandle](const std::string& cardType) {
+                            tr->post([tr, cardHandle, cardType] { tr->updateCardType(cardHandle, cardType); });
+                        },
                 };
                 auto op = std::make_unique<Ops::ReadIdentityOperation>(std::move(channel), std::move(deps), state);
                 op->keepAlive(core.sharedCryptoContext());
@@ -369,12 +537,16 @@ void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const A::Wire:
     const std::string readerName = routing->readerName;
     const A::ObjectId readerId = routing->readerId;
     auto& core = m_core;
+    // Value-captured (never `this`): safe to invoke from the worker thread at
+    // any later time, mirroring scheduleCardResolve's worker->loop marshal.
+    auto* tr = &m_transport;
+    const std::string cardHandle = msg.card;
 
     try {
         const auto id = core.operationManager().publish(
             readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName,
-             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
+            [this, connId, &core, cardKey, readerName, requester, tr,
+             cardHandle](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
                 auto reader = std::make_shared<Ops::LmCardReader>();
                 auto state = std::make_shared<Ops::OperationState>();
                 auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
@@ -391,6 +563,10 @@ void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const A::Wire:
                     .readerName = readerName,
                     .requester = requester,
                     .artifact = kArtifactPhoto,
+                    .onCardType =
+                        [tr, cardHandle](const std::string& cardType) {
+                            tr->post([tr, cardHandle, cardType] { tr->updateCardType(cardHandle, cardType); });
+                        },
                 };
                 auto op = std::make_unique<Ops::GetPhotoOperation>(std::move(channel), std::move(deps), state);
                 op->keepAlive(core.sharedCryptoContext());
@@ -430,6 +606,11 @@ void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const 
             [this, connId, &core, cardKey, readerName,
              requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
                 auto certReader = std::make_shared<Ops::LmCertificateReader>();
+                // Reuses core.signingEngineProvider()'s already-built
+                // TrustStoreService (see SigningEngineProvider::trustSnapshot())
+                // -- no separate trust store, no new LM API, mirroring the
+                // Sign path's own core.signingEngineProvider() reuse below.
+                auto trustVerifier = std::make_shared<Ops::LmTrustVerifier>(core.signingEngineProvider());
                 auto state = std::make_shared<Ops::OperationState>();
                 auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
                                                                         SocketOperationChannel::SignArtifactSink{},
@@ -437,6 +618,7 @@ void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const 
                 Ops::ReadCertificatesOperation::Deps deps{
                     .holder = holder,
                     .certReader = *certReader,
+                    .trustVerifier = *trustVerifier,
                     .prompter = *core.sharedCryptoContext()->prompter,
                     .serializer = *core.sharedCryptoContext()->serializer,
                     .credentials = core.credentialCache(),
@@ -449,6 +631,63 @@ void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const 
                 auto op = std::make_unique<Ops::ReadCertificatesOperation>(std::move(channel), std::move(deps), state);
                 op->keepAlive(core.sharedCryptoContext());
                 op->keepAlive(certReader);
+                op->keepAlive(trustVerifier);
+                op->bindShutdownToken(core.shutdownToken());
+                return op;
+            });
+        m_opOwners[id.value()] = in.caller;
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
+    } catch (const Ops::QueueFull&) {
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
+    }
+}
+
+void SocketFrontend::handleReadTokenInfo(SocketTransport::Inbound& in, const A::Wire::ReadTokenInfo& msg)
+{
+    // Token info is PKI-adjacent (pkcs15), so it shares ReadCertificates'
+    // gate bit. Result rides the SAME Identity1-shaped op-result-ready arm
+    // ReadIdentity uses (a single "token" group) -- no new result shape.
+    const std::uint64_t connId = in.connId;
+    const std::uint64_t req = in.request.req;
+    const auto routing = m_transport.cardRouting(msg.card);
+    if (!routing) {
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
+        return;
+    }
+    if ((routing->caps & kPkiCapBit) == 0) {
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
+        return;
+    }
+    const std::string requester = requesterLabel(in.caller);
+    const std::string cardKey = routing->cardKey;
+    const std::string readerName = routing->readerName;
+    const A::ObjectId readerId = routing->readerId;
+    auto& core = m_core;
+
+    try {
+        const auto id = core.operationManager().publish(
+            readerId, readerName, in.caller,
+            [this, connId, &core, cardKey, readerName,
+             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
+                auto reader = std::make_shared<Ops::LmCardReader>();
+                auto state = std::make_shared<Ops::OperationState>();
+                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
+                                                                        SocketOperationChannel::SignArtifactSink{},
+                                                                        makeOpFinishedSink());
+                Ops::ReadTokenInfoOperation::Deps deps{
+                    .holder = holder,
+                    .reader = *reader,
+                    .prompter = *core.sharedCryptoContext()->prompter,
+                    .serializer = *core.sharedCryptoContext()->serializer,
+                    .credentials = core.credentialCache(),
+                    .cardKey = cardKey,
+                    .readerName = readerName,
+                    .requester = requester,
+                    .artifact = kArtifactTokenInfo,
+                };
+                auto op = std::make_unique<Ops::ReadTokenInfoOperation>(std::move(channel), std::move(deps), state);
+                op->keepAlive(core.sharedCryptoContext());
+                op->keepAlive(reader);
                 op->bindShutdownToken(core.shutdownToken());
                 return op;
             });
@@ -511,37 +750,14 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sig
         return;
     }
 
-    // Resolve format (sniff on auto), level (TSA-derived default), packaging to
-    // concrete vocabulary; out-of-vocabulary is a method-entry rejection.
-    std::string format = msg.opts.format;
-    if (format == "auto" || format.empty()) {
-        const auto sniffed = sp::sniffFormat(doc.bytes);
-        if (!sniffed) {
-            replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
-            return;
-        }
-        format = *sniffed;
-    }
-    if (!sp::isKnownFormat(format)) {
-        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
-        return;
-    }
-    std::optional<std::string> requestedLevel;
-    if (!msg.opts.level.empty() && msg.opts.level != "auto") {
-        requestedLevel = msg.opts.level;
-    }
-    std::string level = sp::resolveSignLevel(requestedLevel, m_core.configStore().defaultLevel(),
-                                             !m_core.configStore().tsaUrls().empty());
-    if (!sp::isKnownLevel(level) || !sp::isImplementedSignLevel(level)) {
-        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
-        return;
-    }
-    std::string packaging = msg.opts.packaging;
-    if (packaging == "auto" || packaging.empty()) {
-        packaging = sp::defaultPackagingFor(format);
-    }
-    if (!sp::isKnownPackaging(packaging)) {
-        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
+    // Resolve format (sniff on auto), level, packaging, allowExpired, reason,
+    // location, tsaUrl and visualSignature to concrete/validated values —
+    // out-of-vocabulary is a method-entry rejection. Shared verbatim with
+    // handleSignBatch below via resolveSignOptions() so the two entries can
+    // never drift.
+    auto resolved = resolveSignOptions(msg.opts, doc.bytes, m_core.configStore());
+    if (!resolved) {
+        replyError(connId, req, resolved.error());
         return;
     }
 
@@ -549,13 +765,15 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sig
     Ops::SignParams params{
         .certId = msg.cert,
         .inputDocument = std::move(doc.bytes),
-        .format = std::move(format),
-        .level = std::move(level),
-        .packaging = std::move(packaging),
-        .allowExpired = msg.opts.allowExpired.value_or(false),
+        .format = std::move(resolved->format),
+        .level = std::move(resolved->level),
+        .packaging = std::move(resolved->packaging),
+        .allowExpired = resolved->allowExpired,
         .displayName = A::sanitizeLabel(msg.opts.displayName.value_or(std::string{})),
-        .reason = msg.opts.reason.value_or(m_core.configStore().defaultReason()),
-        .location = msg.opts.location.value_or(m_core.configStore().defaultLocation()),
+        .reason = std::move(resolved->reason),
+        .location = std::move(resolved->location),
+        .tsaUrl = resolved->tsaUrl.value_or(std::string{}),
+        .visual = std::move(resolved->visual),
     };
 
     const std::string cardKey = routing->cardKey;
@@ -594,6 +812,155 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sig
                     .params = std::move(params),
                 };
                 auto op = std::make_unique<Ops::SignOperation>(std::move(channel), std::move(deps), state);
+                op->keepAlive(core.sharedCryptoContext());
+                op->keepAlive(signer);
+                op->bindShutdownToken(core.shutdownToken());
+                return op;
+            });
+        m_opOwners[id.value()] = owner;
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
+    } catch (const Ops::QueueFull&) {
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
+    }
+}
+
+void SocketFrontend::handleSignBatch(SocketTransport::Inbound& in, const A::Wire::SignBatch& msg)
+{
+    const std::uint64_t connId = in.connId;
+    const std::uint64_t req = in.request.req;
+    const auto routing = m_transport.cardRouting(msg.card);
+    if (!routing) {
+        replyError(connId, req, A::Wire::SyncError::UnknownCard);
+        return;
+    }
+    if ((routing->caps & kPkiCapBit) == 0) {
+        replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
+        return;
+    }
+    if (msg.cert.empty()) {
+        replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
+        return;
+    }
+
+    // Authorize the CLIENT then apply the SAME sign-flood rate-limit as a
+    // single Sign, keyed on the caller — BEFORE the document-count gate and
+    // before reading any document, mirroring Sign's own ordering exactly.
+    // MANDATORY invariant: this ONE allow() call is the ONLY rate-limiter
+    // charge for the whole dispatch — the batch loops over `msg.docs` entirely
+    // below and inside BatchSignFlow, never re-entering this method or
+    // charging again, so one SignBatch call (of any size 1-kMaxBatchDocuments)
+    // always costs exactly one charge, the same one-call-one-charge
+    // discipline handleSign's own dispatch already relies on.
+    if (!m_core.authorizer().authorize(A::kActionSign, in.caller)) {
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    }
+    if (!m_core.rateLimiter().allow(in.caller)) {
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
+        return;
+    }
+
+    if (!Ops::isValidBatchDocumentCount(msg.docs.size())) {
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
+        return;
+    }
+
+    // Read every document off its own fd-index, in request order — the SAME
+    // 256 MiB cap + regular-file-only + non-empty rule Sign's own
+    // readDocument enforces for its single document, applied per document
+    // here. A single bad document rejects the WHOLE call (no Operation
+    // minted): method entry has no per-row partial semantics, only the flow
+    // does (auth/crypto failures).
+    std::vector<Ops::BatchDocumentInput> inputs;
+    inputs.reserve(msg.docs.size());
+    for (const auto& entry : msg.docs) {
+        if (entry.fdIndex >= in.fds.size()) {
+            replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
+            return;
+        }
+        auto doc = readDocument(in.fds[entry.fdIndex].get(), kMaxInputBytes);
+        if (doc.status == ReadStatus::NotRegular) {
+            replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
+            return;
+        }
+        if (doc.status == ReadStatus::TooLarge) {
+            replyError(connId, req, A::Wire::SyncError::InputTooLarge);
+            return;
+        }
+        if (doc.status == ReadStatus::Error) {
+            replyError(connId, req, A::Wire::SyncError::CommunicationError); // internal read failure
+            return;
+        }
+        if (doc.bytes.empty()) {
+            replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter); // empty document
+            return;
+        }
+        inputs.push_back(Ops::BatchDocumentInput{
+            .displayName = A::sanitizeLabel(entry.name),
+            .bytes = std::move(doc.bytes),
+        });
+    }
+
+    // Options: IDENTICAL vocabulary to Sign's own, resolved via the SAME
+    // shared helper. format=auto sniffs off the FIRST document only — the
+    // whole batch shares one resolved format/level/packaging, not a
+    // per-document resolution.
+    auto resolved = resolveSignOptions(msg.opts, inputs.front().bytes, m_core.configStore());
+    if (!resolved) {
+        replyError(connId, req, resolved.error());
+        return;
+    }
+
+    const std::string requester = requesterLabel(in.caller);
+    Ops::SignParams params{
+        .certId = msg.cert,
+        // Ignored by BatchSignFlow — each entry in `inputs` above supplies
+        // its own bytes/name — left explicitly default.
+        .inputDocument = {},
+        .format = std::move(resolved->format),
+        .level = std::move(resolved->level),
+        .packaging = std::move(resolved->packaging),
+        .allowExpired = resolved->allowExpired,
+        .displayName = {},
+        .reason = std::move(resolved->reason),
+        .location = std::move(resolved->location),
+        .tsaUrl = resolved->tsaUrl.value_or(std::string{}),
+        .visual = std::move(resolved->visual),
+    };
+
+    const std::string cardKey = routing->cardKey;
+    const std::string readerName = routing->readerName;
+    const A::ObjectId readerId = routing->readerId;
+    const A::CallerToken owner = in.caller;
+    auto& core = m_core;
+
+    try {
+        const auto id = core.operationManager().publish(
+            readerId, readerName, in.caller,
+            [this, connId, owner, &core, cardKey, readerName, requester, params = std::move(params),
+             documents = std::move(inputs)](Ops::CardSessionHolder* holder,
+                                            A::OperationId opId) mutable -> std::unique_ptr<Ops::OperationBase> {
+                auto signer = std::make_shared<Ops::LmSigner>(core.signingEngineProvider());
+                auto state = std::make_shared<Ops::OperationState>();
+                // No SignArtifactSink: unlike a single Sign, SignBatch has no
+                // GetSignResult-style pull recovery on this wire (the CDDL
+                // pins recovery Sign-only), so nothing needs stashing.
+                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
+                                                                        SocketOperationChannel::SignArtifactSink{},
+                                                                        makeOpFinishedSink());
+                Ops::SignBatchOperation::Deps deps{
+                    .holder = holder,
+                    .signer = *signer,
+                    .prompter = *core.sharedCryptoContext()->prompter,
+                    .serializer = *core.sharedCryptoContext()->serializer,
+                    .credentials = core.credentialCache(),
+                    .cardKey = cardKey,
+                    .readerName = readerName,
+                    .requester = requester,
+                    .params = std::move(params),
+                    .documents = std::move(documents),
+                };
+                auto op = std::make_unique<Ops::SignBatchOperation>(std::move(channel), std::move(deps), state);
                 op->keepAlive(core.sharedCryptoContext());
                 op->keepAlive(signer);
                 op->bindShutdownToken(core.shutdownToken());
@@ -871,10 +1238,17 @@ void SocketFrontend::handleGetSignResult(std::uint64_t connId, std::uint64_t req
 {
     const auto it = m_signResults.find(msg.op);
     // Owner-scope (IDOR guard): the signed document is the client's own output;
-    // op ids are enumerable, so a requester that did not initiate the op must get
-    // the same KeyNotFound as a truly-absent op (no disclosure, no oracle).
+    // op ids are enumerable, so a requester that did not initiate the op must
+    // get the SAME reply as a truly-absent op (no disclosure, no oracle) --
+    // this branch also covers a genuinely-absent op, an op that was never a
+    // Sign, and the caller's OWN op once the grace window evicted it, none of
+    // which are distinguishable here from the IDOR case (the record is simply
+    // gone by then). NoResult is the dedicated wire name for all of these
+    // "nothing to give you" outcomes; it used to borrow KeyNotFound (a name
+    // that has nothing to do with a missing sign result) before that name was
+    // pinned.
     if (it == m_signResults.end() || !(it->second.owner == caller)) {
-        replyError(connId, req, A::Wire::SyncError::KeyNotFound);
+        replyError(connId, req, A::Wire::SyncError::NoResult);
         return;
     }
     auto fd = wire::anonFdFromBytes(it->second.artifact.bytes);
@@ -1180,8 +1554,17 @@ void SocketFrontend::scheduleCardResolve(const A::CardState& card)
     const bool queued = m_core.operationManager().enqueueOnReaderWorker(
         card.reader, readerName, [this, tr, card](Ops::CardSessionHolder& holder) {
             const auto resolution = holder.fullResolution();
-            tr->post([this, card, caps = resolution.capabilities, preAuth = resolution.preReadAuth] {
-                applyCardResolution(card, caps, preAuth);
+            // Card1.CardType (single-candidate case): the SAME held-session
+            // candidate list caps/preAuth were just resolved from. Ambiguous
+            // (more than one match) or empty (no match) both mean "not yet
+            // known" -- stays empty; a real read resolves it authoritatively
+            // via the property-update path (SocketTransport::updateCardType).
+            std::string cardType;
+            if (resolution.candidates.size() == 1 && resolution.candidates.front()) {
+                cardType = resolution.candidates.front()->pluginId();
+            }
+            tr->post([this, card, caps = resolution.capabilities, preAuth = resolution.preReadAuth, cardType] {
+                applyCardResolution(card, caps, preAuth, cardType);
             });
         });
     if (!queued) {
@@ -1196,7 +1579,7 @@ void SocketFrontend::scheduleCardResolve(const A::CardState& card)
 }
 
 void SocketFrontend::applyCardResolution(A::CardState card, std::uint32_t caps,
-                                         LibreSCRS::Auth::PreReadAuthMethod preAuth)
+                                         LibreSCRS::Auth::PreReadAuthMethod preAuth, const std::string& cardType)
 {
     const auto it = m_pendingCards.find(card.id.value());
     if (it == m_pendingCards.end()) {
@@ -1212,7 +1595,9 @@ void SocketFrontend::applyCardResolution(A::CardState card, std::uint32_t caps,
         return;
     }
     m_pendingCards.erase(it);
-    A::CardState refined{card.id, card.reader, caps, preAuth};
+    // card.atrHex carries through unchanged from PresenceModel's insertion --
+    // known synchronously, well before this held-session resolve.
+    A::CardState refined{card.id, card.reader, caps, preAuth, cardType, card.atrHex};
     m_transport.publishCard(refined);
 }
 

@@ -523,6 +523,14 @@ void SocketTransport::publishCard(const Agent::CardState& card)
     // WireParityChecks pins them in lockstep), but no longer the same TYPE now
     // that Agent::Wire::PreReadAuth is its own std-only mirror.
     c.preAuth = static_cast<Agent::Wire::PreReadAuth>(card.preReadAuth);
+    // Optional keys: absent (nullopt) until known, matching the empty-until-known
+    // core semantics -- encoded only when present (Messages.cpp's encodeCardState).
+    if (!card.cardType.empty()) {
+        c.cardType = card.cardType;
+    }
+    if (!card.atrHex.empty()) {
+        c.atr = card.atrHex;
+    }
     m_cards[c.handle] = c;
 
     CardRouting routing;
@@ -573,12 +581,45 @@ void SocketTransport::updateProperties(Agent::ObjectId reader, const Agent::Prop
     readerIt->second.card =
         delta.hasCard && delta.card.valid() ? std::optional<std::string>(handleFor(delta.card)) : std::nullopt;
 
+    // iface/key spelling pinned by wire/librescrs-agent.cddl's
+    // property-changed vocabulary comment + tests/wire/
+    // PropertyChangedVocabGuardTest.cpp: the FULL D-Bus interface name and
+    // PascalCase keys, matching what the Qt client actually decodes
+    // (client/qt's kReaderIface constant is "org.librescrs.Agent.Reader1",
+    // and AgentReader::applyProps looks for PascalCase "HasCard"/"Card",
+    // exactly like the FakeSocketAgent test double already emits). This used
+    // to emit the bare "Reader1" name with lowercase keys -- a latent
+    // mismatch that silently dropped every Reader1 property push a real Qt
+    // client ever received over this transport (the client's iface
+    // comparison never matched, so the event was ignored) -- fixed now that
+    // the vocabulary is pinned.
     std::map<std::string, Agent::Wire::CborValue> props;
-    props.emplace("hasCard", Agent::Wire::CborValue(delta.hasCard));
+    props.emplace("HasCard", Agent::Wire::CborValue(delta.hasCard));
     if (readerIt->second.card) {
-        props.emplace("card", Agent::Wire::CborValue(*readerIt->second.card));
+        props.emplace("Card", Agent::Wire::CborValue(*readerIt->second.card));
     }
-    broadcast(Agent::Wire::toCbor(Agent::Wire::PropertyChanged{readerIt->first, "Reader1", std::move(props)}));
+    broadcast(Agent::Wire::toCbor(
+        Agent::Wire::PropertyChanged{readerIt->first, "org.librescrs.Agent.Reader1", std::move(props)}));
+}
+
+void SocketTransport::updateCardType(const std::string& cardHandle, const std::string& cardType)
+{
+    const auto it = m_cards.find(cardHandle);
+    if (it == m_cards.end()) {
+        return; // withdrawn meanwhile
+    }
+    if (it->second.cardType && *it->second.cardType == cardType) {
+        return; // no-op: nothing actually changed
+    }
+    it->second.cardType = cardType;
+
+    // iface/key spelling: see updateProperties()'s own comment above -- both
+    // pushes now use the SAME pinned convention (full D-Bus interface name,
+    // PascalCase keys); this one was already correct.
+    std::map<std::string, Agent::Wire::CborValue> props;
+    props.emplace("CardType", Agent::Wire::CborValue(cardType));
+    broadcast(
+        Agent::Wire::toCbor(Agent::Wire::PropertyChanged{cardHandle, "org.librescrs.Agent.Card1", std::move(props)}));
 }
 
 void SocketTransport::post(std::function<void()> fn)

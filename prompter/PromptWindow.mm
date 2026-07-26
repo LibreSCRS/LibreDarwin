@@ -35,13 +35,48 @@ NSString* nsstr(const std::string& s)
     return [NSString stringWithUTF8String:s.c_str()];
 }
 
-// Shared informative-text chrome (description / requester / artifact) —
-// identical for the single-secret and change prompts.
-NSString* informativeText(const std::string& description, const std::string& requester, const std::string& artifact)
+// Recognised `lastError` msgKey (mirrors
+// LibreSCRS::Auth::ErrorKeys::preReadAuthFailed().key on the agent's LM
+// dependency; duplicated here as a documented literal, the same
+// cross-binary vocabulary convention the Linux PromptDialog.cpp uses for its
+// own copy of this same string — this file has no LM dependency to share the
+// constant with). The only source of a retry `lastError` today is the
+// eMRTD read flows' AuthFailed path (CredentialCache::markCredentialWrong).
+constexpr const char* kErrorPreReadAuthFailed = "librescrs.error.preRead.authFailed";
+
+// Retry-context inline error line (req.attempt > 0 -- a genuine re-prompt
+// after the card rejected the value collected last time for this card): nil
+// on the first-ever prompt for a card (attempt == 0). An unrecognised or
+// empty lastError key still returns a generic retry line rather than
+// leaking the raw wire key to the user, mirroring the Linux
+// PromptDialog.cpp retryErrorText() helper. No attempts counter is ever
+// rendered -- parity with the GUI's inline-error-without-a-counter bar.
+NSString* retryErrorLine(std::uint32_t attempt, const std::string& lastError)
+{
+    if (attempt == 0) {
+        return nil;
+    }
+    if (lastError.empty() || lastError == kErrorPreReadAuthFailed) {
+        return @"The value you entered was not accepted. Please try again.";
+    }
+    return @"Your previous entry was not accepted. Please try again.";
+}
+
+// Shared informative-text chrome (retry error / description / requester /
+// artifact) — identical for the single-secret and change prompts;
+// `retryError` is nil for the change prompt (RequestSecrets carries no
+// retry context -- change_pin is never a CAN/MRZ retry) and shown FIRST,
+// immediately above the rest of the informative text, mirroring the Linux
+// PromptDialog placing its retry label above the input widget.
+NSString* informativeText(const std::string& description, const std::string& requester, const std::string& artifact,
+                          NSString* retryError)
 {
     NSMutableString* info = [NSMutableString string];
+    if (retryError.length) {
+        [info appendString:retryError];
+    }
     if (!description.empty()) {
-        [info appendString:nsstr(description)];
+        [info appendFormat:@"%@%@", info.length ? @"\n" : @"", nsstr(description)];
     }
     if (!requester.empty()) {
         [info appendFormat:@"%@Requested by: %@", info.length ? @"\n" : @"", nsstr(requester)];
@@ -106,7 +141,8 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
                                                                       : "PIN";
           alert.messageText =
               req.title.empty() ? [NSString stringWithFormat:@"Enter your %s", kindLabel] : nsstr(req.title);
-          alert.informativeText = informativeText(req.description, req.requester, req.artifact);
+          alert.informativeText =
+              informativeText(req.description, req.requester, req.artifact, retryErrorLine(req.attempt, req.lastError));
           [alert addButtonWithTitle:@"OK"];
           [alert addButtonWithTitle:@"Cancel"];
 
@@ -158,7 +194,10 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
           [NSApp activateIgnoringOtherApps:YES];
           NSAlert* alert = [[NSAlert alloc] init];
           alert.messageText = req.title.empty() ? @"Change your PIN" : nsstr(req.title);
-          alert.informativeText = informativeText(req.description, req.requester, req.artifact);
+          // RequestSecrets carries no retry context (change_pin is never a
+          // CAN/MRZ retry) -- nil, same as the single-secret path's
+          // first-ever prompt.
+          alert.informativeText = informativeText(req.description, req.requester, req.artifact, nil);
           [alert addButtonWithTitle:@"OK"];
           [alert addButtonWithTitle:@"Cancel"];
 

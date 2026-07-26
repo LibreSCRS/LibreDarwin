@@ -37,10 +37,12 @@ void ReadIdentityOperation::doWork()
         .serializer = m_deps.serializer,
         .cache = m_deps.credentials,
         .phaseSink = *this,
+        .groupSink = *this,
         .cardKey = m_deps.cardKey,
         .requester = m_deps.requester,
         .artifact = m_deps.artifact,
         .token = token(),
+        .onCardType = m_deps.onCardType,
     });
     auto result = flow.run();
 

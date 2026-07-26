@@ -54,6 +54,23 @@ struct PromptRequest
     std::string artifact;  // filename / hash being acted on
     std::uint32_t minLength{0};
     std::uint32_t maxLength{0};
+    // The UNTRUSTED per-document display names of a Card1.SignBatch consent
+    // (BatchSignFlow's PromptOptions::artifacts) — distinct from `artifact`
+    // above, which stays the agent-owned TRUSTED category token for the whole
+    // request ("signature-batch" for a batch). Empty for every prompt that is
+    // not a batch sign. Mirrors LibreLinux's Prompter1 `artifacts` (as)
+    // RequestSecret option.
+    std::vector<std::string> artifacts;
+    // Retry context for a re-prompt after the card rejected the CAN/MRZ
+    // collected last time for the SAME card (CredentialCache::
+    // markCredentialWrong / applyRetryContext on the agent core): `attempt`
+    // numbers this prompt (2 = second attempt, ...), `lastError` carries the
+    // msgKey of the failure that triggered the retry. Both stay at their
+    // default (0 / empty) on the first-ever prompt for a card. Mirrors
+    // LibreLinux's Prompter1 `attempt`/`last_error` RequestSecret options;
+    // out of scope for RequestSecrets (change_pin is never a CAN/MRZ retry).
+    std::uint32_t attempt{0};
+    std::string lastError;
     bool operator==(const PromptRequest&) const = default;
 };
 

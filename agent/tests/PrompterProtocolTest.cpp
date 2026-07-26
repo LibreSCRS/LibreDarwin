@@ -40,6 +40,82 @@ TEST(PrompterProtocol, RequestRoundTrips)
     EXPECT_EQ(roundTripRequest(PromptRequest{PromptKind::Mrz, {}, {}, {}, {}, 0, 0}).kind, PromptKind::Mrz);
 }
 
+// The UNTRUSTED artifacts list (batch-sign consent only) round-trips
+// alongside the existing display fields, and — mirroring every other
+// zero/empty-omission on this wire — the key is entirely absent from the
+// encoded map when the list is empty (proven directly, not just via the
+// round-trip, so a regression that always emits an empty array is caught).
+TEST(PrompterProtocol, RequestRoundTripsArtifactsList)
+{
+    PromptRequest sent{PromptKind::Pin, "Title", "Desc", "LibreMac", "signature-batch", 4, 12};
+    sent.artifacts = {"a.pdf", "b.pdf", "c.pdf"};
+    const auto parsed = roundTripRequest(sent);
+    EXPECT_EQ(parsed, sent);
+    EXPECT_EQ(parsed.artifacts, (std::vector<std::string>{"a.pdf", "b.pdf", "c.pdf"}));
+}
+
+TEST(PrompterProtocol, RequestOmitsArtifactsKeyWhenEmpty)
+{
+    const PromptRequest bare{PromptKind::Pin, "Title", "Desc", "LibreMac", "signature", 4, 12};
+    ASSERT_TRUE(bare.artifacts.empty());
+    const auto tree = decode(toCbor(bare).encode());
+    ASSERT_TRUE(tree.has_value());
+    EXPECT_EQ(tree->find("artifacts"), nullptr) << "artifacts must be omitted when empty";
+    EXPECT_EQ(roundTripRequest(bare), bare);
+}
+
+// A mistyped `artifacts` (present but not an array) fails the whole request
+// closed, exactly like every other present-but-wrong-typed field on this
+// wire (optDisplayFields/optUint) — a missing entry is tolerated, a
+// malformed one is not.
+TEST(PrompterProtocol, RequestRejectsAMistypedArtifactsList)
+{
+    CborValue::Map m;
+    m.emplace("t", CborValue("RequestSecret"));
+    m.emplace("kind", CborValue("pin"));
+    m.emplace("artifacts", CborValue("not-an-array"));
+    EXPECT_EQ(parsePrompterRequest(CborValue(std::move(m)).encode()).error(), PrompterParseError::WrongType);
+}
+
+// Retry context (attempt/lastError -- CredentialCache::applyRetryContext on
+// the agent core): round-trips alongside the existing fields, and --
+// mirroring every other zero/empty-omission on this wire -- both keys are
+// entirely absent from the encoded map on the default (first-ever prompt).
+TEST(PrompterProtocol, RequestRoundTripsRetryContext)
+{
+    PromptRequest sent{PromptKind::Can, "Title", "Desc", "LibreMac", "identity", 6, 6};
+    sent.attempt = 2;
+    sent.lastError = "librescrs.error.preRead.authFailed";
+    const auto parsed = roundTripRequest(sent);
+    EXPECT_EQ(parsed, sent);
+    EXPECT_EQ(parsed.attempt, 2u);
+    EXPECT_EQ(parsed.lastError, "librescrs.error.preRead.authFailed");
+}
+
+TEST(PrompterProtocol, RequestOmitsRetryContextKeysOnFirstPrompt)
+{
+    const PromptRequest bare{PromptKind::Can, "Title", "Desc", "LibreMac", "identity", 6, 6};
+    ASSERT_EQ(bare.attempt, 0u);
+    ASSERT_TRUE(bare.lastError.empty());
+    const auto tree = decode(toCbor(bare).encode());
+    ASSERT_TRUE(tree.has_value());
+    EXPECT_EQ(tree->find("attempt"), nullptr) << "attempt must be omitted on the first-ever prompt";
+    EXPECT_EQ(tree->find("lastError"), nullptr) << "lastError must be omitted on the first-ever prompt";
+    EXPECT_EQ(roundTripRequest(bare), bare);
+}
+
+// A mistyped `attempt` (present but not a uint) fails the whole request
+// closed, exactly like every other present-but-wrong-typed field on this
+// wire.
+TEST(PrompterProtocol, RequestRejectsAMistypedAttempt)
+{
+    CborValue::Map m;
+    m.emplace("t", CborValue("RequestSecret"));
+    m.emplace("kind", CborValue("can"));
+    m.emplace("attempt", CborValue("not-a-uint"));
+    EXPECT_EQ(parsePrompterRequest(CborValue(std::move(m)).encode()).error(), PrompterParseError::WrongType);
+}
+
 TEST(PrompterProtocol, CancelParsesAsCancelVariant)
 {
     const auto bytes = toCbor(PromptCancel{}).encode();

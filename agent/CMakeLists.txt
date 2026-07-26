@@ -49,7 +49,9 @@ add_library(LibreDarwinAgentBackend STATIC
     src/operations/ReadIdentityOperation.cpp
     src/operations/GetPhotoOperation.cpp
     src/operations/ReadCertificatesOperation.cpp
+    src/operations/ReadTokenInfoOperation.cpp
     src/operations/SignOperation.cpp
+    src/operations/SignBatchOperation.cpp
     src/operations/ListCredentialsOperation.cpp
     src/operations/ManagePinOperation.cpp
     src/operations/ActivateSigningKeyOperation.cpp)

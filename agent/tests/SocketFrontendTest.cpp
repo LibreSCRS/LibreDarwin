@@ -25,6 +25,7 @@
 #include <LibreSCRS/Agent/cache/CardReadCache.h>
 #include <LibreSCRS/Agent/cache/CredentialCache.h>
 #include <LibreSCRS/Agent/cache/CredentialSnapshotCache.h>
+#include <LibreSCRS/Agent/operations/BatchSignFlow.h>     // isValidBatchDocumentCount, kMin/kMaxBatchDocuments
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h> // SessionFactory
 #include <LibreSCRS/Agent/operations/OperationManager.h>  // setSessionFactoryForTest
 #include <LibreSCRS/Agent/operations/RateLimiter.h>       // kMaxPerWindow
@@ -42,14 +43,18 @@
 #include <unistd.h>
 
 #include <chrono>
+#include <array>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <expected>
 #include <filesystem>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -242,12 +247,15 @@ struct Rig
     }
 
     // Send a request envelope, block for its correlated reply, and return the
-    // decoded reply map.
-    Agent::Wire::CborValue roundTrip(std::uint64_t req, Agent::Wire::Request body)
+    // decoded reply map. @p fds rides SCM_RIGHTS alongside the frame (empty
+    // for every request but Sign, whose `in` field is a 0-based index into
+    // this same vector) — sendFrame already supports this (Framing.h), so no
+    // new wire mechanism is introduced here, only a test-side parameter.
+    Agent::Wire::CborValue roundTrip(std::uint64_t req, Agent::Wire::Request body, std::span<const int> fds = {})
     {
         const int client = connectClient(path);
         const auto bytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{req, std::move(body)}).encode();
-        EXPECT_TRUE(Agent::Wire::sendFrame(client, bytes).has_value());
+        EXPECT_TRUE(Agent::Wire::sendFrame(client, bytes, fds).has_value());
         const auto frame = Agent::Wire::recvFrame(client);
         EXPECT_TRUE(frame.has_value());
         const auto decoded = Agent::Wire::decode(frame->body);
@@ -294,6 +302,46 @@ std::string errName(const Agent::Wire::CborValue& reply)
     }
     const auto* name = err->find("name");
     return (name != nullptr && name->asText() != nullptr) ? *name->asText() : std::string{};
+}
+
+// A regular, seekable temp file holding @p bytes for a Sign input fd — the
+// socket frontend's readDocument only requires a regular file (rejecting
+// pipes/sockets), so a plain unlinked temp file suffices; unlike
+// SignHwSmokeTest.cpp's on-disk fixture this one never needs a name once
+// opened. Portable (no memfd_create, which does not exist on Darwin).
+int makeInputFile(std::string_view bytes)
+{
+    char path[] = "/tmp/ld-fe-sign-XXXXXX";
+    const int fd = ::mkstemp(path);
+    if (fd < 0) {
+        return -1;
+    }
+    ::unlink(path);
+    if (::write(fd, bytes.data(), bytes.size()) != static_cast<ssize_t>(bytes.size())) {
+        ::close(fd);
+        return -1;
+    }
+    ::lseek(fd, 0, SEEK_SET);
+    return fd;
+}
+
+// @p count fresh CAdES-sniffing (0x30 leading byte) regular-file fds, named
+// "doc<N>.pdf" — the Card1.SignBatch analog of makeInputFile above, mirroring
+// LibreLinux's CardObjectOperationsTest.cpp makeDocuments() helper. Returns
+// the BatchDocument entries (fdIndex == position in the returned fd vector)
+// alongside the raw fds so a test can close them after the round trip.
+std::pair<std::vector<Agent::Wire::BatchDocument>, std::vector<int>> makeBatchDocuments(std::size_t count)
+{
+    std::vector<Agent::Wire::BatchDocument> docs;
+    std::vector<int> fds;
+    docs.reserve(count);
+    fds.reserve(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const int fd = makeInputFile(std::string_view{"\x30\x82\x01\x00", 4});
+        docs.push_back(Agent::Wire::BatchDocument{"doc" + std::to_string(i) + ".pdf", static_cast<std::uint64_t>(i)});
+        fds.push_back(fd);
+    }
+    return {std::move(docs), std::move(fds)};
 }
 
 constexpr std::uint32_t kIdentityCap = 1U << 1; // CardCapabilities::IdentityData
@@ -401,6 +449,71 @@ TEST(SocketFrontend, GetStateReturnsSnapshot)
     ASSERT_NE(reply.find("cards"), nullptr);
 }
 
+// Card-state's cardType/atr are optional (absent-until-known) keys, and
+// SocketTransport::updateCardType pushes the post-read authoritative value
+// through a PropertyChanged that the NEXT GetState snapshot also reflects
+// (currentState() reads the SAME m_cards map updateCardType mutates).
+TEST(SocketFrontend, CardStateCarriesAtrAndCardTypeAndUpdateCardTypeFlipsTheSnapshot)
+{
+    Rig rig;
+    SocketTransport* trp = rig.transport.get();
+    dispatch_sync(trp->loopQueue(), ^{
+      Agent::ReaderState r;
+      r.id = Agent::ObjectId(7);
+      r.name = "Test Reader";
+      r.hasCard = true;
+      r.card = Agent::ObjectId(8);
+      trp->publishReader(r);
+      Agent::CardState c;
+      c.id = Agent::ObjectId(8);
+      c.reader = Agent::ObjectId(7);
+      c.capabilities = 0;
+      c.atrHex = "3B7F9600";
+      // cardType left empty here on purpose: "empty until known" -- the
+      // deferred single-candidate resolve is exercised by
+      // CardOperationsIntegrationTest's D-Bus twin, not this low-level inject.
+      trp->publishCard(c);
+    });
+
+    __block std::string handle;
+    dispatch_sync(trp->loopQueue(), ^{
+      for (const auto& cs : trp->currentState().cards) {
+          handle = cs.handle;
+      }
+    });
+    ASSERT_FALSE(handle.empty());
+
+    {
+        const auto reply = rig.roundTrip(1, Agent::Wire::GetState{});
+        const auto* cards = reply.find("cards");
+        ASSERT_NE(cards, nullptr);
+        const auto* cardsArr = cards->asArray();
+        ASSERT_NE(cardsArr, nullptr);
+        ASSERT_EQ(cardsArr->size(), 1u);
+        const auto& card0 = (*cardsArr)[0];
+        ASSERT_NE(card0.find("atr"), nullptr);
+        EXPECT_EQ(*card0.find("atr")->asText(), "3B7F9600");
+        EXPECT_EQ(card0.find("cardType"), nullptr) << "cardType must be ABSENT (not an empty string) until known";
+    }
+
+    dispatch_sync(trp->loopQueue(), ^{
+      trp->updateCardType(handle, "SRB-eID");
+    });
+
+    {
+        const auto reply = rig.roundTrip(2, Agent::Wire::GetState{});
+        const auto* cards = reply.find("cards");
+        ASSERT_NE(cards, nullptr);
+        const auto* cardsArr = cards->asArray();
+        ASSERT_NE(cardsArr, nullptr);
+        ASSERT_EQ(cardsArr->size(), 1u);
+        const auto& card0 = (*cardsArr)[0];
+        ASSERT_NE(card0.find("cardType"), nullptr);
+        EXPECT_EQ(*card0.find("cardType")->asText(), "SRB-eID")
+            << "updateCardType must be reflected in the very next GetState snapshot";
+    }
+}
+
 TEST(SocketFrontend, ReadIdentityUnknownCardIsUnknownCard)
 {
     Rig rig;
@@ -424,6 +537,288 @@ TEST(SocketFrontend, SignWithEmptyCertIsRejected)
     const auto reply =
         rig.roundTrip(5, Agent::Wire::Sign{card, "", 0, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+// ---- tsaUrl / visualSignature method-entry validation ----------------
+
+TEST(SocketFrontend, SignRejectsANonHttpsTsaUrl)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "b-t", "enveloped"};
+    opts.tsaUrl = std::string{"http://tsa.example.com"};
+    const auto reply = rig.roundTrip(50, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+TEST(SocketFrontend, SignRejectsTsaUrlPairedWithTheBaselineLevel)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
+    const auto reply = rig.roundTrip(51, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+TEST(SocketFrontend, SignAcceptsTsaUrlOverrideAtTheTimestampedLevel)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "b-t", "enveloped"};
+    opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
+    // The method-entry gate passes -- an Operation is minted (no "err" key).
+    // SignParams.tsaUrl's exact threading into the LM signing request is
+    // unit-tested card-free in LibreAgent's LmSigningRequestBuilderTest.cpp.
+    const auto reply = rig.roundTrip(52, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "");
+}
+
+TEST(SocketFrontend, SignRejectsVisualSignatureOnANonPadesFormat)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"cades", "b-b", "detached"};
+    opts.visualSignature = Agent::Wire::VisualSignatureOpts{0, 0.0, 0.0, 100.0, 50.0, "x"};
+    const auto reply = rig.roundTrip(53, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+TEST(SocketFrontend, SignAcceptsVisualSignatureOnPades)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    opts.visualSignature = Agent::Wire::VisualSignatureOpts{1, 10.5, 20.25, 150.0, 60.0, "Signed by {cn}"};
+    // The method-entry gate passes -- an Operation is minted (no "err" key).
+    // The exact field-for-field mapping into LM's VisualSignatureParams is
+    // unit-tested card-free in LibreAgent's LmSigningRequestBuilderTest.cpp.
+    const auto reply = rig.roundTrip(54, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "");
+}
+
+// A finite-guard on all four of visualSignature's x/y/width/height: CBOR
+// carries +-inf/NaN canonically, so a hostile/buggy caller can put one on
+// this wire (identically to D-Bus's `d` type on LibreLinux). Without a
+// std::isfinite gate at method entry (SignatureParams::isValidVisualGeometry,
+// shared with LibreLinux's CardObject::Sign), such a value would sail past
+// the plain positivity checks and reach LmSeams's
+// `static_cast<int>(std::lround(...))` narrowing downstream — lround on a
+// non-finite double is unspecified, and the subsequent int narrowing of an
+// out-of-range double is undefined behaviour. These three vectors mirror
+// LibreLinux's CardObjectOperationsTest twins exactly (+inf width, NaN x,
+// -inf y) — authored only, unverified by a real toolchain here (this repo is
+// Apple-only per CMakeLists.txt's `if(NOT APPLE)` gate; see
+// mac-session-checklist-f2.md for the confirm-list).
+TEST(SocketFrontend, SignRejectsVisualSignatureWithNonFiniteWidth)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    opts.visualSignature =
+        Agent::Wire::VisualSignatureOpts{0, 0.0, 0.0, std::numeric_limits<double>::infinity(), 50.0, "x"};
+    const auto reply = rig.roundTrip(55, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+TEST(SocketFrontend, SignRejectsVisualSignatureWithNaNX)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    opts.visualSignature =
+        Agent::Wire::VisualSignatureOpts{0, std::numeric_limits<double>::quiet_NaN(), 0.0, 100.0, 50.0, "x"};
+    const auto reply = rig.roundTrip(56, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+TEST(SocketFrontend, SignRejectsVisualSignatureWithNegativeInfinityY)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    opts.visualSignature =
+        Agent::Wire::VisualSignatureOpts{0, 0.0, -std::numeric_limits<double>::infinity(), 100.0, 50.0, "x"};
+    const auto reply = rig.roundTrip(57, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+// ---- Card1.SignBatch method-entry resolution (entry-gate only — mirrors the
+// Sign entry-gate tests above; none of these wait for the worker to complete,
+// same convention) ----------------------------------------------------------
+
+TEST(SocketFrontend, SignBatchOnNonPkiCardIsUnsupported)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kIdentityCap); // no PKI bit
+    auto [docs, fds] = makeBatchDocuments(1);
+    const auto reply = rig.roundTrip(
+        58, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+    EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
+    for (const int fd : fds) {
+        ::close(fd);
+    }
+}
+
+TEST(SocketFrontend, SignBatchWithEmptyCertIsRejected)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    auto [docs, fds] = makeBatchDocuments(1);
+    const auto reply = rig.roundTrip(
+        59, Agent::Wire::SignBatch{card, "", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+    for (const int fd : fds) {
+        ::close(fd);
+    }
+}
+
+TEST(SocketFrontend, SignBatchRejectsZeroDocuments)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const auto reply = rig.roundTrip(
+        60, Agent::Wire::SignBatch{card, "cert-id", {}, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
+    EXPECT_EQ(errName(reply), "InvalidRequest");
+}
+
+// Pins that handleSignBatch's method-entry gate calls the SAME shared
+// predicate LibreAgent's BatchSignFlow uses (Operations::
+// isValidBatchDocumentCount) — not a parallel, driftable copy of the 1-12
+// range — mirroring LibreLinux's
+// CardObjectOperations.SignBatchDocumentCountGateUsesTheSharedValidityPredicate.
+TEST(SocketFrontend, SignBatchDocumentCountGateUsesTheSharedValidityPredicate)
+{
+    EXPECT_TRUE(Agent::Operations::isValidBatchDocumentCount(1));
+    EXPECT_TRUE(Agent::Operations::isValidBatchDocumentCount(12));
+    EXPECT_FALSE(Agent::Operations::isValidBatchDocumentCount(0));
+    EXPECT_FALSE(Agent::Operations::isValidBatchDocumentCount(13));
+}
+
+TEST(SocketFrontend, SignBatchAcceptsOneDocumentAndMintsOp)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    auto [docs, fds] = makeBatchDocuments(1);
+    const auto reply = rig.roundTrip(
+        61, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+    EXPECT_EQ(errName(reply), "");
+    ASSERT_NE(reply.find("op"), nullptr);
+    for (const int fd : fds) {
+        ::close(fd);
+    }
+}
+
+// Exercises a genuine multi-document batch at exactly kMaxBatchDocuments
+// (12): the entry gate does not special-case any value inside
+// [1, kMaxBatchDocuments] — it is the ONE isValidBatchDocumentCount range
+// check — so this, together with the 1-document and 0-document cases
+// above/below, covers the gate's live dispatch path.
+TEST(SocketFrontend, SignBatchAcceptsATwelveDocumentBatchAndMintsOp)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    auto [docs, fds] = makeBatchDocuments(Agent::Operations::kMaxBatchDocuments);
+    const auto reply = rig.roundTrip(
+        62, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+    EXPECT_EQ(errName(reply), "");
+    ASSERT_NE(reply.find("op"), nullptr);
+    for (const int fd : fds) {
+        ::close(fd);
+    }
+}
+
+TEST(SocketFrontend, SignBatchRejectsThirteenDocuments)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    auto [docs, fds] = makeBatchDocuments(Agent::Operations::kMaxBatchDocuments + 1);
+    const auto reply = rig.roundTrip(
+        63, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+    EXPECT_EQ(errName(reply), "InvalidRequest");
+    for (const int fd : fds) {
+        ::close(fd);
+    }
+}
+
+// Proves SignBatch reuses the EXACT SAME options resolver Sign does (not a
+// parallel, driftable copy): the identical non-https-tsaUrl rejection Sign
+// already exercises above must fire here too.
+TEST(SocketFrontend, SignBatchRejectsANonHttpsTsaUrlViaTheSharedOptionsResolver)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    auto [docs, fds] = makeBatchDocuments(2);
+    Agent::Wire::SignOpts opts{"pades", "b-t", "enveloped"};
+    opts.tsaUrl = std::string{"http://tsa.example.com"};
+    const auto reply = rig.roundTrip(64, Agent::Wire::SignBatch{card, "cert-id", docs, opts}, fds);
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+    for (const int fd : fds) {
+        ::close(fd);
+    }
+}
+
+// Entry gate (rate limit): a valid SignBatch request from an over-cap caller
+// is RateLimited before any document is read — mirrors
+// ManagePinOverCapCallerIsRateLimited's pre-exhaust pattern, applied to the
+// Sign rate-limit action SignBatch shares with a single Sign.
+TEST(SocketFrontend, SignBatchOverCapCallerIsRateLimited)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const Agent::CallerToken caller{kFirstConnCaller};
+    for (std::size_t i = 0; i < Agent::Operations::RateLimiter::kMaxPerWindow; ++i) {
+        ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
+    }
+    auto [docs, fds] = makeBatchDocuments(1);
+    const auto reply = rig.roundTrip(
+        65, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+    EXPECT_EQ(errName(reply), "RateLimited");
+    for (const int fd : fds) {
+        ::close(fd);
+    }
+}
+
+// Gate ORDER (rate limit BEFORE the document-count gate): an over-cap caller
+// sending a ZERO-document batch — entry-invalid on its own — must still see
+// RateLimited, not InvalidRequest, proving handleSignBatch checks the limiter
+// before isValidBatchDocumentCount, mirroring LibreLinux's
+// SignBatchRateLimitFiresBeforeTheDocumentCountGate.
+TEST(SocketFrontend, SignBatchRateLimitFiresBeforeTheDocumentCountGate)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const Agent::CallerToken caller{kFirstConnCaller};
+    for (std::size_t i = 0; i < Agent::Operations::RateLimiter::kMaxPerWindow; ++i) {
+        ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
+    }
+    const auto reply = rig.roundTrip(
+        66, Agent::Wire::SignBatch{card, "cert-id", {}, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
+    EXPECT_EQ(errName(reply), "RateLimited");
 }
 
 TEST(SocketFrontend, SetReadOnlyConfigKeyIsRejected)

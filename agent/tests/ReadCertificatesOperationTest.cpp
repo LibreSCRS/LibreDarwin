@@ -87,6 +87,29 @@ public:
     }
 };
 
+// A trust verifier that fails the test if invoked -- the cache-hit path must
+// never re-derive a verdict for an already-cached (already-verdicted) cert.
+class UnusedTrustVerifier final : public TrustVerifier
+{
+public:
+    TrustVerdict verify(std::span<const std::uint8_t>, std::span<const std::vector<std::uint8_t>>) override
+    {
+        ADD_FAILURE() << "trustVerifier must not run when the cert cache is hot";
+        return TrustVerdict{};
+    }
+};
+
+// Deterministic fixed-verdict fake for the cold-read path, which is not this
+// test's concern (CertReadFlowTest owns the verdict-mapping matrix).
+class FixedTrustVerifier final : public TrustVerifier
+{
+public:
+    TrustVerdict verify(std::span<const std::uint8_t>, std::span<const std::vector<std::uint8_t>>) override
+    {
+        return TrustVerdict{CertTrustStatus::Unknown, {}};
+    }
+};
+
 class UnusedPrompter final : public PrompterClientBase
 {
 public:
@@ -139,6 +162,7 @@ TEST(ReadCertificatesOperation, CacheHitSkipsFlowAndEmitsCertificates)
     readCache.putCertificates("card-A", certsFixture());
     auto holder = makeUnusedHolder();
     UnusedCertReader certReader;
+    UnusedTrustVerifier trustVerifier;
     UnusedPrompter prompter;
     PromptSerializer serializer;
     CredentialCache credCache;
@@ -151,6 +175,7 @@ TEST(ReadCertificatesOperation, CacheHitSkipsFlowAndEmitsCertificates)
                                  ReadCertificatesOperation::Deps{
                                      .holder = holder.get(),
                                      .certReader = certReader,
+                                     .trustVerifier = trustVerifier,
                                      .prompter = prompter,
                                      .serializer = serializer,
                                      .credentials = credCache,
@@ -178,6 +203,7 @@ TEST(ReadCertificatesOperation, ColdReadPopulatesTheCache)
     CardReadCache readCache; // starts cold
     auto holder = makeWorkingHolder();
     OkCertReader certReader(certsFixture());
+    FixedTrustVerifier trustVerifier;
     UnusedPrompter prompter;
     PromptSerializer serializer;
     CredentialCache credCache;
@@ -190,6 +216,7 @@ TEST(ReadCertificatesOperation, ColdReadPopulatesTheCache)
                                  ReadCertificatesOperation::Deps{
                                      .holder = holder.get(),
                                      .certReader = certReader,
+                                     .trustVerifier = trustVerifier,
                                      .prompter = prompter,
                                      .serializer = serializer,
                                      .credentials = credCache,

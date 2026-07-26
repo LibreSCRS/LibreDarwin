@@ -42,7 +42,10 @@ std::string uniquePath()
 }
 
 // A fake prompter: binds `path`, accepts connections, and replies to each
-// request with a fixed reply. Stops on destruction.
+// request with a fixed reply. Also captures the LAST PromptRequest it parsed
+// off the wire (mirrors FakeChangePrompter's capture below) so a test can
+// assert what MacPrompterClient actually sent, not just what came back.
+// Stops on destruction.
 class FakePrompter
 {
 public:
@@ -68,6 +71,20 @@ public:
         std::filesystem::remove(m_path);
     }
 
+    // Blocks until one request has been captured (bounded, same discipline as
+    // FakeChangePrompter::waitUntilServed).
+    void waitUntilServed()
+    {
+        std::unique_lock lock(m_mutex);
+        if (!m_servedCv.wait_for(lock, std::chrono::seconds(30), [this] { return m_served; })) {
+            FAIL() << "FakePrompter: no request served within 30s";
+        }
+    }
+    [[nodiscard]] const std::optional<wire::PromptRequest>& capturedRequest() const
+    {
+        return m_request;
+    }
+
 private:
     void serve()
     {
@@ -78,13 +95,31 @@ private:
             }
             auto req = Agent::Wire::recvFrame(c);
             if (req.has_value()) {
+                {
+                    std::lock_guard lock(m_mutex);
+                    auto parsed = wire::parsePrompterRequest(req->body);
+                    if (parsed.has_value()) {
+                        if (auto* pr = std::get_if<wire::PromptRequest>(&*parsed)) {
+                            m_request = std::move(*pr);
+                        }
+                    }
+                }
                 static_cast<void>(Agent::Wire::sendFrame(c, wire::toCbor(m_reply).encode()));
+                {
+                    std::lock_guard lock(m_mutex);
+                    m_served = true;
+                }
+                m_servedCv.notify_all();
             }
             ::close(c);
         }
     }
     std::string m_path;
     wire::PromptReply m_reply;
+    std::optional<wire::PromptRequest> m_request;
+    std::mutex m_mutex;
+    std::condition_variable m_servedCv;
+    bool m_served{false};
     int m_listen{-1};
     std::atomic<bool> m_stop{false};
     std::thread m_thread;
@@ -238,6 +273,103 @@ TEST(MacPrompterClient, MissingPrompterFailsWithError)
     MacPrompterClient client("/tmp/ld-nonexistent-" + std::to_string(std::rand()) + ".sock");
     const auto r = client.requestPin(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Error);
+}
+
+// The batch-sign consent hop: PromptOptions::artifacts (the UNTRUSTED
+// per-document display-name list BatchSignFlow populates) and the TRUSTED
+// "signature-batch" artifact token both cross into the wire PromptRequest
+// unchanged — proving the daemon-side plumbing this task adds, mirroring
+// LibreLinux's PrompterClient.cpp forwarding the same option onto its own
+// wire. The rendering side (PromptWindow) is untouched here.
+TEST(MacPrompterClient, RequestPinForwardsArtifactsAndTheBatchTokenToTheWireRequest)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled; // no secret needed for this assertion
+    FakePrompter server(path, reply);
+
+    Agent::PromptOptions options;
+    options.requester = "example.client";
+    options.artifact = "signature-batch";
+    options.artifacts = {"a.pdf", "b.pdf", "c.pdf"};
+
+    MacPrompterClient client(path);
+    static_cast<void>(client.requestPin(options));
+
+    server.waitUntilServed();
+    const auto& req = server.capturedRequest();
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->requester, "example.client");
+    EXPECT_EQ(req->artifact, "signature-batch");
+    EXPECT_EQ(req->artifacts, (std::vector<std::string>{"a.pdf", "b.pdf", "c.pdf"}));
+}
+
+// A non-batch prompt (the common case) must NOT grow an artifacts list out
+// of nowhere — proving the empty-by-default posture, not just the populated
+// case above.
+TEST(MacPrompterClient, RequestPinLeavesArtifactsEmptyForANonBatchPrompt)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled;
+    FakePrompter server(path, reply);
+
+    Agent::PromptOptions options;
+    options.artifact = "signature";
+
+    MacPrompterClient client(path);
+    static_cast<void>(client.requestPin(options));
+
+    server.waitUntilServed();
+    const auto& req = server.capturedRequest();
+    ASSERT_TRUE(req.has_value());
+    EXPECT_TRUE(req->artifacts.empty());
+}
+
+// Retry context (CredentialCache::applyRetryContext on the agent core):
+// PromptOptions::attempt/lastError cross into the wire PromptRequest
+// unchanged, mirroring LibreLinux's PrompterClient.cpp forwarding the same
+// options onto its own wire. The rendering side (PromptWindow) is untouched
+// here.
+TEST(MacPrompterClient, RequestCanForwardsRetryContextToTheWireRequest)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled; // no secret needed for this assertion
+    FakePrompter server(path, reply);
+
+    Agent::PromptOptions options;
+    options.attempt = 2;
+    options.lastError = "librescrs.error.preRead.authFailed";
+
+    MacPrompterClient client(path);
+    static_cast<void>(client.requestCan(options));
+
+    server.waitUntilServed();
+    const auto& req = server.capturedRequest();
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->attempt, 2u);
+    EXPECT_EQ(req->lastError, "librescrs.error.preRead.authFailed");
+}
+
+// The first-ever prompt for a card (the common case): PromptOptions defaults
+// (attempt == 0, lastError empty) must not grow retry context out of
+// nowhere.
+TEST(MacPrompterClient, RequestCanLeavesRetryContextAbsentForAFirstPrompt)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled;
+    FakePrompter server(path, reply);
+
+    MacPrompterClient client(path);
+    static_cast<void>(client.requestCan(Agent::PromptOptions{}));
+
+    server.waitUntilServed();
+    const auto& req = server.capturedRequest();
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->attempt, 0u);
+    EXPECT_TRUE(req->lastError.empty());
 }
 
 TEST(MacPrompterClient, ChangeOkReplyDeliversBothSecretsAndDuplicatesBounds)

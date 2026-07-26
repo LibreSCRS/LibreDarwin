@@ -113,6 +113,15 @@ public:
     // Loop-thread only (wrap in post() from another thread).
     void broadcastQuiesced(Agent::Wire::QuiesceReason reason);
 
+    // Update the published card-state's cardType and broadcast a
+    // PropertyChanged carrying the full new value -- the post-read
+    // authoritative update (IdentityReadFlow resolving CardData::cardType via
+    // ReadIdentity or a GetPhoto cache miss). A no-op if @p cardHandle was
+    // withdrawn meanwhile, or if the value did not actually change. Loop-thread
+    // only (wrap in post() from another thread -- SocketFrontend's
+    // onCardType callback does exactly that).
+    void updateCardType(const std::string& cardHandle, const std::string& cardType);
+
     // Resolve a live CallerToken to its captured peer credentials (for the
     // Authorizer's SecTask check). Loop-thread only; nullopt if the connection
     // is gone.

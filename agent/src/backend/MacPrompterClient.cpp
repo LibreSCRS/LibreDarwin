@@ -54,6 +54,16 @@ wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptio
     r.artifact = o.artifact;
     r.minLength = o.minLength;
     r.maxLength = o.maxLength;
+    // UNTRUSTED per-document display names of a Card1.SignBatch consent
+    // (BatchSignFlow's own PromptOptions::artifacts); empty for every prompt
+    // that is not a batch sign. Mirrors LibreLinux's PrompterClient.cpp
+    // marshaling the same option onto its own wire.
+    r.artifacts = o.artifacts;
+    // Retry context (CredentialCache::applyRetryContext): both stay at their
+    // default (0 / empty) on the first-ever prompt for a card, so both are
+    // omitted from the wire then — same convention as every other field here.
+    r.attempt = o.attempt;
+    r.lastError = o.lastError;
     return r;
 }
 

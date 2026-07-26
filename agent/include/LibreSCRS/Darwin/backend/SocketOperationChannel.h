@@ -46,6 +46,13 @@ public:
     void emitFinished(Agent::Operations::OperationStatus status, Agent::ErrorCode code, std::string_view msgKey,
                       std::string_view msgFallback) noexcept override;
     [[nodiscard]] bool emitResult(const Agent::Operations::ResultPayload& result) noexcept override;
+    // Progressive delivery: the socket "OpIdentityGroup" event, strictly
+    // ahead of emitResult above for the SAME op. Only ever invoked when this
+    // channel backs a ReadIdentity operation (GetPhotoOperation wires a
+    // NullGroupSink instead of this channel's owning OperationBase, since its
+    // own Photo1-shaped result has no group event at all) -- so this channel
+    // needs no per-kind flag of its own to know whether to marshal the event.
+    void emitGroup(const Agent::GroupSnapshot& group) noexcept override;
 
 private:
     SocketTransport& m_transport;

@@ -86,10 +86,29 @@ private:
     // Per-request handlers (loop thread). Each replies via transport.sendTo.
     void handleHello(std::uint64_t connId, std::uint64_t req, const Agent::Wire::Hello& msg);
     void handleGetState(std::uint64_t connId, std::uint64_t req);
+    // Card-independent, synchronous visible-signature layout preview —
+    // no card, no Operation object (unlike every OTHER request above). Both
+    // reply directly off Operations::layoutVisualSignature/
+    // appearanceFontBytes (LmSeams.h), the SAME production entry point the
+    // D-Bus daemon's Manager1 calls through.
+    void handleLayoutVisual(std::uint64_t connId, std::uint64_t req, const Agent::Wire::LayoutVisual& msg);
+    void handleGetAppearanceFont(std::uint64_t connId, std::uint64_t req);
     void handleReadIdentity(SocketTransport::Inbound& in, const Agent::Wire::ReadIdentity& msg);
     void handleGetPhoto(SocketTransport::Inbound& in, const Agent::Wire::GetPhoto& msg);
     void handleReadCertificates(SocketTransport::Inbound& in, const Agent::Wire::ReadCertificates& msg);
+    // Lightweight token-info read. Result rides the SAME Identity1-shaped
+    // op-result-ready arm as ReadIdentity — no new result shape. Gates on
+    // PKI (token info is PKI-adjacent, the same bit ReadCertificates uses).
+    void handleReadTokenInfo(SocketTransport::Inbound& in, const Agent::Wire::ReadTokenInfo& msg);
     void handleSign(SocketTransport::Inbound& in, const Agent::Wire::Sign& msg);
+    // N documents signed under ONE consent + credential prompt (see
+    // Agent::Operations::BatchSignFlow). Entry gates mirror Sign's own
+    // ordering exactly (capability -> cert -> authorize -> rate-limit, ONE
+    // charge for the whole dispatch) plus the shared document-count gate;
+    // options are resolved through the SAME resolveSignOptions helper Sign
+    // uses, sniffing format off the FIRST document only. No GetSignResult-style
+    // pull recovery exists for this kind (the CDDL pins recovery Sign-only).
+    void handleSignBatch(SocketTransport::Inbound& in, const Agent::Wire::SignBatch& msg);
     void handleListCredentials(SocketTransport::Inbound& in, const Agent::Wire::ListCredentials& msg);
     void handleManagePin(SocketTransport::Inbound& in, const Agent::Wire::ManagePin& msg);
     void handleActivateSigningKey(SocketTransport::Inbound& in, const Agent::Wire::ActivateSigningKey& msg);
@@ -126,8 +145,11 @@ private:
     void scheduleCardResolve(const Agent::CardState& card);
     // The core's OWN vocabulary, not the wire mirror: this feeds
     // A::CardState::preReadAuth (never crosses the CBOR wire from here —
-    // SocketTransport::publishCard does that conversion).
-    void applyCardResolution(Agent::CardState card, std::uint32_t caps, LibreSCRS::Auth::PreReadAuthMethod preAuth);
+    // SocketTransport::publishCard does that conversion). @p cardType is the
+    // single held-session candidate's pluginId (empty if ambiguous/no match),
+    // resolved alongside caps/preAuth at the same deferred point.
+    void applyCardResolution(Agent::CardState card, std::uint32_t caps, LibreSCRS::Auth::PreReadAuthMethod preAuth,
+                             const std::string& cardType);
 
     // A Sign artifact stashed for the grace-window GetSignResult recovery.
     void stashSignArtifact(std::uint64_t opId, const Agent::CallerToken& owner,

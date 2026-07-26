@@ -47,27 +47,36 @@ std::string_view fieldTypeName(A::FieldType t)
     return "text";
 }
 
+// One group's field map (photos stripped) -- shared by toIdentityResult's
+// per-group loop below and emitGroup further down so the two conversions of
+// this SAME cell shape can never drift apart.
+std::map<std::string, A::Wire::IdentityField> toIdentityGroupFields(const A::GroupSnapshot& group)
+{
+    std::map<std::string, A::Wire::IdentityField> fields;
+    for (const auto& f : group.fields) {
+        if (f.type == A::FieldType::Photo) {
+            continue; // Identity1 omits photos
+        }
+        A::Wire::IdentityField cell;
+        cell.labelKey = f.labelKey;
+        cell.labelFallback = f.labelFallback;
+        cell.type = std::string(fieldTypeName(f.type));
+        if (f.type == A::FieldType::Binary) {
+            cell.value = f.binaryValue;
+        } else {
+            cell.value = f.textValue;
+        }
+        fields.emplace(f.fieldKey, std::move(cell));
+    }
+    return fields;
+}
+
 // CardReadSnapshot -> wire IdentityResult (photos stripped; they ride GetPhoto).
 A::Wire::IdentityResult toIdentityResult(const A::CardReadSnapshot& snap)
 {
     A::Wire::IdentityResult out;
     for (const auto& group : snap.groups) {
-        std::map<std::string, A::Wire::IdentityField> fields;
-        for (const auto& f : group.fields) {
-            if (f.type == A::FieldType::Photo) {
-                continue; // Identity1 omits photos
-            }
-            A::Wire::IdentityField cell;
-            cell.labelKey = f.labelKey;
-            cell.labelFallback = f.labelFallback;
-            cell.type = std::string(fieldTypeName(f.type));
-            if (f.type == A::FieldType::Binary) {
-                cell.value = f.binaryValue;
-            } else {
-                cell.value = f.textValue;
-            }
-            fields.emplace(f.fieldKey, std::move(cell));
-        }
+        auto fields = toIdentityGroupFields(group);
         if (!fields.empty()) {
             out.fields.emplace(group.groupKey, std::move(fields));
         }
@@ -201,6 +210,28 @@ void SocketOperationChannel::emitPropertiesChanged() noexcept
     }
 }
 
+void SocketOperationChannel::emitGroup(const A::GroupSnapshot& group) noexcept
+{
+    // Same value-capture pattern as every other emit* here: connId/opId are
+    // plain integers, and `t` is a stable long-lived SocketTransport*, so a
+    // posted closure that outlives this channel's own destruction (the op
+    // torn down while its worker thread is mid-stream is the scenario this
+    // guards) touches nothing that could have been freed -- it either finds
+    // the connection still live (sendTo) or safely no-ops.
+    try {
+        A::Wire::OpIdentityGroup ev;
+        ev.op = m_opId;
+        ev.groupKey = group.groupKey;
+        ev.fields = toIdentityGroupFields(group);
+        const A::Wire::CborValue msg = A::Wire::toCbor(ev);
+        const std::uint64_t connId = m_connId;
+        SocketTransport* t = &m_transport;
+        t->post([t, connId, msg] { t->sendTo(connId, msg); });
+    } catch (...) {
+        log::warn("op-channel: dropped OpIdentityGroup emit (encode/post failure)");
+    }
+}
+
 void SocketOperationChannel::emitFinished(Ops::OperationStatus status, A::ErrorCode code, std::string_view msgKey,
                                           std::string_view msgFallback) noexcept
 {
@@ -275,6 +306,35 @@ try {
                 if (m_onSignArtifact) {
                     m_onSignArtifact(m_opId, arm); // stash for GetSignResult recovery
                 }
+            } else if constexpr (std::is_same_v<T, Ops::BatchSignResult>) {
+                // No m_onSignArtifact stash here (unlike SignedArtifact above):
+                // SignBatch has no GetSignResult-style pull recovery on this
+                // wire (the CDDL pins recovery Sign-only), so nothing needs
+                // stashing for a batch row.
+                A::Wire::SignBatchResult sbr;
+                sbr.rows.reserve(arm.size());
+                for (const auto& row : arm) {
+                    // A failed row's `bytes` is empty (BatchSignFlow never
+                    // signs it); anonFdFromBytes on an empty span still
+                    // produces a REAL, valid, zero-length fd (mkstemp +
+                    // immediate unlink, no bytes written) — never omitted,
+                    // never -1, mirroring the wire's pinned zero-length-
+                    // sealed-memfd convention for a failed row.
+                    auto fd = wire::anonFdFromBytes(row.bytes);
+                    if (!fd) {
+                        ok = false;
+                        return;
+                    }
+                    A::Wire::SignBatchRow wr;
+                    wr.displayName = row.displayName;
+                    wr.artifact = static_cast<std::uint64_t>(fds.size());
+                    wr.meta =
+                        A::Wire::SignMeta{row.meta.format, row.meta.level, row.meta.tsaUsed, row.meta.chainComplete};
+                    wr.code = row.code;
+                    fds.push_back(std::move(*fd));
+                    sbr.rows.push_back(std::move(wr));
+                }
+                ev.result = std::move(sbr);
             } else if constexpr (std::is_same_v<T, Ops::CredentialResult>) {
                 // Field-for-field hop onto the wire mirror types (LibreAgent's
                 // WireParityChecks pins them in lockstep with the agent value

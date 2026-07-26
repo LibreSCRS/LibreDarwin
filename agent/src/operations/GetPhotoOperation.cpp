@@ -19,6 +19,11 @@ std::optional<CardReadSnapshot> GetPhotoOperation::obtainSnapshot()
     if (auto cached = m_deps.readCache.get(m_deps.cardKey)) {
         return cached;
     }
+    // This op's cache-miss read reuses IdentityReadFlow, but the Operation
+    // object here exports Photo1, not Identity1 -- there is no Group event
+    // to emit, so progressive delivery is gated OFF at this wiring site (see
+    // NullGroupSink's own doc comment), never inside the flow or the channel.
+    static NullGroupSink noGroupStream;
     IdentityReadFlow flow(IdentityReadFlowDeps{
         .holder = *m_deps.holder,
         .reader = m_deps.reader,
@@ -26,10 +31,12 @@ std::optional<CardReadSnapshot> GetPhotoOperation::obtainSnapshot()
         .serializer = m_deps.serializer,
         .cache = m_deps.credentials,
         .phaseSink = *this,
+        .groupSink = noGroupStream,
         .cardKey = m_deps.cardKey,
         .requester = m_deps.requester,
         .artifact = m_deps.artifact,
         .token = token(),
+        .onCardType = m_deps.onCardType,
     });
     auto result = flow.run();
     if (result.outcome != IdentityReadFlow::Outcome::Ok || !result.snapshot) {

@@ -1,19 +1,18 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
-#include "operations/ReadCertificatesOperation.h"
-#include <cstdint>
+#include "operations/ReadTokenInfoOperation.h"
 #include <utility>
 
 namespace LibreSCRS::Agent::Operations {
 
-ReadCertificatesOperation::ReadCertificatesOperation(std::unique_ptr<OperationChannel> channel, Deps deps,
-                                                     std::shared_ptr<OperationState> state)
+ReadTokenInfoOperation::ReadTokenInfoOperation(std::unique_ptr<OperationChannel> channel, Deps deps,
+                                               std::shared_ptr<OperationState> state)
     : OperationBase(std::move(channel), std::move(state),
                     [prompter = &deps.prompter]() noexcept { prompter->cancel(); }),
       m_deps(std::move(deps))
 {}
 
-void ReadCertificatesOperation::doWork()
+void ReadTokenInfoOperation::doWork()
 {
     // Guard a null (mis-wired) session holder so doWork finishes with an
     // internal error instead of dereferencing nullptr.
@@ -25,30 +24,15 @@ void ReadCertificatesOperation::doWork()
     setIndeterminate(true);
     setPhase(static_cast<std::uint32_t>(OperationPhase::Connecting));
 
-    // Cache hit: serve the certs from RAM without opening a session or re-walking
-    // the card. The per-insertion cache is dropped on CardRemoved.
-    if (auto cached = m_deps.readCache.getCertificates(m_deps.cardKey)) {
-        // Backend teardown in progress: skip the wire completion (the reply
-        // channel is being torn down), matching the miss-path gate below —
-        // emitResult is not shutdown-gated, finish() is.
-        if (shutdownRequested()) {
-            return;
-        }
-        static_cast<void>(emitResult(ResultPayload{*cached}));
-        finish(OperationStatus::Ok, ErrorCode::None, "op.ok", "Certificates returned");
-        return;
-    }
-
-    CertReadFlow flow(CertReadFlowDeps{
+    TokenInfoReadFlow flow(TokenInfoReadFlowDeps{
         .holder = *m_deps.holder,
-        .certReader = m_deps.certReader,
-        .trustVerifier = m_deps.trustVerifier,
+        .reader = m_deps.reader,
         .prompter = m_deps.prompter,
         .serializer = m_deps.serializer,
         .cache = m_deps.credentials,
         .phaseSink = *this,
         .cardKey = m_deps.cardKey,
-        .reader = m_deps.readerName,
+        .readerName = m_deps.readerName,
         .requester = m_deps.requester,
         .artifact = m_deps.artifact,
         .token = token(),
@@ -57,29 +41,27 @@ void ReadCertificatesOperation::doWork()
 
     // Backend teardown in progress: the reply channel + broker are being torn
     // down, so skip the wire completion (the client observes agent-gone via the
-    // dropped connection). The flow already bailed at its post-read gate on the
+    // dropped connection). The flow already bailed at its post-open gate on the
     // shutdown-cancel token, before touching any torn-down member.
     if (shutdownRequested()) {
         return;
     }
 
-    if (result.outcome == CertReadFlow::Outcome::Cancelled) {
+    if (result.outcome == TokenInfoReadFlow::Outcome::Cancelled) {
         finish(OperationStatus::Cancelled, result.code, std::move(result.msgKey), std::move(result.msgFallback));
         return;
     }
-    if (result.outcome != CertReadFlow::Outcome::Ok) {
+    if (result.outcome != TokenInfoReadFlow::Outcome::Ok || !result.snapshot) {
         finish(OperationStatus::Error, result.code, std::move(result.msgKey), std::move(result.msgFallback));
         return;
     }
 
-    // Populate the cache so the next read serves from RAM. Past the
-    // shutdownRequested() gate above, so it never writes during teardown.
-    m_deps.readCache.putCertificates(m_deps.cardKey, result.certs);
-
-    // Emit Certificates1.Result BEFORE Finished (strict ordering contract).
-    // Certificates1 delivers inline (no memfd seal), so delivery cannot fail —
-    // discard the always-true status.
-    static_cast<void>(emitResult(ResultPayload{result.certs}));
+    // Emit Identity1.Result BEFORE Finished (strict ordering contract) — the
+    // EXISTING result shape, no new interface: a single "token" group, or an
+    // empty one (zero fields) for an unsupported/best-effort-miss plugin,
+    // which is still SUCCESS. Identity1 delivers inline (no memfd seal), so
+    // delivery cannot fail — discard the always-true status.
+    static_cast<void>(emitResult(ResultPayload{*result.snapshot}));
     finish(OperationStatus::Ok, ErrorCode::None, std::move(result.msgKey), std::move(result.msgFallback));
 }
 
