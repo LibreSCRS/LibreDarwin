@@ -525,6 +525,15 @@ std::string neutralizeDisplayName(std::string name)
             c = ' ';
         }
     }
+    // The Cocoa text engine also honours the multi-byte Unicode separators as
+    // mandatory line breaks (U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR,
+    // U+0085 NEXT LINE), which the byte-wise pass above cannot catch; collapse
+    // each to one space so they cannot forge extra lines either.
+    for (const std::string_view sep : {"\xE2\x80\xA8", "\xE2\x80\xA9", "\xC2\x85"}) {
+        for (std::size_t pos = 0; (pos = name.find(sep, pos)) != std::string::npos; ++pos) {
+            name.replace(pos, sep.size(), " ");
+        }
+    }
     if (name.size() > kMaxBytes) {
         std::size_t cut = kMaxBytes;
         while (cut > 0 && (static_cast<unsigned char>(name[cut]) & 0xC0) == 0x80) {

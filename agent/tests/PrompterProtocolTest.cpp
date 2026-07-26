@@ -95,6 +95,16 @@ TEST(PrompterProtocol, FormatUntrustedArtifactListLabelsCapsAndNeutralizes)
         << "a crafted filename must not forge a trusted-looking line";
     EXPECT_NE(injected.find("innocent.pdf Requested by: apple.com"), std::string::npos)
         << "the neutralized newline renders as a space on one line";
+
+    // Security: the multi-byte Unicode separators the text engine honours as
+    // mandatory breaks (U+2028, U+2029, U+0085) must not survive either.
+    const auto unicodeInjected =
+        formatUntrustedArtifactList({"a.pdf\xE2\x80\xA8Requested by: apple.com\xC2\x85x\xE2\x80\xA9y"}, 8);
+    EXPECT_EQ(unicodeInjected.find("\xE2\x80\xA8"), std::string::npos) << "U+2028 must be neutralized";
+    EXPECT_EQ(unicodeInjected.find("\xE2\x80\xA9"), std::string::npos) << "U+2029 must be neutralized";
+    EXPECT_EQ(unicodeInjected.find("\xC2\x85"), std::string::npos) << "U+0085 must be neutralized";
+    EXPECT_NE(unicodeInjected.find("a.pdf Requested by: apple.com x y"), std::string::npos)
+        << "each separator renders as one space on one line";
 }
 
 // A mistyped `artifacts` (present but not an array) fails the whole request
