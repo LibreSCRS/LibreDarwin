@@ -13,7 +13,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <string>
 #include <utility>
+#include <vector>
 
 namespace LibreSCRS::Darwin {
 
@@ -69,7 +71,7 @@ NSString* retryErrorLine(std::uint32_t attempt, const std::string& lastError)
 // immediately above the rest of the informative text, mirroring the Linux
 // PromptDialog placing its retry label above the input widget.
 NSString* informativeText(const std::string& description, const std::string& requester, const std::string& artifact,
-                          NSString* retryError)
+                          const std::vector<std::string>& artifacts, NSString* retryError)
 {
     NSMutableString* info = [NSMutableString string];
     if (retryError.length) {
@@ -81,7 +83,17 @@ NSString* informativeText(const std::string& description, const std::string& req
     if (!requester.empty()) {
         [info appendFormat:@"%@Requested by: %@", info.length ? @"\n" : @"", nsstr(requester)];
     }
-    if (!artifact.empty()) {
+    // A batch sign carries the UNTRUSTED per-document names in `artifacts`: list
+    // them plainly BELOW the trusted requester line (the formatter neutralizes
+    // and elides each name). A single-document request instead names its one
+    // trusted artifact inline; for a batch, `artifact` is only the category
+    // token ("signature-batch"), so it is not shown as a document.
+    if (!artifacts.empty()) {
+        const std::string block = wire::formatUntrustedArtifactList(artifacts, 8);
+        if (!block.empty()) {
+            [info appendFormat:@"%@%@", info.length ? @"\n" : @"", nsstr(block)];
+        }
+    } else if (!artifact.empty()) {
         [info appendFormat:@"%@Document: %@", info.length ? @"\n" : @"", nsstr(artifact)];
     }
     return info;
@@ -141,8 +153,8 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
                                                                       : "PIN";
           alert.messageText =
               req.title.empty() ? [NSString stringWithFormat:@"Enter your %s", kindLabel] : nsstr(req.title);
-          alert.informativeText =
-              informativeText(req.description, req.requester, req.artifact, retryErrorLine(req.attempt, req.lastError));
+          alert.informativeText = informativeText(req.description, req.requester, req.artifact, req.artifacts,
+                                                  retryErrorLine(req.attempt, req.lastError));
           [alert addButtonWithTitle:@"OK"];
           [alert addButtonWithTitle:@"Cancel"];
 
@@ -197,7 +209,8 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
           // RequestSecrets carries no retry context (change_pin is never a
           // CAN/MRZ retry) -- nil, same as the single-secret path's
           // first-ever prompt.
-          alert.informativeText = informativeText(req.description, req.requester, req.artifact, nil);
+          // RequestSecrets (change_pin) carries no per-document artifacts list.
+          alert.informativeText = informativeText(req.description, req.requester, req.artifact, {}, nil);
           [alert addButtonWithTitle:@"OK"];
           [alert addButtonWithTitle:@"Cancel"];
 

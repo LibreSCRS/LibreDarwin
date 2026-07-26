@@ -8,9 +8,13 @@
 
 #include <LibreSCRS/Agent/wire/Framing.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <optional>
+#include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace LibreSCRS::Darwin::wire {
 
@@ -504,6 +508,51 @@ void sendPromptReplyScrubbed(int connFd, MultiPromptReply& reply) noexcept
     sendReplyAndZeroWire(connFd, reply);
     secureZero(reply.primary);
     secureZero(reply.secondary);
+}
+
+namespace {
+
+// Make one untrusted display name safe to drop into a single line of the prompt
+// window: every control character (newlines included) becomes a space so the
+// name cannot forge extra lines, and the result is elided on a UTF-8 boundary so
+// it stays valid UTF-8 (nsstr rejects malformed input) and bounded in length.
+std::string neutralizeDisplayName(std::string name)
+{
+    constexpr std::size_t kMaxBytes = 128;
+    for (char& c : name) {
+        const auto u = static_cast<unsigned char>(c);
+        if (u < 0x20 || u == 0x7f) {
+            c = ' ';
+        }
+    }
+    if (name.size() > kMaxBytes) {
+        std::size_t cut = kMaxBytes;
+        while (cut > 0 && (static_cast<unsigned char>(name[cut]) & 0xC0) == 0x80) {
+            --cut; // do not split a multi-byte code point
+        }
+        name.resize(cut);
+        name += "\xE2\x80\xA6"; // U+2026 HORIZONTAL ELLIPSIS
+    }
+    return name;
+}
+
+} // namespace
+
+std::string formatUntrustedArtifactList(const std::vector<std::string>& names, std::size_t maxItems)
+{
+    if (names.empty()) {
+        return {};
+    }
+    std::string out = "Documents (as named by the requesting app):";
+    const std::size_t shown = (maxItems == 0) ? names.size() : std::min(names.size(), maxItems);
+    for (std::size_t i = 0; i < shown; ++i) {
+        out += "\n  \xE2\x80\xA2 "; // U+2022 BULLET
+        out += neutralizeDisplayName(names[i]);
+    }
+    if (names.size() > shown) {
+        out += "\n  (+" + std::to_string(names.size() - shown) + " more)";
+    }
+    return out;
 }
 
 } // namespace LibreSCRS::Darwin::wire

@@ -153,4 +153,15 @@ void sendPromptReplyScrubbed(int connFd, PromptReply& reply) noexcept;
 // reply.primary and reply.secondary.
 void sendPromptReplyScrubbed(int connFd, MultiPromptReply& reply) noexcept;
 
+// --- display -----------------------------------------------------------------
+// Render the UNTRUSTED per-document display names of a batch-sign consent
+// (PromptRequest::artifacts) into a plain, inert block for the prompt window,
+// shown BELOW the trusted "Requested by" framing. Each name is neutralized --
+// control characters, including the newlines a crafted filename could use to
+// forge a line that mimics the agent-vouched chrome, become spaces -- and elided
+// to a bounded, UTF-8-valid length. At most @p maxItems (0 = unlimited) names
+// are listed, with a "(+N more)" tail. An empty names list yields an empty
+// string (no batch, nothing to show).
+[[nodiscard]] std::string formatUntrustedArtifactList(const std::vector<std::string>& names, std::size_t maxItems);
+
 } // namespace LibreSCRS::Darwin::wire

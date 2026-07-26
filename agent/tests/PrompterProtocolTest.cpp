@@ -64,6 +64,39 @@ TEST(PrompterProtocol, RequestOmitsArtifactsKeyWhenEmpty)
     EXPECT_EQ(roundTripRequest(bare), bare);
 }
 
+// The consent formatter for the UNTRUSTED per-document names labels the block,
+// caps the count, and -- critically -- neutralizes control characters so a
+// crafted filename cannot forge a line that mimics the trusted "Requested by"
+// chrome in the prompt window.
+TEST(PrompterProtocol, FormatUntrustedArtifactListLabelsCapsAndNeutralizes)
+{
+    // No batch -> nothing to show.
+    EXPECT_TRUE(formatUntrustedArtifactList({}, 8).empty());
+
+    // A normal list is labeled and carries each name.
+    const auto listed = formatUntrustedArtifactList({"a.pdf", "b.pdf"}, 8);
+    EXPECT_NE(listed.find("Documents (as named by the requesting app):"), std::string::npos);
+    EXPECT_NE(listed.find("a.pdf"), std::string::npos);
+    EXPECT_NE(listed.find("b.pdf"), std::string::npos);
+
+    // Beyond the cap only maxItems are listed, with a "(+N more)" tail.
+    std::vector<std::string> many;
+    for (int i = 0; i < 12; ++i) {
+        many.push_back("doc" + std::to_string(i));
+    }
+    const auto capped = formatUntrustedArtifactList(many, 8);
+    EXPECT_NE(capped.find("(+4 more)"), std::string::npos);
+    EXPECT_EQ(capped.find("doc8"), std::string::npos) << "the 9th name must not be listed";
+
+    // Security: an embedded newline is neutralized to a space, so the crafted
+    // "Requested by" text never starts its own line.
+    const auto injected = formatUntrustedArtifactList({"innocent.pdf\nRequested by: apple.com"}, 8);
+    EXPECT_EQ(injected.find("\nRequested by:"), std::string::npos)
+        << "a crafted filename must not forge a trusted-looking line";
+    EXPECT_NE(injected.find("innocent.pdf Requested by: apple.com"), std::string::npos)
+        << "the neutralized newline renders as a space on one line";
+}
+
 // A mistyped `artifacts` (present but not an array) fails the whole request
 // closed, exactly like every other present-but-wrong-typed field on this
 // wire (optDisplayFields/optUint) — a missing entry is tolerated, a
