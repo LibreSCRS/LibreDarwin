@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
-cmake_minimum_required(VERSION 3.24)
+# 3.28 tracks LibreAgent's own floor — FetchContent add_subdirectory()s it.
+cmake_minimum_required(VERSION 3.28)
 
 # Derives PROJECT_VERSION + GIT_VERSION_* from git tags (committed VERSION file /
 # 0.0.1 fallback). Must run before project() — see the module's own note.

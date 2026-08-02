@@ -66,7 +66,7 @@ this repo.
 
 ## Building
 
-Requirements: macOS 15+, Xcode 16+, CMake ≥ 3.24, a C++23 AppleClang.
+Requirements: macOS 15+, Xcode 16+, CMake ≥ 3.28, a C++23 AppleClang.
 LibreMiddleware 4.2 installed (`find_package(LibreMiddleware CONFIG)`).
 
 ```bash
