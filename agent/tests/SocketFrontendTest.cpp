@@ -589,6 +589,48 @@ TEST(SocketFrontend, SignAcceptsTsaUrlOverrideAtTheTimestampedLevel)
     EXPECT_EQ(errName(reply), "");
 }
 
+TEST(SocketFrontend, SignAcceptsTheAgentDecidesSentinelForLevel)
+{
+    // The arm this pins is what every deferring client relies on. It exists
+    // and has never been asserted: remove it and this is the only thing in
+    // the stack that goes red. Acceptance only -- see the companion test
+    // below for the half that proves the configured default was consulted.
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    for (const char* sentinel : {"auto", ""}) {
+        const int fd = makeInputFile("%PDF-1.7");
+        ASSERT_GE(fd, 0);
+        const Agent::Wire::SignOpts opts{"pades", sentinel, "enveloped"};
+        const auto reply = rig.roundTrip(90, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+        ::close(fd);
+        EXPECT_EQ(errName(reply), "") << "sentinel: " << sentinel;
+    }
+}
+
+TEST(SocketFrontend, SignAcceptsATsaUrlAlongsideTheAgentDecidesSentinel)
+{
+    // The agent has NO configured TSA and defaults to b-b, but the request
+    // supplies one. Without the fix the level resolves to b-b and the request
+    // is then rejected for pairing a tsaUrl with the baseline -- a refusal the
+    // client cannot predict, because it depends on the agent's configuration.
+    // This proves acceptance only, against the precondition made explicit and
+    // real below (a fresh Rig already defaults to b-b, so the SetConfig call
+    // is a no-op restating that default -- checked here rather than assumed).
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    const auto setConfigReply =
+        rig.roundTrip(91, Agent::Wire::SetConfig{"DefaultLevel", Agent::Wire::CborValue(std::string{"b-b"})});
+    ASSERT_NE(setConfigReply.find("ok"), nullptr);
+    EXPECT_TRUE(setConfigReply.find("ok")->asBool().value_or(false));
+    const int fd = makeInputFile("%PDF-1.7");
+    ASSERT_GE(fd, 0);
+    Agent::Wire::SignOpts opts{"pades", "auto", "enveloped"};
+    opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
+    const auto reply = rig.roundTrip(92, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+    ::close(fd);
+    EXPECT_EQ(errName(reply), "");
+}
+
 TEST(SocketFrontend, SignRejectsVisualSignatureOnANonPadesFormat)
 {
     Rig rig;

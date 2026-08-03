@@ -260,7 +260,14 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
     if (!opts.level.empty() && opts.level != "auto") {
         requestedLevel = opts.level;
     }
-    std::string level = sp::resolveSignLevel(requestedLevel, config.defaultLevel(), !config.tsaUrls().empty());
+    // A per-request tsaUrl counts: supplying a timestamp authority expresses
+    // intent to timestamp, so a DEFAULTED baseline lifts to b-t instead of
+    // resolving to b-b and then being rejected for carrying a tsaUrl at all.
+    // An EXPLICIT b-b paired with a tsaUrl is still a rejection --
+    // resolveSignLevel returns a requested level unchanged, so the existing
+    // SignRejectsTsaUrlPairedWithTheBaselineLevel case is unaffected.
+    const bool hasTsa = !config.tsaUrls().empty() || opts.tsaUrl.has_value();
+    std::string level = sp::resolveSignLevel(requestedLevel, config.defaultLevel(), hasTsa);
     if (!sp::isKnownLevel(level) || !sp::isImplementedSignLevel(level)) {
         return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
     }
