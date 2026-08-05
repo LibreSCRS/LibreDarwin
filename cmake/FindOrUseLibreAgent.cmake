@@ -34,9 +34,13 @@ else()
     set(LIBREAGENT_BUILD_WIRE ON CACHE BOOL "" FORCE)
     set(LIBREAGENT_BUILD_CLIENT_QT OFF CACHE BOOL "" FORCE)
 
+    # A fixed revision, not a branch: the client's contract conformance is
+    # proven against exactly this revision, and a moving branch would let the
+    # built agent run ahead of what was proven. Raising it is a deliberate act
+    # that moves this line and the client's recorded revision together.
     FetchContent_Declare(LibreAgent
         GIT_REPOSITORY https://github.com/LibreSCRS/LibreAgent.git
-        GIT_TAG main)
+        GIT_TAG 486a8459b4e07bdb5a3ee813f173c7a2ca4615b7)
     FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core + LibreAgent::Wire
 
     # The neutral core uses std::jthread/std::stop_token, which AppleClang 16/17
