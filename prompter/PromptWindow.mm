@@ -146,7 +146,11 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
 
     dispatch_sync(dispatch_get_main_queue(), ^{
       @autoreleasepool {
-          [NSApp activateIgnoringOtherApps:YES];
+          // Cooperative activation (macOS 14+; this repo requires 15+). The
+          // deprecated activateIgnoringOtherApps: force-steal is gone — the
+          // system may defer activation to the frontmost app's cooperation,
+          // which is the supported behavior for an accessory-policy prompter.
+          [NSApp activate];
           NSAlert* alert = [[NSAlert alloc] init];
           const char* kindLabel = req.kind == wire::PromptKind::Can   ? "Card Access Number (CAN)"
                                   : req.kind == wire::PromptKind::Mrz ? "Machine-Readable Zone (MRZ)"
@@ -203,7 +207,11 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
 
     dispatch_sync(dispatch_get_main_queue(), ^{
       @autoreleasepool {
-          [NSApp activateIgnoringOtherApps:YES];
+          // Cooperative activation (macOS 14+; this repo requires 15+). The
+          // deprecated activateIgnoringOtherApps: force-steal is gone — the
+          // system may defer activation to the frontmost app's cooperation,
+          // which is the supported behavior for an accessory-policy prompter.
+          [NSApp activate];
           NSAlert* alert = [[NSAlert alloc] init];
           alert.messageText = req.title.empty() ? @"Change your PIN" : nsstr(req.title);
           // RequestSecrets carries no retry context (change_pin is never a

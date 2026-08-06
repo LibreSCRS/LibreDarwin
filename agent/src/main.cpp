@@ -7,6 +7,7 @@
 // around the neutral LibreAgent::AgentCore, then drives the process CFRunLoop while
 // the transport's GCD queue services the socket and the MonitorBridge pumps card
 // presence.
+#include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 #include <LibreSCRS/Darwin/backend/OsLogSink.h>
 #include <LibreSCRS/Darwin/backend/PluginDirectory.h>
@@ -31,8 +32,6 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
 
-#include <pwd.h>
-
 #include <csignal>
 #include <cstdlib>
 #include <filesystem>
@@ -43,9 +42,6 @@
 
 #ifndef LIBREDARWIN_VERSION_STR
 #define LIBREDARWIN_VERSION_STR "0.1.0"
-#endif
-#ifndef LIBREDARWIN_APP_GROUP
-#define LIBREDARWIN_APP_GROUP "group.org.librescrs.LibreMac"
 #endif
 #ifndef LIBRESCRS_DEFAULT_PLUGIN_DIR
 #define LIBRESCRS_DEFAULT_PLUGIN_DIR "/usr/local/lib/librescrs/plugins"
@@ -62,32 +58,6 @@ std::string envOr(const char* key, const std::string& fallback)
 {
     const char* v = std::getenv(key);
     return (v != nullptr && *v != '\0') ? std::string(v) : fallback;
-}
-
-// The REAL user home directory, bypassing $HOME. Under App Sandbox, $HOME is
-// silently redirected to the process's private container
-// (~/Library/Containers/<bundle-id>/Data), NOT the shared App-Group container —
-// so a sandboxed agent that trusted $HOME would materialize its socket/cache/
-// config under a path the sandboxed host + CTK extension can never reach.
-// getpwuid(getuid()) reads the real passwd-database home, which the sandbox does
-// not redirect. Falls back to $HOME (then temp) if the passwd lookup fails.
-fs::path realHomeDir()
-{
-    if (struct passwd* pw = getpwuid(getuid()); pw != nullptr && pw->pw_dir != nullptr) {
-        return fs::path(pw->pw_dir);
-    }
-    const char* home = std::getenv("HOME");
-    return (home != nullptr && *home != '\0') ? fs::path(home) : fs::temp_directory_path();
-}
-
-// The App-Group container the sandboxed host + CTK extension can reach.
-// LIBRESCRS_AGENT_CONTAINER lets dev/test point elsewhere.
-fs::path containerDir()
-{
-    if (const char* over = std::getenv("LIBRESCRS_AGENT_CONTAINER"); over != nullptr && *over != '\0') {
-        return fs::path(over);
-    }
-    return realHomeDir() / "Library" / "Group Containers" / LIBREDARWIN_APP_GROUP;
 }
 
 // The macOS reader-routing seams AgentCore consults: reader wire handle ->
@@ -137,7 +107,9 @@ int main()
         Agent::log::warn("process hardening incomplete (PT_DENY_ATTACH / RLIMIT_CORE=0 failed)");
     }
 
-    const fs::path container = containerDir();
+    // The App-Group container the sandboxed host + CTK extension can reach
+    // (shared resolution with the prompter — AppGroupPaths).
+    const fs::path container = Darwin::appGroupContainerDir();
     std::error_code ec;
     fs::create_directories(container, ec);
     if (ec) {
@@ -179,7 +151,7 @@ int main()
         LibreSCRS::Darwin::SecCodeAuthorizer::Policy{
             .trustTierSigningIds = {},
             .allowedSigningIds = {},
-            .requiredAppGroup = std::string(LIBREDARWIN_APP_GROUP),
+            .requiredAppGroup = std::string(Darwin::kAppGroup),
         });
     // The prompter client verifies the SERVING peer's code-signing identity by
     // default (a re-bound prompter.sock must not be able to inject a secret the
@@ -209,12 +181,32 @@ int main()
     frontend->start();
 
     // Wire the core registry's presence observers to the frontend (materialize +
-    // deferred card resolve -> transport publish/broadcast).
+    // deferred card resolve -> transport publish/broadcast). EVERY long-lived
+    // callback below guards the frontend optional the same way: the teardown
+    // ordering (quiesce the loop, drain, THEN frontend.reset()) already keeps
+    // them from running post-reset, but the uniform guard keeps that safety
+    // independent of any future teardown reorder.
     core.objectRegistry().setObservers(
-        [&frontend](const Agent::ReaderState& r) { frontend->onReaderPublished(r); },
-        [&frontend](const Agent::CardState& c) { frontend->onCardPublished(c); },
-        [&frontend](Agent::ObjectId id) { frontend->onWithdrawn(id); },
-        [&frontend](Agent::ObjectId r, const Agent::PropertyDelta& d) { frontend->onReaderPropertiesChanged(r, d); });
+        [&frontend](const Agent::ReaderState& r) {
+            if (frontend) {
+                frontend->onReaderPublished(r);
+            }
+        },
+        [&frontend](const Agent::CardState& c) {
+            if (frontend) {
+                frontend->onCardPublished(c);
+            }
+        },
+        [&frontend](Agent::ObjectId id) {
+            if (frontend) {
+                frontend->onWithdrawn(id);
+            }
+        },
+        [&frontend](Agent::ObjectId r, const Agent::PropertyDelta& d) {
+            if (frontend) {
+                frontend->onReaderPropertiesChanged(r, d);
+            }
+        });
 
     // Card removal: drop every per-card cache keyed on the per-insertion card
     // key (the card ObjectId, stringified — the key the typed-op deps + broker
@@ -245,7 +237,11 @@ int main()
     transport->onClientDisconnect(
         [&core](Agent::CallerToken caller) { core.operationManager().dispatchClientDisconnect(caller); });
     transport->onClientDisconnect([&core](Agent::CallerToken caller) { core.pkcs11().onClientDisconnected(caller); });
-    transport->onClientDisconnect([&frontend](Agent::CallerToken caller) { frontend->onClientDisconnected(caller); });
+    transport->onClientDisconnect([&frontend](Agent::CallerToken caller) {
+        if (frontend) {
+            frontend->onClientDisconnected(caller);
+        }
+    });
 
     // The monitor pump: LM MonitorService -> PresenceModel + CardKeyTracker ->
     // registry observers -> frontend -> transport. A card already seated at start

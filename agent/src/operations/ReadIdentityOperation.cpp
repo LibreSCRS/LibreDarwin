@@ -30,6 +30,24 @@ void ReadIdentityOperation::doWork()
     // spinner rather than a fabricated 0->100% bar.
     setIndeterminate(true);
     setPhase(static_cast<std::uint32_t>(OperationPhase::Connecting));
+
+    // Serve a still-cached snapshot without re-walking the card: the same
+    // per-card read cache GetPhoto consults and that the fresh read below
+    // populates. A master-detail return to an already-read, still-seated card
+    // then costs a RAM lookup instead of a fresh multi-second APDU walk. The
+    // cache is dropped on CardRemoved and on an auth failure, so a re-inserted
+    // or re-authenticated card still reads fresh. Mirror GetPhotoOperation and
+    // the fresh-read path: skip the wire completion if the backend is tearing
+    // down (the client observes agent-gone via the dropped connection).
+    if (auto cached = m_deps.readCache.get(m_deps.cardKey)) {
+        if (shutdownRequested()) {
+            return;
+        }
+        static_cast<void>(emitResult(ResultPayload{*cached}));
+        finish(OperationStatus::Ok, ErrorCode::None, "op.ok", "Read completed");
+        return;
+    }
+
     IdentityReadFlow flow(IdentityReadFlowDeps{
         .holder = *m_deps.holder,
         .reader = m_deps.reader,

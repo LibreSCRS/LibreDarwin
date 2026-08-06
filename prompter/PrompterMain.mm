@@ -9,12 +9,10 @@
 #include "ConfirmAuthorizer.h"
 #include "PrompterServer.h"
 
+#include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 #include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 
 #import <AppKit/AppKit.h>
-
-#include <pwd.h>
-#include <unistd.h>
 
 #include <cstdlib>
 #include <memory>
@@ -23,26 +21,15 @@
 
 namespace {
 
-// The REAL user home directory, bypassing $HOME. Under App Sandbox, $HOME is
-// silently redirected to the process's private container, not the shared
-// App-Group container the agent also binds into — see the twin comment in
-// agent/src/main.cpp (realHomeDir). getpwuid(getuid()) reads the real
-// passwd-database home, which the sandbox does not redirect.
-std::string realHomeDir()
-{
-    if (struct passwd* pw = getpwuid(getuid()); pw != nullptr && pw->pw_dir != nullptr) {
-        return pw->pw_dir;
-    }
-    const char* home = std::getenv("HOME");
-    return home ? home : "";
-}
-
+// The default socket lives in the shared App-Group container, resolved by the
+// SAME helper the agent uses (AppGroupPaths — sandbox-bypass home + group id
+// in one place, so the two binaries cannot drift apart silently).
 std::string prompterSocketPath()
 {
     if (const char* env = std::getenv("LIBRESCRS_PROMPTER_SOCK")) {
         return env;
     }
-    return realHomeDir() + "/Library/Group Containers/group.org.librescrs.LibreMac/prompter.sock";
+    return (LibreSCRS::Darwin::appGroupContainerDir() / "prompter.sock").string();
 }
 
 // The connecting peer must be the agent. By DEFAULT the peer's code-signing

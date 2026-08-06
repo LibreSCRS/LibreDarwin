@@ -22,7 +22,8 @@ add_library(LibreDarwinWireCore STATIC
     src/backend/wire/AnonFd.cpp
     src/backend/wire/PrompterProtocol.cpp
     src/backend/PeerIdentity.cpp
-    src/backend/PeerCodeSigning.cpp)
+    src/backend/PeerCodeSigning.cpp
+    src/backend/AppGroupPaths.cpp)
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(LibreDarwinWireCore PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinWireCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -87,8 +88,7 @@ target_link_options(LibreDarwinAgentBackend PRIVATE -fexperimental-library)
 add_executable(librescrs-agent src/main.cpp)
 target_link_libraries(librescrs-agent PRIVATE LibreDarwinAgentBackend ${CORE_FOUNDATION_FRAMEWORK})
 target_compile_definitions(librescrs-agent PRIVATE
-    LIBREDARWIN_VERSION_STR="${PROJECT_VERSION}"
-    LIBREDARWIN_APP_GROUP="group.org.librescrs.LibreMac")
+    LIBREDARWIN_VERSION_STR="${PROJECT_VERSION}")
 target_compile_options(librescrs-agent PRIVATE -fexperimental-library)
 target_link_options(librescrs-agent PRIVATE -fexperimental-library)
 
