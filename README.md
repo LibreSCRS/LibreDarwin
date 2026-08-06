@@ -26,7 +26,7 @@ a thin client of this agent.
   | LibreAgent interface | macOS backend (this repo) |
   |---|---|
   | `AgentTransport` | `SocketTransport` — App-Group `0600` AF_UNIX socket, CBOR framing, `SCM_RIGHTS` fd-passing, GCD dispatch |
-  | `Authorizer` | `SecCodeAuthorizer` — peer `audit_token` → `SecCode` DR check + config/MDM allow-list + C7 rate-limit |
+  | `Authorizer` | `SecCodeAuthorizer` — peer `audit_token` → `SecCode` DR check + config/MDM allow-list + rate-limit |
   | `Operations::PrompterClientBase` | `MacPrompterClient` — forwards to the agent-owned credential window |
   | `Operations::OperationChannel` | `SocketOperationChannel` — per-op progress/result over the socket (inline results, no memfd) |
   | `log::LogSink` | `OsLogSink` — `os_log` sink injected via `log::init` |

@@ -29,7 +29,7 @@ namespace LibreSCRS::Darwin {
 // fd-passing, peer identity, the ObjectId<->wire-handle mapping, and the
 // published presence snapshot; the neutral core never touches wire paths. The
 // Linux twin is LibreLinux's D-Bus ObjectManager + sd-event backend; here it is
-// GCD dispatch sources on one serial queue (the loop). D7: the agent SELF-BINDS
+// GCD dispatch sources on one serial queue (the loop). The agent SELF-BINDS
 // the container socket (SMAppService can't template a per-user SockPathName);
 // launch_activate_socket is an optional inherited-fd fallback.
 //

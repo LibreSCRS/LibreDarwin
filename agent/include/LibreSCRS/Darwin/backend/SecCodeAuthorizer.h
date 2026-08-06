@@ -31,7 +31,7 @@ namespace LibreSCRS::Darwin {
 // Team ID), so a self-signed binary cannot claim a listed signing id + our group
 // -- stronger than a signing-identifier string alone.
 //
-// The C7 first-op rate limit is NOT here: it is the neutral core's RateLimiter,
+// The per-caller first-op rate limit is NOT here: it is the neutral core's RateLimiter,
 // keyed on the CallerToken the transport mints. This gate does identity only.
 class SecCodeAuthorizer final : public Agent::Authorizer
 {
