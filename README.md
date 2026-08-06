@@ -26,7 +26,7 @@ a thin client of this agent.
   | LibreAgent interface | macOS backend (this repo) |
   |---|---|
   | `AgentTransport` | `SocketTransport` — App-Group `0600` AF_UNIX socket, CBOR framing, `SCM_RIGHTS` fd-passing, GCD dispatch |
-  | `Authorizer` | `SecCodeAuthorizer` — peer `audit_token` → `SecCode` DR check + config/MDM allow-list + rate-limit |
+  | `Authorizer` | `SecCodeAuthorizer` — peer `audit_token` → `SecTask` signing identifier + App-Group entitlement allow-list, fail-closed on unidentifiable peers |
   | `Operations::PrompterClientBase` | `MacPrompterClient` — forwards to the agent-owned credential window |
   | `Operations::OperationChannel` | `SocketOperationChannel` — per-op progress/result over the socket (inline results, no memfd) |
   | `log::LogSink` | `OsLogSink` — `os_log` sink injected via `log::init` |
@@ -40,23 +40,27 @@ a thin client of this agent.
 
 ## Wire protocol
 
-The macOS socket wire protocol (CBOR + `SCM_RIGHTS` + `LOCAL_PEERTOKEN`/`SecCode`
+The macOS socket wire protocol (CBOR + `SCM_RIGHTS` + `LOCAL_PEERTOKEN`/`SecTask`
 peer-auth) mirrors the D-Bus agent surface message-for-message. The contract of
-record is [`agent/wire/librescrs-agent.cddl`](agent/wire/librescrs-agent.cddl),
-installed alongside the agent so clients can pin against it. The D-Bus surface
-stays the canonical semantic source; this schema mirrors it rather than forking
+record is the CDDL schema
+[`wire/librescrs-agent.cddl`](https://github.com/LibreSCRS/LibreAgent/blob/main/wire/librescrs-agent.cddl),
+which lives with the shared wire layer in the `LibreAgent` repository alongside
+the codec, its contract guard, and the decoder fuzz gate. The D-Bus surface
+stays the canonical semantic source; the schema mirrors it rather than forking
 it.
 
 ## Status
 
 **The agent backend is implemented.** The framed AF_UNIX socket transport
-(`SCM_RIGHTS` fd-passing, GCD dispatch), the `SecCode`-based peer authorizer, the
-deterministic-CBOR wire layer, the agent-owned credential prompter, the process
-and launchd hardening, and the constructor-DI composition root are all in place
-and exercised by ~20 test suites — including a cross-stack wire-contract guard
-that pins the CBOR/CDDL literals to the upstream taxonomy value-for-value and a
-libFuzzer gate on the untrusted decoder. `LibreMac` can build and link against
-this agent today.
+(`SCM_RIGHTS` fd-passing, GCD dispatch), the `SecTask`-based peer authorizer, the
+agent-owned credential prompter, the process and launchd hardening, and the
+constructor-DI composition root are all in place and exercised by the in-repo
+backend/transport/frontend/prompter test suites. The deterministic-CBOR wire
+layer — with its codec/framing/message-model tests, the cross-stack
+wire-contract guard that pins the CBOR/CDDL literals to the upstream taxonomy,
+and the libFuzzer gate on the untrusted decoder — lives in `LibreAgent` and is
+consumed here as an already-tested dependency. `LibreMac` can build and link
+against this agent today.
 
 Still skeletal and explicitly scoped as future work: the card-less **PKCS#11
 facade** (`pkcs11-module/`) is a stub that browsers will load, and the

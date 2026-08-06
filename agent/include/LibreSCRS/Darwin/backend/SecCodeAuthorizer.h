@@ -19,7 +19,10 @@ namespace LibreSCRS::Darwin {
 // decision through polkit; macOS has no polkit, so this resolves the connecting
 // peer's code-signing identity from its audit_token via the PUBLIC,
 // TOCTOU-safe SecTaskCreateWithAuditToken -> signing identifier + app-group
-// entitlement, and checks a config/MDM allow-list.
+// entitlement, and checks the Policy allow-lists injected by the composition
+// root. NOTE: no configuration source feeds the Policy today — the daemon
+// constructs it with empty allow-lists, so the posture below runs entirely on
+// its defaults.
 //
 // Posture: the three default actions (configure / sign /
 // pkcs11.login) are DEFAULT-ALLOW (the signing PIN is the human-presence proof;
