@@ -333,7 +333,28 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
 
 SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, std::string version)
     : m_transport(transport), m_core(core), m_version(std::move(version))
-{}
+{
+    m_confirmQueue = dispatch_queue_create("rs.librescrs.agent.confirm", DISPATCH_QUEUE_CONCURRENT);
+    // Refuse by default. Nothing here knows how to ask a human until main.cpp
+    // injects the prompter client, and a build that forgot to inject one must
+    // refuse trust changes rather than wave them through.
+    m_confirm = [](const wire::ConfirmAction&) {
+        return wire::ConfirmReply{wire::PromptReplyStatus::Error, "no confirmation mechanism"};
+    };
+}
+
+SocketFrontend::~SocketFrontend()
+{
+    if (m_confirmQueue != nullptr) {
+        dispatch_release(m_confirmQueue);
+        m_confirmQueue = nullptr;
+    }
+}
+
+void SocketFrontend::setConfirmProvider(ConfirmFn fn)
+{
+    m_confirm = std::move(fn);
+}
 
 void SocketFrontend::start()
 {
@@ -1333,6 +1354,16 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
         return;
     }
 
+    if (*mut == A::Config::Mutability::DbusMutableTrust) {
+        confirmThenApply(connId, req, msg.key, caller,
+                         [this, connId, req, msg] { applyConfigWrite(connId, req, msg); });
+        return;
+    }
+    applyConfigWrite(connId, req, msg);
+}
+
+void SocketFrontend::applyConfigWrite(std::uint64_t connId, std::uint64_t req, const A::Wire::SetConfig& msg)
+{
     auto& cfg = m_core.configStore();
     A::Config::ConfigStore::SetResult r{false, {}, {}};
     if (msg.key == "DefaultLevel") {
@@ -1429,12 +1460,69 @@ void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, 
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
         return;
     }
+    if (*mut == A::Config::Mutability::DbusMutableTrust) {
+        confirmThenApply(connId, req, msg.key, caller,
+                         [this, connId, req, msg] { applyConfigReset(connId, req, msg); });
+        return;
+    }
+    applyConfigReset(connId, req, msg);
+}
+
+void SocketFrontend::applyConfigReset(std::uint64_t connId, std::uint64_t req, const A::Wire::ResetConfig& msg)
+{
     const auto r = m_core.configStore().resetKey(msg.key, /*fromDbus=*/true);
     if (!r.ok) {
         replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
         return;
     }
     sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
+}
+
+// Three phases, and the middle one is the reason this exists. The gate check
+// above ran on the loop queue, which serves every connection's reads and the
+// accept source. The human takes as long as they take, and the dialog has no
+// timeout, so asking there would freeze every other client for the duration.
+// The verdict comes back to the loop before anything touches the store or the
+// connection registry: sendTo walks m_connections with no lock and is
+// loop-thread-only, so replying from the worker would be a data race.
+void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
+                                      const A::CallerToken& caller, std::function<void()> apply)
+{
+    wire::ConfirmAction ask;
+    ask.kind = "configure_trust";
+    ask.title = "Confirm trust change";
+    ask.description = describeTrustChange(key);
+    // The CLAIMED caller identity. The public SecTask path cannot verify it,
+    // so nothing here may word it as verified -- the human is deciding, and a
+    // name presented as proven would be doing the deciding for them.
+    ask.requester = requesterLabel(caller);
+    ask.artifact = key;
+
+    auto* transport = &m_transport;
+    const ConfirmFn confirm = m_confirm;
+    dispatch_async(m_confirmQueue, ^{
+      const wire::ConfirmReply verdict = confirm(ask);
+      transport->post([this, connId, req, verdict, apply] {
+          if (verdict.status != wire::PromptReplyStatus::Ok) {
+              // Anything that is not an explicit approval leaves the stored
+              // value exactly where it was.
+              replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+              return;
+          }
+          apply();
+      });
+    });
+}
+
+std::string SocketFrontend::describeTrustChange(const std::string& key)
+{
+    if (key == "TsaUrls") {
+        return "Change the timestamping authorities this computer will use.";
+    }
+    if (key == "TslSources") {
+        return "Change the trusted lists this computer accepts signatures against.";
+    }
+    return "Change a trust setting on this computer.";
 }
 
 // --- pkcs11 / cert-der (async broker handoff) --------------------------------

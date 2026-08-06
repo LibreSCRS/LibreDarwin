@@ -514,4 +514,111 @@ TEST(MacPrompterClient, ChangeMissingPrompterFailsWithError)
     EXPECT_FALSE(r.newPin.has_value());
 }
 
+// A fake confirmation prompter: binds `path`, captures the ConfirmAction it
+// parsed off the wire, and answers through the production send path.
+class FakeConfirmPrompter
+{
+public:
+    FakeConfirmPrompter(std::string path, wire::ConfirmReply reply) : m_path(std::move(path)), m_reply(reply)
+    {
+        m_listen = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, m_path.c_str(), sizeof(addr.sun_path) - 1);
+        ::unlink(m_path.c_str());
+        EXPECT_EQ(::bind(m_listen, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+        EXPECT_EQ(::listen(m_listen, 4), 0);
+        m_thread = std::thread([this] { serve(); });
+    }
+    ~FakeConfirmPrompter()
+    {
+        m_stop = true;
+        ::shutdown(m_listen, SHUT_RDWR);
+        ::close(m_listen);
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+        std::filesystem::remove(m_path);
+    }
+    [[nodiscard]] const std::optional<wire::ConfirmAction>& capturedAction() const
+    {
+        return m_action;
+    }
+
+private:
+    void serve()
+    {
+        while (!m_stop) {
+            const int c = ::accept(m_listen, nullptr, nullptr);
+            if (c < 0) {
+                break;
+            }
+            auto req = Agent::Wire::recvFrame(c);
+            if (req.has_value()) {
+                auto parsed = wire::parsePrompterRequest(req->body);
+                if (parsed.has_value()) {
+                    if (auto* ca = std::get_if<wire::ConfirmAction>(&*parsed)) {
+                        m_action = *ca;
+                    }
+                }
+                wire::sendConfirmReply(c, m_reply);
+            }
+            ::close(c);
+        }
+    }
+    std::string m_path;
+    wire::ConfirmReply m_reply;
+    std::optional<wire::ConfirmAction> m_action;
+    int m_listen{-1};
+    std::atomic<bool> m_stop{false};
+    std::thread m_thread;
+};
+
+TEST(MacPrompterClient, ConfirmationCrossesTheWireAndTheVerdictComesBack)
+{
+    const std::string path = uniquePath();
+    FakeConfirmPrompter server(path, wire::ConfirmReply{wire::PromptReplyStatus::Ok, "approved"});
+
+    wire::ConfirmAction action;
+    action.kind = "configure_trust";
+    action.title = "Confirm trust change";
+    action.description = "Add a trusted list";
+    action.requester = "org.librescrs.LibreMac";
+    action.artifact = "TslSources";
+
+    MacPrompterClient client(path);
+    const auto reply = client.requestConfirmation(action);
+
+    EXPECT_EQ(reply.status, wire::PromptReplyStatus::Ok);
+    EXPECT_EQ(reply.userMessage, "approved");
+    ASSERT_TRUE(server.capturedAction().has_value());
+    EXPECT_EQ(*server.capturedAction(), action) << "the prompter must be asked about exactly this change";
+}
+
+TEST(MacPrompterClient, DeclinedConfirmationComesBackAsCancelled)
+{
+    const std::string path = uniquePath();
+    FakeConfirmPrompter server(path, wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, "declined"});
+
+    wire::ConfirmAction action;
+    action.kind = "configure_trust";
+    MacPrompterClient client(path);
+
+    const auto reply = client.requestConfirmation(action);
+
+    EXPECT_EQ(reply.status, wire::PromptReplyStatus::Cancelled);
+}
+
+// The whole point of the gate: no prompter means nobody was asked, and nobody
+// asked can never read as somebody who agreed.
+TEST(MacPrompterClient, MissingPrompterRefusesTheConfirmation)
+{
+    MacPrompterClient client("/tmp/ld-nonexistent-" + std::to_string(std::rand()) + ".sock");
+
+    const auto reply = client.requestConfirmation(wire::ConfirmAction{"configure_trust", {}, {}, {}, {}});
+
+    EXPECT_EQ(reply.status, wire::PromptReplyStatus::Error);
+    EXPECT_NE(reply.status, wire::PromptReplyStatus::Ok);
+}
+
 } // namespace

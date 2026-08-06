@@ -51,11 +51,16 @@ public:
     // the serial queue; must not block (the window impl dispatches abortModal
     // asynchronously to the main queue).
     using CancelHandler = std::function<void()>;
+    // Ask the human to confirm a non-card action (ConfirmAction). Same
+    // worker-queue calling convention as the secret providers: it blocks until
+    // the human answers, so it must never run on the serial queue that serves
+    // every connection.
+    using ConfirmProvider = std::function<wire::ConfirmReply(const wire::ConfirmAction& req)>;
     // Is this connecting peer the agent? (real impl: SecTask signing-id match).
     using PeerAuthorized = std::function<bool(const PeerCredentials&)>;
 
     PrompterServer(std::string socketPath, SecretProvider provider, MultiSecretProvider multiProvider,
-                   CancelHandler cancel, PeerAuthorized peerAuth);
+                   CancelHandler cancel, ConfirmProvider confirm, PeerAuthorized peerAuth);
     ~PrompterServer();
     PrompterServer(const PrompterServer&) = delete;
     PrompterServer& operator=(const PrompterServer&) = delete;
@@ -92,6 +97,7 @@ private:
     SecretProvider m_provider;
     MultiSecretProvider m_multiProvider;
     CancelHandler m_cancel;
+    ConfirmProvider m_confirmProvider;
     PeerAuthorized m_peerAuth;
     Agent::Wire::UniqueFd m_listen;
     dispatch_queue_t m_queue{nullptr};  // serial: accept + reads + registry

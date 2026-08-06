@@ -1208,4 +1208,110 @@ TEST(SocketFrontend, FullScrubDropsCredentialSnapshots)
     EXPECT_FALSE(snapshotCache.get(cardKey).has_value()) << "fullScrub must drop the credential snapshots";
 }
 
+// --- trust tier: a human confirms, or the value does not move ----------------
+//
+// The verdict is injected, so these prove the wiring and nothing about the
+// dialog itself. What they do prove is the part that must hold whatever the
+// human says: a refusal leaves the stored value exactly as it was.
+
+Agent::Wire::CborValue cborArrayOfStrings(std::vector<std::string> items)
+{
+    std::vector<Agent::Wire::CborValue> out;
+    out.reserve(items.size());
+    for (auto& s : items) {
+        out.emplace_back(std::move(s));
+    }
+    return Agent::Wire::CborValue(std::move(out));
+}
+
+TEST(SocketFrontend, DeclinedTrustConfirmationLeavesThePreviousValueInPlace)
+{
+    Rig rig;
+    const auto before = rig.core->configStore().tsaUrls();
+    rig.frontend->setConfirmProvider(
+        [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, "declined"}; });
+
+    const auto reply =
+        rig.roundTrip(70, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"http://tsa.example/"})});
+
+    EXPECT_EQ(errName(reply), "NotAuthorized");
+    EXPECT_EQ(rig.core->configStore().tsaUrls(), before) << "a declined change must not move the value";
+}
+
+TEST(SocketFrontend, ApprovedTrustConfirmationAppliesTheWrite)
+{
+    Rig rig;
+    rig.frontend->setConfirmProvider(
+        [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Ok, {}}; });
+
+    const auto reply =
+        rig.roundTrip(71, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"http://tsa.example/"})});
+
+    ASSERT_NE(reply.find("ok"), nullptr);
+    EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
+    EXPECT_EQ(rig.core->configStore().tsaUrls(), (std::vector<std::string>{"http://tsa.example/"}));
+}
+
+// The confused-deputy guard: the human must be told what is being changed.
+TEST(SocketFrontend, TheConfirmationNamesTheKeyItIsAbout)
+{
+    Rig rig;
+    wire::ConfirmAction seen;
+    rig.frontend->setConfirmProvider([&seen](const wire::ConfirmAction& a) {
+        seen = a;
+        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
+    });
+
+    static_cast<void>(rig.roundTrip(72, Agent::Wire::SetConfig{"TslSources", cborArrayOfStrings({})}));
+
+    EXPECT_EQ(seen.kind, "configure_trust");
+    EXPECT_EQ(seen.artifact, "TslSources");
+    EXPECT_FALSE(seen.description.empty()) << "a dialog that cannot say what it changes must not be shown";
+}
+
+// An ordinary key must not acquire a prompt, or the latency of one.
+TEST(SocketFrontend, OrdinaryConfigWritesNeverAskForConfirmation)
+{
+    Rig rig;
+    std::atomic<bool> asked{false};
+    rig.frontend->setConfirmProvider([&asked](const wire::ConfirmAction&) {
+        asked = true;
+        return wire::ConfirmReply{wire::PromptReplyStatus::Ok, {}};
+    });
+
+    const auto reply =
+        rig.roundTrip(73, Agent::Wire::SetConfig{"DefaultReason", Agent::Wire::CborValue(std::string{"Approval"})});
+
+    EXPECT_FALSE(asked.load());
+    ASSERT_NE(reply.find("ok"), nullptr);
+    EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
+}
+
+TEST(SocketFrontend, DeclinedTrustResetLeavesThePreviousValueInPlace)
+{
+    Rig rig;
+    ASSERT_TRUE(rig.core->configStore().setTsaUrls({"http://tsa.example/"}).ok);
+    rig.frontend->setConfirmProvider(
+        [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}}; });
+
+    const auto reply = rig.roundTrip(74, Agent::Wire::ResetConfig{"TsaUrls"});
+
+    EXPECT_EQ(errName(reply), "NotAuthorized");
+    EXPECT_EQ(rig.core->configStore().tsaUrls(), (std::vector<std::string>{"http://tsa.example/"}))
+        << "a declined reset must not clear the value";
+}
+
+TEST(SocketFrontend, ApprovedTrustResetClearsTheValue)
+{
+    Rig rig;
+    ASSERT_TRUE(rig.core->configStore().setTsaUrls({"http://tsa.example/"}).ok);
+    rig.frontend->setConfirmProvider(
+        [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Ok, {}}; });
+
+    const auto reply = rig.roundTrip(75, Agent::Wire::ResetConfig{"TsaUrls"});
+
+    ASSERT_NE(reply.find("ok"), nullptr);
+    EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
+}
+
 } // namespace

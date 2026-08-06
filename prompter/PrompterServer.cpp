@@ -65,9 +65,9 @@ inline constexpr bool always_false_v = false;
 } // namespace
 
 PrompterServer::PrompterServer(std::string socketPath, SecretProvider provider, MultiSecretProvider multiProvider,
-                               CancelHandler cancel, PeerAuthorized peerAuth)
+                               CancelHandler cancel, ConfirmProvider confirm, PeerAuthorized peerAuth)
     : m_socketPath(std::move(socketPath)), m_provider(std::move(provider)), m_multiProvider(std::move(multiProvider)),
-      m_cancel(std::move(cancel)), m_peerAuth(std::move(peerAuth))
+      m_cancel(std::move(cancel)), m_confirmProvider(std::move(confirm)), m_peerAuth(std::move(peerAuth))
 {}
 
 PrompterServer::~PrompterServer()
@@ -279,6 +279,32 @@ void PrompterServer::onReadReady(std::uint64_t connId)
                   wire::MultiPromptReply reply = provider(req);
                   clearNonBlocking(*connFd);
                   wire::sendPromptReplyScrubbed(*connFd, reply);
+                });
+            } else if constexpr (std::is_same_v<T, wire::ConfirmAction>) {
+                // A flow this build does not implement is refused before the
+                // human is involved at all: a confirmation dialog that cannot
+                // describe what it is confirming teaches the user to approve
+                // anything. Checked here on the serial queue because it costs
+                // a string compare and reaches no further.
+                if (msg.kind != "configure_trust") {
+                    const std::shared_ptr<int> connFd = fd;
+                    dispatch_async(m_worker, ^{
+                      const wire::ConfirmReply refusal{wire::PromptReplyStatus::Error, "unsupported confirmation"};
+                      clearNonBlocking(*connFd);
+                      wire::sendConfirmReply(*connFd, refusal);
+                    });
+                    return;
+                }
+                // Same worker discipline as the secret arms: the confirmation
+                // blocks until the human answers, and the serial queue serves
+                // every other connection meanwhile.
+                const wire::ConfirmAction req = std::move(msg);
+                const ConfirmProvider provider = m_confirmProvider;
+                const std::shared_ptr<int> connFd = fd;
+                dispatch_async(m_worker, ^{
+                  const wire::ConfirmReply reply = provider(req);
+                  clearNonBlocking(*connFd);
+                  wire::sendConfirmReply(*connFd, reply);
                 });
             } else {
                 static_assert(always_false_v<T>, "PrompterServer::onReadReady: unhandled PrompterRequest arm");

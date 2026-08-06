@@ -37,6 +37,12 @@ public:
     // and are scrubbed into cleansing Secure::Strings exactly like the
     // single-secret path.
     [[nodiscard]] Agent::PinChangePromptResult requestPinChange(const Agent::PromptOptions& options) override;
+
+    // Ask the human to confirm a non-card action. Deliberately NOT on
+    // PrompterClientBase: that interface is shared with the Linux agent, where
+    // consent is polkit's job. Returns Error (fail closed) if the prompter is
+    // unreachable, unresponsive or answers something this build cannot read.
+    [[nodiscard]] wire::ConfirmReply requestConfirmation(const wire::ConfirmAction& action);
     void cancel() noexcept override;
 
 private:

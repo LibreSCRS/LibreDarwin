@@ -6,6 +6,7 @@
 // authenticating the agent); the AppKit run loop on the main thread shows the
 // modal on demand, and a cross-connection CancelCurrent can dismiss it.
 #include "PromptWindow.h"
+#include "ConfirmAuthorizer.h"
 #include "PrompterServer.h"
 
 #import <AppKit/AppKit.h>
@@ -94,7 +95,14 @@ int main(int /*argc*/, char** /*argv*/)
             prompterSocketPath(),
             [window](const LibreSCRS::Darwin::wire::PromptRequest& req) { return window->showPrompt(req); },
             [window](const LibreSCRS::Darwin::wire::RequestSecrets& req) { return window->showChangePrompt(req); },
-            [window] { window->dismiss(); }, makePeerAuth());
+            [window] { window->dismiss(); },
+            // Not a window of ours: the confirmation is the platform's own
+            // device-owner prompt, so there is nothing here to dismiss and
+            // nothing that could collect a secret.
+            [](const LibreSCRS::Darwin::wire::ConfirmAction& req) {
+                return LibreSCRS::Darwin::confirmWithDeviceOwner(req);
+            },
+            makePeerAuth());
 
         if (auto started = server.start(); !started) {
             NSLog(@"librescrs-prompter: %s", started.error().c_str());

@@ -53,11 +53,17 @@ TEST(SecCodeAuthorizer, UnknownActionDenied)
     EXPECT_FALSE(authz.authorize("org.librescrs.agent.nonsense", kCaller));
 }
 
-TEST(SecCodeAuthorizer, TrustTierDeniedWithEmptyAllowList)
+TEST(SecCodeAuthorizer, TrustTierWithNoAllowListIsNotNarrowed)
 {
+    // An empty list means no narrowing is configured, NOT "deny everything".
+    // This authorizer answers only "may this caller be considered at all"; the
+    // boundary for the trust tier is the human confirmation the frontend
+    // requires before it applies the write. Denying here instead would seal
+    // the tier shut, which is what it used to do -- and would keep doing even
+    // after the human had agreed.
     SecCodeAuthorizer::PeerAuth peer{std::string("org.librescrs.LibreMac"), {}};
     auto authz = make({}, peer); // no trustTierSigningIds
-    EXPECT_FALSE(authz.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_TRUE(authz.authorize(Agent::kActionConfigureTrust, kCaller));
 }
 
 TEST(SecCodeAuthorizer, TrustTierAllowedForListedSigningId)

@@ -136,6 +136,15 @@ bool SecCodeAuthorizer::authorize(std::string_view actionId, const Agent::Caller
     };
 
     if (isTrust) {
+        // An empty list means no narrowing is configured, NOT "deny
+        // everything": the boundary for this tier is the human confirmation
+        // the frontend requires before it applies the write. A configured list
+        // is an ADDITIONAL narrowing on top of that, for the day a Team ID
+        // exists. And-ing the two unconditionally would leave the tier sealed
+        // exactly as before, only after bothering the user first.
+        if (m_policy.trustTierSigningIds.empty()) {
+            return true;
+        }
         return signingIdAllowed(m_policy.trustTierSigningIds);
     }
     // Default action: default-allow unless a site allow-list is configured.

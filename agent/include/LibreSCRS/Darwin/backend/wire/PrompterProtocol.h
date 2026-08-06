@@ -100,7 +100,25 @@ struct RequestSecrets
     bool operator==(const RequestSecrets&) const = default;
 };
 
-using PrompterRequest = std::variant<PromptRequest, PromptCancel, RequestSecrets>;
+// ConfirmAction (agent -> prompter): ask the human to confirm a change that is
+// NOT a card operation. Answered by the platform's device-owner authentication
+// (Touch ID or the account password), never by the card PIN -- the PIN
+// authorizes use of the key and nothing else. `kind` is an open flow
+// discriminator ("configure_trust" today); the server rejects kinds it does not
+// implement. `requester` is the CLAIMED caller identity: the public SecTask
+// path cannot report a verified one, so the copy must not present it as
+// verified.
+struct ConfirmAction
+{
+    std::string kind; // "configure_trust"
+    std::string title;
+    std::string description;
+    std::string requester;
+    std::string artifact; // the change being asked for
+    bool operator==(const ConfirmAction&) const = default;
+};
+
+using PrompterRequest = std::variant<PromptRequest, PromptCancel, RequestSecrets, ConfirmAction>;
 
 // The reply (prompter -> agent). `secret` is present iff status == Ok.
 struct PromptReply
@@ -122,12 +140,24 @@ struct MultiPromptReply
     std::string userMessage;
 };
 
+// The confirmation reply (prompter -> agent). Deliberately carries NO secret
+// field: this path must be structurally incapable of transporting one, which is
+// why it is not PromptReply with an unused buffer. Nothing here needs scrubbing
+// for the same reason.
+struct ConfirmReply
+{
+    PromptReplyStatus status{PromptReplyStatus::Error};
+    std::string userMessage;
+};
+
 // --- encode (build the CBOR body; the caller frames it) ----------------------
 [[nodiscard]] CborValue toCbor(const PromptRequest& r);
 [[nodiscard]] CborValue toCbor(const PromptCancel&);
 [[nodiscard]] CborValue toCbor(const RequestSecrets& r);
 [[nodiscard]] CborValue toCbor(const PromptReply& r);
 [[nodiscard]] CborValue toCbor(const MultiPromptReply& r);
+[[nodiscard]] CborValue toCbor(const ConfirmAction& r);
+[[nodiscard]] CborValue toCbor(const ConfirmReply& r);
 
 // --- decode (strict; fail closed) --------------------------------------------
 [[nodiscard]] std::expected<PrompterRequest, PrompterParseError>
@@ -142,6 +172,14 @@ parsePrompterRequest(std::span<const std::uint8_t> body);
 // BOTH secrets — and the returned reply.primary / reply.secondary after use.
 [[nodiscard]] std::expected<MultiPromptReply, PrompterParseError>
 parseMultiPromptReply(std::span<const std::uint8_t> body);
+// Confirmation variant. Refuses outright any message that carries a secret
+// field -- the struct having none only constrains this side, so the check is
+// what makes the no-secret guarantee belong to the path. Scrubs its own
+// decoded intermediates on every exit for the same reason: what arrives is
+// not this side's to trust, and decoding has already copied it. An unknown
+// status token fails closed like every other reply here, which on this path
+// means the change is refused.
+[[nodiscard]] std::expected<ConfirmReply, PrompterParseError> parseConfirmReply(std::span<const std::uint8_t> body);
 
 // Encode + send one prompter reply on a connected fd, then zero every
 // secret-bearing buffer this side created: the CBOR tree copy, the encoded
@@ -152,6 +190,10 @@ void sendPromptReplyScrubbed(int connFd, PromptReply& reply) noexcept;
 // Multi-secret overload: same encode-send-zero core, then zeroes BOTH
 // reply.primary and reply.secondary.
 void sendPromptReplyScrubbed(int connFd, MultiPromptReply& reply) noexcept;
+// Confirmation reply: same encode-and-send core, but nothing to scrub
+// afterwards -- the message has no secret field. Named without "Scrubbed" so
+// the absence is visible at the call site rather than implied.
+void sendConfirmReply(int connFd, const ConfirmReply& reply) noexcept;
 
 // --- display -----------------------------------------------------------------
 // Render the UNTRUSTED per-document display names of a batch-sign consent

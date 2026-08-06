@@ -429,4 +429,83 @@ TEST(PrompterProtocol, SendMultiReplyScrubsBothSecretsAfterDelivery)
     ::close(sv[1]);
 }
 
+TEST(PrompterProtocol, ConfirmActionRoundTrips)
+{
+    ConfirmAction in;
+    in.kind = "configure_trust";
+    in.title = "Confirm trust change";
+    in.description = "Add a trusted list";
+    in.requester = "org.librescrs.LibreMac";
+    in.artifact = "TslSources";
+
+    const auto body = toCbor(in).encode();
+    const auto parsed = parsePrompterRequest(body);
+    ASSERT_TRUE(parsed.has_value());
+    const auto* got = std::get_if<ConfirmAction>(&*parsed);
+    ASSERT_NE(got, nullptr);
+    EXPECT_EQ(*got, in);
+}
+
+TEST(PrompterProtocol, ConfirmActionWithoutKindIsRejected)
+{
+    // "kind" is the closed flow discriminator; a message without it must not
+    // fall through to some other arm's defaults.
+    CborValue::Map m;
+    m.emplace("t", CborValue("ConfirmAction"));
+    m.emplace("title", CborValue("t"));
+    m.emplace("description", CborValue("d"));
+    m.emplace("requester", CborValue("r"));
+    m.emplace("artifact", CborValue("a"));
+    const auto body = CborValue(std::move(m)).encode();
+
+    const auto parsed = parsePrompterRequest(body);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error(), PrompterParseError::MissingField);
+}
+
+TEST(PrompterProtocol, ConfirmReplyRoundTripsAndCarriesNoSecret)
+{
+    ConfirmReply in;
+    in.status = PromptReplyStatus::Cancelled;
+    in.userMessage = "declined";
+
+    const auto body = toCbor(in).encode();
+    const auto parsed = parseConfirmReply(body);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->status, PromptReplyStatus::Cancelled);
+    EXPECT_EQ(parsed->userMessage, "declined");
+}
+
+// The confirmation type has no secret field, but that alone only shapes what
+// this side can hold -- it says nothing about what arrives. A reply carrying a
+// secret is refused outright, so the guarantee belongs to the path and not
+// merely to the struct.
+TEST(PrompterProtocol, ConfirmReplyRefusesAMessageCarryingASecret)
+{
+    for (const char* key : {"secret", "primary", "secondary"}) {
+        CborValue::Map m;
+        m.emplace("t", CborValue("Confirm"));
+        m.emplace("status", CborValue("ok"));
+        m.emplace(key, CborValue(std::vector<std::uint8_t>{'1', '2', '3', '4'}));
+        const auto parsed = parseConfirmReply(CborValue(std::move(m)).encode());
+        ASSERT_FALSE(parsed.has_value()) << "a reply carrying " << key << " parsed as a confirmation";
+        EXPECT_EQ(parsed.error(), PrompterParseError::UnknownMessage);
+    }
+}
+
+TEST(PrompterProtocol, ConfirmReplyWithUnknownStatusFailsClosed)
+{
+    // An outcome this build cannot name must never decode as approval. Every
+    // other reply parser here refuses an unknown status token; this one is on
+    // the path that authorizes a trust change, so it refuses too.
+    CborValue::Map m;
+    m.emplace("t", CborValue("Confirm"));
+    m.emplace("status", CborValue("ApprovedByTheFuture"));
+    const auto body = CborValue(std::move(m)).encode();
+
+    const auto parsed = parseConfirmReply(body);
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error(), PrompterParseError::BadEnum);
+}
+
 } // namespace

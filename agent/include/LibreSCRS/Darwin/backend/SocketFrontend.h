@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
+#include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h> // ConfirmAction / ConfirmReply
 #include <LibreSCRS/Agent/wire/Messages.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 
@@ -51,6 +52,7 @@ class SocketFrontend
 {
 public:
     SocketFrontend(SocketTransport& transport, Agent::AgentCore& core, std::string version);
+    ~SocketFrontend();
 
     SocketFrontend(const SocketFrontend&) = delete;
     SocketFrontend& operator=(const SocketFrontend&) = delete;
@@ -78,6 +80,14 @@ public:
     // token cannot inherit a prior client's artifacts. Wired as a third
     // onClientDisconnect handler in main.cpp.
     void onClientDisconnected(const Agent::CallerToken& caller);
+
+    // Ask the human to confirm a trust-tier change. Blocks for as long as the
+    // person takes, so it is called on a worker queue and NEVER on the loop.
+    using ConfirmFn = std::function<wire::ConfirmReply(const wire::ConfirmAction&)>;
+    // Injected at the composition root with the real prompter, and by tests
+    // with a fixed verdict. Call before serving requests. Left unset, trust
+    // writes are refused rather than allowed.
+    void setConfirmProvider(ConfirmFn fn);
 
 private:
     // The request sink (loop thread).
@@ -196,6 +206,23 @@ private:
         Agent::CallerToken owner;
     };
     std::map<std::uint64_t, SignRecord> m_signResults;
+
+    // The human confirmation for trust-tier writes, and the queue it blocks on.
+    // Concurrent, mirroring the prompter server's own worker: the loop queue
+    // serves every connection's reads and must never wait on a person.
+    ConfirmFn m_confirm;
+    dispatch_queue_t m_confirmQueue{nullptr};
+
+    // The trust-tier detour: ask on a worker, come back to the loop, then run
+    // `apply`. Both config writers share it so neither can drift out of the
+    // gate.
+    void confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
+                          const Agent::CallerToken& caller, std::function<void()> apply);
+    static std::string describeTrustChange(const std::string& key);
+    // The per-key write cascades, shared by the immediate and the confirmed
+    // path so both run identical code.
+    void applyConfigWrite(std::uint64_t connId, std::uint64_t req, const Agent::Wire::SetConfig& msg);
+    void applyConfigReset(std::uint64_t connId, std::uint64_t req, const Agent::Wire::ResetConfig& msg);
 };
 
 } // namespace LibreSCRS::Darwin

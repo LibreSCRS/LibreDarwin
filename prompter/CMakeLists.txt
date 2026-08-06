@@ -16,7 +16,8 @@ set_target_properties(LibreDarwinPrompterServer PROPERTIES POSITION_INDEPENDENT_
 find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(SECURITY_FRAMEWORK Security REQUIRED)
-add_executable(librescrs-prompter PrompterMain.mm PromptWindow.mm)
+find_library(LOCALAUTH_FRAMEWORK LocalAuthentication REQUIRED)
+add_executable(librescrs-prompter PrompterMain.mm PromptWindow.mm ConfirmAuthorizer.mm)
 target_compile_options(librescrs-prompter PRIVATE -fexperimental-library)
 target_link_options(librescrs-prompter PRIVATE -fexperimental-library)
 target_link_libraries(librescrs-prompter
@@ -24,7 +25,8 @@ target_link_libraries(librescrs-prompter
         LibreDarwinPrompterServer
         ${APPKIT_FRAMEWORK}
         ${FOUNDATION_FRAMEWORK}
-        ${SECURITY_FRAMEWORK})
+        ${SECURITY_FRAMEWORK}
+        ${LOCALAUTH_FRAMEWORK})
 
 # Bundle-ready: the LibreMac host stages this binary as a sibling of
 # librescrs-agent at Contents/MacOS/librescrs-prompter, with LM-free deps only —

@@ -114,6 +114,35 @@ MacPrompterClient::MacPrompterClient(std::string prompterSocketPath) : m_socketP
 
 MacPrompterClient::~MacPrompterClient() = default;
 
+wire::ConfirmReply MacPrompterClient::requestConfirmation(const wire::ConfirmAction& action)
+{
+    // Same connect/send/receive shape as request(), with no scrubbing anywhere:
+    // nothing on this path carries a secret, and the reply type cannot.
+    // Every failure is a refusal — an unreachable prompter must never read as
+    // an approval nobody gave.
+    const auto refuse = [](std::string why) {
+        return wire::ConfirmReply{wire::PromptReplyStatus::Error, std::move(why)};
+    };
+
+    Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
+    if (!fd) {
+        return refuse("prompter unavailable");
+    }
+    const auto body = wire::toCbor(action).encode();
+    if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
+        return refuse("prompter send failed");
+    }
+    auto frame = Agent::Wire::recvFrame(fd.get());
+    if (!frame.has_value()) {
+        return refuse("prompter recv failed");
+    }
+    auto reply = wire::parseConfirmReply(frame->body);
+    if (!reply.has_value()) {
+        return refuse("prompter reply malformed");
+    }
+    return std::move(*reply);
+}
+
 Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agent::PromptOptions& options)
 {
     Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);

@@ -291,6 +291,37 @@ CborValue toCbor(const RequestSecrets& r)
     return CborValue(std::move(m));
 }
 
+CborValue toCbor(const ConfirmAction& r)
+{
+    Map m;
+    m.emplace("t", CborValue("ConfirmAction"));
+    m.emplace("kind", CborValue(r.kind));
+    if (!r.title.empty()) {
+        m.emplace("title", CborValue(r.title));
+    }
+    if (!r.description.empty()) {
+        m.emplace("description", CborValue(r.description));
+    }
+    if (!r.requester.empty()) {
+        m.emplace("requester", CborValue(r.requester));
+    }
+    if (!r.artifact.empty()) {
+        m.emplace("artifact", CborValue(r.artifact));
+    }
+    return CborValue(std::move(m));
+}
+
+CborValue toCbor(const ConfirmReply& r)
+{
+    Map m;
+    m.emplace("t", CborValue("Confirm"));
+    m.emplace("status", CborValue(std::string(statusName(r.status))));
+    if (!r.userMessage.empty()) {
+        m.emplace("userMessage", CborValue(r.userMessage));
+    }
+    return CborValue(std::move(m));
+}
+
 CborValue toCbor(const PromptReply& r)
 {
     Map m;
@@ -365,6 +396,22 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
         r.primaryMaxLength = static_cast<std::uint32_t>(*priMax);
         r.newMinLength = static_cast<std::uint32_t>(*newMin);
         r.newMaxLength = static_cast<std::uint32_t>(*newMax);
+        return PrompterRequest{std::move(r)};
+    }
+    if (t == "ConfirmAction") {
+        if (kindIt == m.end() || kindIt->second.asText() == nullptr) {
+            return std::unexpected(PrompterParseError::MissingField);
+        }
+        ConfirmAction r;
+        r.kind = *kindIt->second.asText();
+        auto display = optDisplayFields(m);
+        if (!display) {
+            return std::unexpected(PrompterParseError::WrongType);
+        }
+        r.title = std::move(display->title);
+        r.description = std::move(display->description);
+        r.requester = std::move(display->requester);
+        r.artifact = std::move(display->artifact);
         return PrompterRequest{std::move(r)};
     }
     if (t != "RequestSecret") {
@@ -451,6 +498,46 @@ std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const 
     return reply;
 }
 
+std::expected<ConfirmReply, PrompterParseError> parseConfirmReply(std::span<const std::uint8_t> body)
+{
+    std::optional<CborValue> hold;
+    auto mapRes = topMap(body, hold);
+    if (!mapRes) {
+        return std::unexpected(mapRes.error());
+    }
+    // This reply has no secret of its own, but the bytes handed in are not
+    // this side's to trust, and decoding has already copied whatever they
+    // carried. So the tree is zeroed on every exit exactly like the
+    // secret-bearing parsers do.
+    const HoldScrub scrubGuard{hold};
+    const Map& m = **mapRes;
+
+    // A message carrying a secret is not a confirmation. Refusing it here is
+    // what makes "this path cannot transport a secret" a property of the path
+    // rather than a description of the struct: without it, such a message
+    // would parse cleanly and its secret would be silently dropped.
+    if (m.contains("secret") || m.contains("primary") || m.contains("secondary")) {
+        return std::unexpected(PrompterParseError::UnknownMessage);
+    }
+
+    const auto statusIt = m.find("status");
+    if (statusIt == m.end() || statusIt->second.asText() == nullptr) {
+        return std::unexpected(PrompterParseError::MissingField);
+    }
+    const auto status = statusFromName(*statusIt->second.asText());
+    if (!status) {
+        return std::unexpected(PrompterParseError::BadEnum);
+    }
+    const auto msg = optText(m, "userMessage");
+    if (!msg) {
+        return std::unexpected(PrompterParseError::WrongType);
+    }
+    ConfirmReply reply;
+    reply.status = *status;
+    reply.userMessage = std::move(*msg);
+    return reply;
+}
+
 std::expected<MultiPromptReply, PrompterParseError> parseMultiPromptReply(std::span<const std::uint8_t> body)
 {
     std::optional<CborValue> hold;
@@ -501,6 +588,13 @@ void sendPromptReplyScrubbed(int connFd, PromptReply& reply) noexcept
 {
     sendReplyAndZeroWire(connFd, reply);
     secureZero(reply.secret);
+}
+
+void sendConfirmReply(int connFd, const ConfirmReply& reply) noexcept
+{
+    // The wire buffers are zeroed by the shared core anyway; there is simply
+    // no secret in the struct to zero after it.
+    sendReplyAndZeroWire(connFd, reply);
 }
 
 void sendPromptReplyScrubbed(int connFd, MultiPromptReply& reply) noexcept
