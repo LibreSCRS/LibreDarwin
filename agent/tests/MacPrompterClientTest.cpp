@@ -41,6 +41,15 @@ std::string uniquePath()
     return "/tmp/ld-pp-" + std::to_string(::getpid()) + "-" + std::to_string(std::rand()) + ".sock";
 }
 
+// The fake prompters below are served by this unsigned test binary itself, so
+// the client's default code-signing verification of the serving peer would
+// (correctly) reject them: inject a permissive verifier everywhere except the
+// tests that pin the rejection path.
+MacPrompterClient::PeerVerifier trustAnyPeerForTest()
+{
+    return [](int) { return true; };
+}
+
 // A fake prompter: binds `path`, accepts connections, and replies to each
 // request with a fixed reply. Also captures the LAST PromptRequest it parsed
 // off the wire (mirrors FakeChangePrompter's capture below) so a test can
@@ -236,7 +245,7 @@ TEST(MacPrompterClient, OkReplyScrubsSecretIntoSecureString)
     reply.secret = {'1', '3', '5', '7'}; // fake test value, not a card PIN
     FakePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPin(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Ok);
     ASSERT_TRUE(r.secret.has_value());
@@ -250,7 +259,7 @@ TEST(MacPrompterClient, CancelledReplyMapsToCancelled)
     reply.status = wire::PromptReplyStatus::Cancelled;
     FakePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestCan(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Cancelled);
     EXPECT_FALSE(r.secret.has_value());
@@ -263,7 +272,7 @@ TEST(MacPrompterClient, UnauthorizedReplyMapsToError)
     reply.status = wire::PromptReplyStatus::Unauthorized;
     FakePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPin(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Error);
 }
@@ -293,7 +302,7 @@ TEST(MacPrompterClient, RequestPinForwardsArtifactsAndTheBatchTokenToTheWireRequ
     options.artifact = "signature-batch";
     options.artifacts = {"a.pdf", "b.pdf", "c.pdf"};
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     static_cast<void>(client.requestPin(options));
 
     server.waitUntilServed();
@@ -317,7 +326,7 @@ TEST(MacPrompterClient, RequestPinLeavesArtifactsEmptyForANonBatchPrompt)
     Agent::PromptOptions options;
     options.artifact = "signature";
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     static_cast<void>(client.requestPin(options));
 
     server.waitUntilServed();
@@ -342,7 +351,7 @@ TEST(MacPrompterClient, RequestCanForwardsRetryContextToTheWireRequest)
     options.attempt = 2;
     options.lastError = "librescrs.error.preRead.authFailed";
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     static_cast<void>(client.requestCan(options));
 
     server.waitUntilServed();
@@ -362,7 +371,7 @@ TEST(MacPrompterClient, RequestCanLeavesRetryContextAbsentForAFirstPrompt)
     reply.status = wire::PromptReplyStatus::Cancelled;
     FakePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     static_cast<void>(client.requestCan(Agent::PromptOptions{}));
 
     server.waitUntilServed();
@@ -389,7 +398,7 @@ TEST(MacPrompterClient, ChangeOkReplyDeliversBothSecretsAndDuplicatesBounds)
     options.minLength = 4;
     options.maxLength = 8;
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPinChange(options);
     EXPECT_EQ(r.status, Agent::PromptStatus::Ok);
     ASSERT_TRUE(r.current.has_value());
@@ -430,7 +439,7 @@ TEST(MacPrompterClient, ChangeOkReplyLeavesNoPlaintextInFakeBuffers)
     reply.secondary = {'2', '4', '6', '8'};
     FakeChangePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPinChange(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Ok);
 
@@ -452,7 +461,7 @@ TEST(MacPrompterClient, ChangeCancelledReplyMapsToCancelledWithoutSecrets)
     reply.status = wire::PromptReplyStatus::Cancelled;
     FakeChangePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPinChange(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Cancelled);
     EXPECT_FALSE(r.current.has_value());
@@ -467,7 +476,7 @@ TEST(MacPrompterClient, ChangeErrorReplyCarriesUserMessage)
     reply.userMessage = "change failed";
     FakeChangePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPinChange(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Error);
     EXPECT_EQ(r.userMessage, "change failed");
@@ -481,7 +490,7 @@ TEST(MacPrompterClient, ChangeMalformedReplyFailsClosed)
     // Not decodable CBOR: bare "break" stop codes.
     FakeChangePrompter server(path, std::vector<std::uint8_t>{0xFF, 0xFF, 0xFF});
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPinChange(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Error);
     EXPECT_FALSE(r.current.has_value());
@@ -498,7 +507,7 @@ TEST(MacPrompterClient, ChangeOversizeSecretFailsClosed)
     reply.secondary = {'2', '4', '6', '8'};
     FakeChangePrompter server(path, reply);
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto r = client.requestPinChange(Agent::PromptOptions{});
     EXPECT_EQ(r.status, Agent::PromptStatus::Error);
     EXPECT_FALSE(r.current.has_value());
@@ -619,6 +628,46 @@ TEST(MacPrompterClient, MissingPrompterRefusesTheConfirmation)
 
     EXPECT_EQ(reply.status, wire::PromptReplyStatus::Error);
     EXPECT_NE(reply.status, wire::PromptReplyStatus::Ok);
+}
+
+// A serving peer that fails verification gets NOTHING: no request bytes cross
+// the socket and its reply is never consumed — a same-uid process re-binding
+// prompter.sock must not be able to feed the agent a "PIN" the card would
+// burn a retry counter on.
+TEST(MacPrompterClient, RejectedServingPeerGetsNoRequestAndItsReplyIsNeverConsumed)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Ok;
+    reply.secret = {'6', '6', '6', '6'}; // an injected wrong PIN, if it ever got through
+    FakePrompter server(path, reply);
+
+    MacPrompterClient client(path, [](int) { return false; }); // verification fails
+    const auto r = client.requestPin(Agent::PromptOptions{});
+    EXPECT_EQ(r.status, Agent::PromptStatus::Error);
+    EXPECT_EQ(r.userMessage, "prompter peer verification failed");
+    EXPECT_FALSE(r.secret.has_value());
+    // The client bailed before sending: the fake can never have parsed a request.
+    EXPECT_FALSE(server.capturedRequest().has_value());
+}
+
+// The change path takes the identical pre-send gate.
+TEST(MacPrompterClient, RejectedServingPeerFailsTheChangeRequestClosed)
+{
+    const std::string path = uniquePath();
+    wire::MultiPromptReply reply;
+    reply.status = wire::PromptReplyStatus::Ok;
+    reply.primary = {'6', '6', '6', '6'};
+    reply.secondary = {'7', '7', '7', '7'};
+    FakeChangePrompter server(path, reply);
+
+    MacPrompterClient client(path, [](int) { return false; }); // verification fails
+    const auto r = client.requestPinChange(Agent::PromptOptions{});
+    EXPECT_EQ(r.status, Agent::PromptStatus::Error);
+    EXPECT_EQ(r.userMessage, "prompter peer verification failed");
+    EXPECT_FALSE(r.current.has_value());
+    EXPECT_FALSE(r.newPin.has_value());
+    EXPECT_FALSE(server.capturedRequest().has_value());
 }
 
 } // namespace

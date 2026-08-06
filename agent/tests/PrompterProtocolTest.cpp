@@ -107,6 +107,40 @@ TEST(PrompterProtocol, FormatUntrustedArtifactListLabelsCapsAndNeutralizes)
         << "each separator renders as one space on one line";
 }
 
+// Security: the bidirectional format controls (U+200E/U+200F marks,
+// U+202A–U+202E embeddings/overrides, U+2066–U+2069 isolates) must not
+// survive into the consent list — a crafted name could otherwise visually
+// reorder or disguise itself next to the trusted chrome.
+TEST(PrompterProtocol, FormatUntrustedArtifactListNeutralizesBidiFormatControls)
+{
+    const std::vector<std::string> controls = {
+        "\xE2\x80\x8E", // U+200E LEFT-TO-RIGHT MARK
+        "\xE2\x80\x8F", // U+200F RIGHT-TO-LEFT MARK
+        "\xE2\x80\xAA", // U+202A LEFT-TO-RIGHT EMBEDDING
+        "\xE2\x80\xAB", // U+202B RIGHT-TO-LEFT EMBEDDING
+        "\xE2\x80\xAC", // U+202C POP DIRECTIONAL FORMATTING
+        "\xE2\x80\xAD", // U+202D LEFT-TO-RIGHT OVERRIDE
+        "\xE2\x80\xAE", // U+202E RIGHT-TO-LEFT OVERRIDE
+        "\xE2\x81\xA6", // U+2066 LEFT-TO-RIGHT ISOLATE
+        "\xE2\x81\xA7", // U+2067 RIGHT-TO-LEFT ISOLATE
+        "\xE2\x81\xA8", // U+2068 FIRST STRONG ISOLATE
+        "\xE2\x81\xA9", // U+2069 POP DIRECTIONAL ISOLATE
+    };
+    for (const auto& seq : controls) {
+        const auto out = formatUntrustedArtifactList({"evil" + seq + ".pdf"}, 8);
+        EXPECT_EQ(out.find(seq), std::string::npos) << "a bidi/format control must be neutralized";
+    }
+
+    // The classic extension spoof: an RLO before "fdp.tcartnoc" would render
+    // as "contract.pdf"; after neutralization it stays in logical order with
+    // the override collapsed to one space.
+    const auto spoof = formatUntrustedArtifactList({"evil\xE2\x80\xAE"
+                                                    "fdp.tcartnoc"},
+                                                   8);
+    EXPECT_EQ(spoof.find("\xE2\x80\xAE"), std::string::npos);
+    EXPECT_NE(spoof.find("evil fdp.tcartnoc"), std::string::npos) << "the override collapses to one space";
+}
+
 // A mistyped `artifacts` (present but not an array) fails the whole request
 // closed, exactly like every other present-but-wrong-typed field on this
 // wire (optDisplayFields/optUint) — a missing entry is tolerated, a

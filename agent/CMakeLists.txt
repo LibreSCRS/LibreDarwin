@@ -21,7 +21,8 @@ find_library(BSM_LIB bsm REQUIRED) # audit_token_to_pid / _pidversion (PeerIdent
 add_library(LibreDarwinWireCore STATIC
     src/backend/wire/AnonFd.cpp
     src/backend/wire/PrompterProtocol.cpp
-    src/backend/PeerIdentity.cpp)
+    src/backend/PeerIdentity.cpp
+    src/backend/PeerCodeSigning.cpp)
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(LibreDarwinWireCore PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinWireCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -31,7 +32,9 @@ target_link_libraries(LibreDarwinWireCore
     PUBLIC
         LibreAgent::Wire # AnonFd.h/PrompterProtocol.h expose UniqueFd/CborValue in their public API
     PRIVATE
-        ${BSM_LIB})  # PeerIdentity audit_token_to_pid
+        ${BSM_LIB}                     # PeerIdentity audit_token_to_pid
+        ${SECURITY_FRAMEWORK}          # PeerCodeSigning SecTask resolution
+        ${CORE_FOUNDATION_FRAMEWORK})
 
 add_library(LibreDarwinAgentBackend STATIC
     src/backend/SocketTransport.cpp

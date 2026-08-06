@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
+#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
 
 #include <LibreSCRS/Agent/backend/Authorizer.h>
@@ -40,12 +41,9 @@ public:
     // transport's credentialsFor). Injected so the gate stays testable.
     using CredentialsResolver = std::function<std::optional<PeerCredentials>(const Agent::CallerToken&)>;
 
-    // The code-signing facts read from a peer's audit_token.
-    struct PeerAuth
-    {
-        std::optional<std::string> signingId; // SecTaskCopySigningIdentifier (nullopt if unsigned)
-        std::vector<std::string> appGroups;   // com.apple.security.application-groups
-    };
+    // The code-signing facts read from a peer's audit_token (the shared
+    // SecTask resolution in PeerCodeSigning.h).
+    using PeerAuth = PeerCodeSigning;
     // Resolves a peer's SecTask facts. Default = real SecTask; a fake is injected
     // in tests (the test binary has no meaningful signing identity).
     using AuthResolver = std::function<PeerAuth(const PeerCredentials&)>;

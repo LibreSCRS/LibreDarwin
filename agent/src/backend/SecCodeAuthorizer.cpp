@@ -9,77 +9,13 @@
 
 #include <LibreSCRS/Agent/backend/Logging.h>
 
-#include <CoreFoundation/CoreFoundation.h>
-#include <Security/SecTask.h>
-
 #include <algorithm>
-#include <cstring>
 #include <utility>
 
 namespace LibreSCRS::Darwin {
 namespace {
 
 namespace log = Agent::log;
-
-std::optional<std::string> cfStringToStd(CFStringRef s)
-{
-    if (s == nullptr) {
-        return std::nullopt;
-    }
-    if (const char* fast = CFStringGetCStringPtr(s, kCFStringEncodingUTF8)) {
-        return std::string(fast);
-    }
-    const CFIndex len = CFStringGetLength(s);
-    const CFIndex max = CFStringGetMaximumSizeForEncoding(len, kCFStringEncodingUTF8) + 1;
-    std::string out(static_cast<std::size_t>(max), '\0');
-    if (CFStringGetCString(s, out.data(), max, kCFStringEncodingUTF8) == false) {
-        return std::nullopt;
-    }
-    out.resize(std::strlen(out.c_str()));
-    return out;
-}
-
-// Real SecTask resolution: audit_token -> signing identifier + app groups.
-SecCodeAuthorizer::PeerAuth resolveWithSecTask(const PeerCredentials& creds)
-{
-    SecCodeAuthorizer::PeerAuth out;
-    SecTaskRef task = SecTaskCreateWithAuditToken(nullptr, creds.auditToken);
-    if (task == nullptr) {
-        return out; // unidentifiable -> empty (denied where an allow-list applies)
-    }
-
-    CFErrorRef err = nullptr;
-    if (CFStringRef sid = SecTaskCopySigningIdentifier(task, &err)) {
-        out.signingId = cfStringToStd(sid);
-        CFRelease(sid);
-    }
-    if (err != nullptr) {
-        CFRelease(err);
-        err = nullptr;
-    }
-
-    CFStringRef key = CFSTR("com.apple.security.application-groups");
-    if (CFTypeRef value = SecTaskCopyValueForEntitlement(task, key, &err)) {
-        if (CFGetTypeID(value) == CFArrayGetTypeID()) {
-            auto array = static_cast<CFArrayRef>(value);
-            const CFIndex n = CFArrayGetCount(array);
-            for (CFIndex i = 0; i < n; ++i) {
-                auto item = static_cast<CFStringRef>(CFArrayGetValueAtIndex(array, i));
-                if (CFGetTypeID(item) == CFStringGetTypeID()) {
-                    if (auto g = cfStringToStd(item)) {
-                        out.appGroups.push_back(std::move(*g));
-                    }
-                }
-            }
-        }
-        CFRelease(value);
-    }
-    if (err != nullptr) {
-        CFRelease(err);
-    }
-    CFRelease(task);
-    return out;
-}
 
 bool contains(const std::vector<std::string>& list, const std::string& v)
 {
@@ -89,7 +25,7 @@ bool contains(const std::vector<std::string>& list, const std::string& v)
 } // namespace
 
 SecCodeAuthorizer::SecCodeAuthorizer(CredentialsResolver credentials, Policy policy)
-    : m_credentials(std::move(credentials)), m_policy(std::move(policy)), m_authResolver(&resolveWithSecTask)
+    : m_credentials(std::move(credentials)), m_policy(std::move(policy)), m_authResolver(&resolvePeerCodeSigning)
 {}
 
 SecCodeAuthorizer::~SecCodeAuthorizer() = default;

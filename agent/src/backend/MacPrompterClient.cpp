@@ -6,6 +6,8 @@
 // and zeroing the transfer buffer. The secret never transits a client.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 
+#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
+
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 
@@ -110,7 +112,19 @@ Agent::PinChangePromptResult changeErrorResult(std::string message)
 
 } // namespace
 
-MacPrompterClient::MacPrompterClient(std::string prompterSocketPath) : m_socketPath(std::move(prompterSocketPath)) {}
+MacPrompterClient::MacPrompterClient(std::string prompterSocketPath, PeerVerifier peerVerifier)
+    : m_socketPath(std::move(prompterSocketPath)), m_peerVerifier(std::move(peerVerifier))
+{
+    if (!m_peerVerifier) {
+        // Default: the serving peer must BE the prompter — signing id bound to
+        // our Team ID via the App-Group entitlement (mirror of the prompter's
+        // accept-time check on the agent).
+        m_peerVerifier = [](int connectedFd) {
+            return verifyConnectedPeer(connectedFd, ExpectedPeerIdentity{.signingId = std::string(kPrompterSigningId),
+                                                                         .appGroup = std::string(kAppGroup)});
+        };
+    }
+}
 
 MacPrompterClient::~MacPrompterClient() = default;
 
@@ -148,6 +162,11 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
     Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
     if (!fd) {
         return errorResult("prompter unavailable");
+    }
+    // Verify the SERVING peer before anything crosses the socket: a re-bound
+    // prompter.sock must get no request and have no reply consumed.
+    if (!m_peerVerifier(fd.get())) {
+        return errorResult("prompter peer verification failed");
     }
 
     const auto body = wire::toCbor(buildRequest(kind, options)).encode();
@@ -218,6 +237,10 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
     if (!fd) {
         return changeErrorResult("prompter unavailable");
     }
+    // Same serving-peer verification as the single-secret path.
+    if (!m_peerVerifier(fd.get())) {
+        return changeErrorResult("prompter peer verification failed");
+    }
 
     const auto body = wire::toCbor(buildChangeRequest(options)).encode();
     if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
@@ -272,9 +295,11 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
 
 void MacPrompterClient::cancel() noexcept
 {
-    // Best-effort cross-connection dismiss of whatever modal is up.
+    // Best-effort cross-connection dismiss of whatever modal is up. Verified
+    // like the request paths for uniformity (a rejected peer simply gets no
+    // frame at all).
     Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
-    if (!fd) {
+    if (!fd || !m_peerVerifier(fd.get())) {
         return;
     }
     const auto body = wire::toCbor(wire::PromptCancel{}).encode();

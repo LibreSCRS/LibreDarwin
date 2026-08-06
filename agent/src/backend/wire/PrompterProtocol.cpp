@@ -621,9 +621,28 @@ std::string neutralizeDisplayName(std::string name)
     }
     // The Cocoa text engine also honours the multi-byte Unicode separators as
     // mandatory line breaks (U+2028 LINE SEPARATOR, U+2029 PARAGRAPH SEPARATOR,
-    // U+0085 NEXT LINE), which the byte-wise pass above cannot catch; collapse
-    // each to one space so they cannot forge extra lines either.
-    for (const std::string_view sep : {"\xE2\x80\xA8", "\xE2\x80\xA9", "\xC2\x85"}) {
+    // U+0085 NEXT LINE), which the byte-wise pass above cannot catch — and the
+    // bidirectional format controls (U+200E/U+200F marks, U+202A–U+202E
+    // embeddings/overrides, U+2066–U+2069 isolates) can visually reorder or
+    // disguise a name inside the consent list. Collapse each to one space so a
+    // crafted name can neither forge extra lines nor reorder what the user
+    // reads.
+    for (const std::string_view sep : {
+             "\xE2\x80\xA8", // U+2028 LINE SEPARATOR
+             "\xE2\x80\xA9", // U+2029 PARAGRAPH SEPARATOR
+             "\xC2\x85",     // U+0085 NEXT LINE
+             "\xE2\x80\x8E", // U+200E LEFT-TO-RIGHT MARK
+             "\xE2\x80\x8F", // U+200F RIGHT-TO-LEFT MARK
+             "\xE2\x80\xAA", // U+202A LEFT-TO-RIGHT EMBEDDING
+             "\xE2\x80\xAB", // U+202B RIGHT-TO-LEFT EMBEDDING
+             "\xE2\x80\xAC", // U+202C POP DIRECTIONAL FORMATTING
+             "\xE2\x80\xAD", // U+202D LEFT-TO-RIGHT OVERRIDE
+             "\xE2\x80\xAE", // U+202E RIGHT-TO-LEFT OVERRIDE
+             "\xE2\x81\xA6", // U+2066 LEFT-TO-RIGHT ISOLATE
+             "\xE2\x81\xA7", // U+2067 RIGHT-TO-LEFT ISOLATE
+             "\xE2\x81\xA8", // U+2068 FIRST STRONG ISOLATE
+             "\xE2\x81\xA9", // U+2069 POP DIRECTIONAL ISOLATE
+         }) {
         for (std::size_t pos = 0; (pos = name.find(sep, pos)) != std::string::npos; ++pos) {
             name.replace(pos, sep.size(), " ");
         }

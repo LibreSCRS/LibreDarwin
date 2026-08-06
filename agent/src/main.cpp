@@ -181,7 +181,16 @@ int main()
             .allowedSigningIds = {},
             .requiredAppGroup = std::string(LIBREDARWIN_APP_GROUP),
         });
-    auto prompter = std::make_shared<LibreSCRS::Darwin::MacPrompterClient>(prompterSocket);
+    // The prompter client verifies the SERVING peer's code-signing identity by
+    // default (a re-bound prompter.sock must not be able to inject a secret the
+    // agent would burn a card retry counter on).
+    // LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER=1 is the explicit development
+    // opt-out for unsigned local builds; never set it in production.
+    LibreSCRS::Darwin::MacPrompterClient::PeerVerifier prompterVerifier; // empty => default verification
+    if (envOr("LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER", "") == "1") {
+        prompterVerifier = [](int) { return true; };
+    }
+    auto prompter = std::make_shared<LibreSCRS::Darwin::MacPrompterClient>(prompterSocket, std::move(prompterVerifier));
 
     // [3] The owning neutral-core aggregate.
     std::mutex stateMutex;

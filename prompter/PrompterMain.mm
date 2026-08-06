@@ -9,16 +9,17 @@
 #include "ConfirmAuthorizer.h"
 #include "PrompterServer.h"
 
+#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
+
 #import <AppKit/AppKit.h>
-#import <Security/Security.h>
 
 #include <pwd.h>
 #include <unistd.h>
 
 #include <cstdlib>
 #include <memory>
-#include <optional>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -44,39 +45,31 @@ std::string prompterSocketPath()
     return realHomeDir() + "/Library/Group Containers/group.org.librescrs.LibreMac/prompter.sock";
 }
 
-// The connecting peer must be the agent. If LIBRESCRS_AGENT_SIGNING_ID is set, we
-// require the peer's SecTask signing identifier to match it (production);
-// otherwise (dev) we only require an identifiable same-user peer (the 0600 socket
-// already restricts to our uid). The real deployment sets the env from the
-// agent's bundle id.
+// The connecting peer must be the agent. By DEFAULT the peer's code-signing
+// identity is verified: its SecTask signing identifier must match the agent's
+// (LIBRESCRS_AGENT_SIGNING_ID overrides the built-in expectation for
+// repackaged deployments) AND it must carry our App-Group entitlement, which
+// Apple provisions per Team ID — the shared PeerCodeSigning gate. The ONLY way
+// to skip verification is the explicit development opt-out
+// LIBRESCRS_PROMPTER_ALLOW_UNVERIFIED_PEER=1 (unsigned local builds; the 0600
+// socket still restricts connections to our uid). Never set it in production:
+// with it, any same-uid process can raise the PIN window and receive the
+// typed secret.
 LibreSCRS::Darwin::PrompterServer::PeerAuthorized makePeerAuth()
 {
-    std::optional<std::string> expected;
-    if (const char* env = std::getenv("LIBRESCRS_AGENT_SIGNING_ID")) {
-        expected = env;
+    if (const char* optOut = std::getenv("LIBRESCRS_PROMPTER_ALLOW_UNVERIFIED_PEER");
+        optOut != nullptr && std::string_view(optOut) == "1") {
+        return [](const LibreSCRS::Darwin::PeerCredentials&) {
+            return true; // development opt-out: any identifiable same-uid peer
+        };
+    }
+    LibreSCRS::Darwin::ExpectedPeerIdentity expected{.signingId = std::string(LibreSCRS::Darwin::kAgentSigningId),
+                                                     .appGroup = std::string(LibreSCRS::Darwin::kAppGroup)};
+    if (const char* env = std::getenv("LIBRESCRS_AGENT_SIGNING_ID"); env != nullptr && *env != '\0') {
+        expected.signingId = env;
     }
     return [expected](const LibreSCRS::Darwin::PeerCredentials& creds) -> bool {
-        if (!expected) {
-            return true; // dev: any identifiable same-uid peer
-        }
-        SecTaskRef task = SecTaskCreateWithAuditToken(nullptr, creds.auditToken);
-        if (task == nullptr) {
-            return false;
-        }
-        bool ok = false;
-        CFErrorRef err = nullptr;
-        if (CFStringRef sid = SecTaskCopySigningIdentifier(task, &err)) {
-            char buf[256];
-            if (CFStringGetCString(sid, buf, sizeof(buf), kCFStringEncodingUTF8)) {
-                ok = (*expected == buf);
-            }
-            CFRelease(sid);
-        }
-        if (err != nullptr) {
-            CFRelease(err);
-        }
-        CFRelease(task);
-        return ok;
+        return LibreSCRS::Darwin::matchesExpectedPeer(LibreSCRS::Darwin::resolvePeerCodeSigning(creds), expected);
     };
 }
 

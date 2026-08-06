@@ -70,7 +70,14 @@ std::expected<Agent::Wire::UniqueFd, std::string> bindContainerSocket(const std:
     sockaddr_un addr{};
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
-    if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+    // The socket inode must be owner-only at EVERY instant: bind() creates it
+    // with 0777 & ~umask, so a plain bind-then-chmod leaves a window in which
+    // another uid could connect. Force 0600 at creation via umask; the chmod
+    // stays as a belt-and-suspenders for an inherited surprise umask.
+    const mode_t savedUmask = ::umask(0177);
+    const int bindRc = ::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
+    ::umask(savedUmask);
+    if (bindRc != 0) {
         return std::unexpected(std::format("bind({}): {}", path, std::strerror(errno)));
     }
     ::chmod(path.c_str(), 0600);
