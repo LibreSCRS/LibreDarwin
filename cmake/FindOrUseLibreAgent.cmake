@@ -40,7 +40,7 @@ else()
     # that moves this line and the client's recorded revision together.
     FetchContent_Declare(LibreAgent
         GIT_REPOSITORY https://github.com/LibreSCRS/LibreAgent.git
-        GIT_TAG 486a8459b4e07bdb5a3ee813f173c7a2ca4615b7)
+        GIT_TAG 8fbc9e348a287acaf3d80daf85232e13b125767e)
     FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core + LibreAgent::Wire
 
     # The neutral core uses std::jthread/std::stop_token, which AppleClang 16/17
