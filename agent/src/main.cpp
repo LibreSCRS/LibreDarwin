@@ -9,6 +9,7 @@
 // presence.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 #include <LibreSCRS/Darwin/backend/OsLogSink.h>
+#include <LibreSCRS/Darwin/backend/PluginDirectory.h>
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 #include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
@@ -30,7 +31,6 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
 
-#include <mach-o/dyld.h>
 #include <pwd.h>
 
 #include <csignal>
@@ -40,7 +40,6 @@
 #include <mutex>
 #include <optional>
 #include <string>
-#include <vector>
 
 #ifndef LIBREDARWIN_VERSION_STR
 #define LIBREDARWIN_VERSION_STR "0.1.0"
@@ -89,40 +88,6 @@ fs::path containerDir()
         return fs::path(over);
     }
     return realHomeDir() / "Library" / "Group Containers" / LIBREDARWIN_APP_GROUP;
-}
-
-// The running executable's own path, resolved via _NSGetExecutablePath (there is
-// no /proc on Darwin). Returns std::nullopt if the buffer growth loop fails —
-// callers fall back to the non-exe-relative candidate.
-std::optional<fs::path> executablePath()
-{
-    std::uint32_t size = 0;
-    _NSGetExecutablePath(nullptr, &size); // first call: report the required size
-    std::vector<char> buf(size);
-    if (_NSGetExecutablePath(buf.data(), &size) != 0) {
-        return std::nullopt;
-    }
-    std::error_code ec;
-    fs::path resolved = fs::canonical(fs::path(buf.data()), ec);
-    return ec ? fs::path(buf.data()) : resolved;
-}
-
-// The plugin directory default: env override -> the bundled PlugIns directory
-// next to the executable (the LibreMac host layout, Contents/MacOS/librescrs-agent
-// + Contents/PlugIns/librescrs) if it exists -> the dev-harness install prefix.
-fs::path defaultPluginDir()
-{
-    if (const char* over = std::getenv("LIBRESCRS_PLUGIN_DIR"); over != nullptr && *over != '\0') {
-        return fs::path(over);
-    }
-    if (auto exe = executablePath()) {
-        fs::path bundled = exe->parent_path() / ".." / "PlugIns" / "librescrs";
-        std::error_code ec;
-        if (fs::is_directory(bundled, ec)) {
-            return bundled;
-        }
-    }
-    return fs::path(LIBRESCRS_DEFAULT_PLUGIN_DIR);
 }
 
 // The macOS reader-routing seams AgentCore consults: reader wire handle ->
@@ -183,7 +148,10 @@ int main()
     const std::string prompterSocket = envOr("LIBRESCRS_PROMPTER_SOCK", (container / "prompter.sock").string());
     const fs::path configFile = container / "config.json";
     const fs::path cacheRoot = container / "cache";
-    const fs::path pluginDir = defaultPluginDir();
+    const auto pluginDir =
+        Darwin::resolvePluginDir(Darwin::PluginDirInputs{.environment = envOr("LIBRESCRS_PLUGIN_DIR", std::string()),
+                                                         .executable = Darwin::currentExecutablePath(),
+                                                         .compiledDefault = LIBRESCRS_DEFAULT_PLUGIN_DIR});
 
     // [1] Platform primitives: the socket transport (self-binds the container
     // socket) + the plugin capability resolver owned here at the entry point.
@@ -194,7 +162,12 @@ int main()
     }
     auto transport = std::move(*created);
 
-    auto pluginService = std::make_shared<LibreSCRS::Plugin::CardPluginService>(pluginDir);
+    auto pluginService = std::make_shared<LibreSCRS::Plugin::CardPluginService>(pluginDir.dir);
+    // Say which directory won, why the others lost, and how many plugins came out
+    // of it. Zero is a warning: with no plugins loaded every card reports as
+    // unusable, which from the outside is indistinguishable from a card nothing
+    // supports — and nothing else in the process names the directory.
+    Darwin::reportPluginLoad(pluginDir, *pluginService);
     Agent::PluginCapabilityResolver resolver(std::move(pluginService));
 
     // [2] Interface impls the core borrows: the SecCode identity gate + the

@@ -42,6 +42,7 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/SystemLifecycle.mm
     src/backend/OsLogSink.cpp
     src/backend/ProcessHardening.cpp
+    src/backend/PluginDirectory.cpp
     # Operation subclasses: platform-neutral, so they depend only on core flows +
     # OperationBase + the OperationChannel interface, never on the transport.
     # They are duplicated per host rather than shared from the core; promoting

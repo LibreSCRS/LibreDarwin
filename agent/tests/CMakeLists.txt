@@ -20,7 +20,7 @@ target_link_options(OsLogSinkTest PRIVATE -fexperimental-library)
 add_test(NAME OsLogSinkTest COMMAND OsLogSinkTest)
 
 # Backend: peer identity + the socket transport (real bound socket + GCD loop).
-foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest ReadCertificatesOperationTest ManagePinOperationTest)
+foreach(backend_test PeerIdentityTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest ReadCertificatesOperationTest ManagePinOperationTest PluginDirectoryTest)
     add_executable(${backend_test} ${backend_test}.cpp)
     target_link_libraries(${backend_test}
         PRIVATE
