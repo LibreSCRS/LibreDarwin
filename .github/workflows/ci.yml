@@ -123,11 +123,9 @@ jobs:
 
       - name: Crash detail
         # DIAGNOSTIC, on this verify branch only. ctest reports a signal death as
-        # a bare "Bus error" with no output at all, which says nothing about which
-        # case died or where. Re-running the binary directly keeps gtest's own
-        # [ RUN ] / [ OK ] trail -- the case that opens without closing is the one
-        # that dies -- and macOS files a crash report carrying the faulting
-        # thread's backtrace.
+        # a bare "Bus error" with no output, and the crash report macOS files
+        # carries no symbols -- so the previous round could name the dying case
+        # (GetConfigReturnsEntries) but not the frame. lldb gives both.
         if: failure()
         working-directory: LibreDarwin
         run: |
@@ -135,20 +133,15 @@ jobs:
           bin=$(find build -type f -name SocketFrontendTest | head -1)
           echo "binary: ${bin:-NOT FOUND}"
           [ -n "$bin" ] || exit 0
-          "$bin" > /tmp/sft.log 2>&1
-          echo "=== exit code: $? ==="
-          echo "=== last cases entered ==="
-          grep -a "\[ RUN" /tmp/sft.log | tail -5
-          echo "=== tail of the run ==="
-          tail -80 /tmp/sft.log
-          # The report lands a moment after the process dies.
-          for i in $(seq 1 15); do
-            ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -q . && break
-            sleep 2
-          done
-          echo "=== diagnostic reports ==="
-          ls -t ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -5
-          for f in $(ls -t ~/Library/Logs/DiagnosticReports/* 2>/dev/null | head -2); do
-            echo "===== $f"
-            head -200 "$f"
-          done
+
+          # Whole binary, in order: the death is ~30s in, and running the case
+          # alone may not reproduce it if it depends on what ran before.
+          echo "===== full run under lldb ====="
+          lldb --batch -o run -o "thread backtrace all" -o "register read" -o quit \
+               -- "$bin" 2>&1 | tail -200
+
+          # The same case on its own. If this one survives, the fault needs the
+          # preceding cases -- which is itself the answer to where to look.
+          echo "===== the dying case alone ====="
+          lldb --batch -o run -o "thread backtrace all" -o quit \
+               -- "$bin" --gtest_filter='SocketFrontend.GetConfigReturnsEntries' 2>&1 | tail -60
