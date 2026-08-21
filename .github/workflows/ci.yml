@@ -16,6 +16,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs. Without this the only ways to exercise the macOS job are a push
+  # to main or an open pull request, so a change that cannot be built anywhere
+  # else has no way to be checked before it lands.
+  workflow_dispatch:
 
 jobs:
   format-check:
