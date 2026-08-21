@@ -249,13 +249,19 @@ CborValue toCbor(const PromptRequest& r)
     if (!r.lastError.empty()) {
         m.emplace("lastError", CborValue(r.lastError));
     }
+    if (!r.promptId.empty()) {
+        m.emplace("promptId", CborValue(r.promptId));
+    }
     return CborValue(std::move(m));
 }
 
-CborValue toCbor(const PromptCancel&)
+CborValue toCbor(const PromptCancel& r)
 {
     Map m;
     m.emplace("t", CborValue("CancelCurrent"));
+    if (!r.promptId.empty()) {
+        m.emplace("promptId", CborValue(r.promptId));
+    }
     return CborValue(std::move(m));
 }
 
@@ -287,6 +293,9 @@ CborValue toCbor(const RequestSecrets& r)
     }
     if (r.newMaxLength != 0) {
         m.emplace("newMaxLength", CborValue::uint(r.newMaxLength));
+    }
+    if (!r.promptId.empty()) {
+        m.emplace("promptId", CborValue(r.promptId));
     }
     return CborValue(std::move(m));
 }
@@ -367,7 +376,13 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     const std::string& t = *tIt->second.asText();
 
     if (t == "CancelCurrent") {
-        return PrompterRequest{PromptCancel{}};
+        auto id = optText(m, "promptId");
+        if (!id) {
+            return std::unexpected(PrompterParseError::WrongType);
+        }
+        PromptCancel c;
+        c.promptId = std::move(*id);
+        return PrompterRequest{std::move(c)};
     }
 
     // Both secret requests carry a "kind" discriminator: a closed enum for the
@@ -385,7 +400,8 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
         const auto priMax = optUint(m, "primaryMaxLength");
         const auto newMin = optUint(m, "newMinLength");
         const auto newMax = optUint(m, "newMaxLength");
-        if (!display || !priMin || !priMax || !newMin || !newMax) {
+        auto secretsPromptId = optText(m, "promptId");
+        if (!display || !priMin || !priMax || !newMin || !newMax || !secretsPromptId) {
             return std::unexpected(PrompterParseError::WrongType);
         }
         r.title = std::move(display->title);
@@ -396,6 +412,7 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
         r.primaryMaxLength = static_cast<std::uint32_t>(*priMax);
         r.newMinLength = static_cast<std::uint32_t>(*newMin);
         r.newMaxLength = static_cast<std::uint32_t>(*newMax);
+        r.promptId = std::move(*secretsPromptId);
         return PrompterRequest{std::move(r)};
     }
     if (t == "ConfirmAction") {
@@ -444,7 +461,8 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     // other field here.
     const auto attempt = optUint(m, "attempt");
     const auto lastError = optText(m, "lastError");
-    if (!display || !minLen || !maxLen || !artifacts || !attempt || !lastError) {
+    auto promptId = optText(m, "promptId");
+    if (!display || !minLen || !maxLen || !artifacts || !attempt || !lastError || !promptId) {
         return std::unexpected(PrompterParseError::WrongType);
     }
     r.title = std::move(display->title);
@@ -456,6 +474,7 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     r.artifacts = std::move(*artifacts);
     r.attempt = static_cast<std::uint32_t>(*attempt);
     r.lastError = std::move(*lastError);
+    r.promptId = std::move(*promptId);
     return PrompterRequest{std::move(r)};
 }
 

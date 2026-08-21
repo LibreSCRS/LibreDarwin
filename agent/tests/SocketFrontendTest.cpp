@@ -118,11 +118,11 @@ struct CancellingPrompter final : Agent::Operations::PrompterClientBase
     }
 };
 
-// Blocks the change modal until cancel() — the op's prompter-cancel hook — fires,
+// Blocks the change modal until cancel(promptId) — the op's prompter-cancel hook — fires,
 // then reports Cancelled: the mid-prompt CancelOp shape. If the deadline lapses
 // with no cancel, it reports Ok with dummy secrets instead — a bounded FAILURE
 // path (the op proceeds and misses the userCancelled asserts), so only a real
-// cancel() can produce the Cancelled outcome the test pins.
+// cancel(promptId) can produce the Cancelled outcome the test pins.
 class BlockingPrompter final : public Agent::Operations::PrompterClientBase
 {
 public:
@@ -144,7 +144,7 @@ public:
         m_entered = true;
         m_cv.notify_all();
         if (!m_cv.wait_for(lock, std::chrono::seconds(5), [this] { return m_cancelled; })) {
-            // Deadline hit with no cancel(): report Ok with dummy secrets, NOT
+            // Deadline hit with no cancel(promptId): report Ok with dummy secrets, NOT
             // Cancelled — a cancel that never reaches the prompter must fail
             // the userCancelled asserts, not impersonate a genuine cancel.
             return Agent::PinChangePromptResult{Agent::PromptStatus::Ok, LibreSCRS::Secure::String{"0000"},
@@ -152,7 +152,7 @@ public:
         }
         return Agent::PinChangePromptResult{Agent::PromptStatus::Cancelled, std::nullopt, std::nullopt, ""};
     }
-    void cancel() noexcept override
+    void cancel(const std::string&) noexcept override
     {
         const std::lock_guard<std::mutex> lock(m_mutex);
         m_cancelled = true;

@@ -3,13 +3,15 @@
 #pragma once
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
+#include <string>
+
 namespace LibreSCRS::Darwin {
 
 // The AppKit secure-credential window (NSSecureTextField). showPrompt and
 // showChangePrompt marshal to the MAIN thread (dispatch_sync) so they are safe
 // to call from the server's worker queue; they read the entered secrets out of
 // the fields BEFORE tearing the window down (read-before-hide) and scrub the
-// fields. dismiss() aborts the active modal so an in-flight
+// fields. dismiss(promptId) aborts the active modal so an in-flight
 // showPrompt/showChangePrompt returns Cancelled (the CancelCurrent path).
 class PromptWindow
 {
@@ -25,7 +27,11 @@ public:
     // OK. The confirm entry is validation-only and never leaves the window;
     // kinds this window does not implement return Error without any UI.
     [[nodiscard]] wire::MultiPromptReply showChangePrompt(const wire::RequestSecrets& req);
-    void dismiss();
+    // Aborts the active modal for the prompt @p promptId names. One modal can
+    // be up at a time here and it carries no deadline of its own, so a
+    // dismissal that cannot be matched must not be able to strand it: an
+    // unaddressed request, or a window raised without an id, still dismisses.
+    void dismiss(const std::string& promptId);
 
 private:
     struct Impl;

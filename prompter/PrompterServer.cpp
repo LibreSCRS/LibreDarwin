@@ -257,7 +257,7 @@ void PrompterServer::onReadReady(std::uint64_t connId)
                 // modal blocks the worker + main queues), so a cross-connection
                 // cancel can always dismiss it. The handler dispatches
                 // abortModal asynchronously. CancelCurrent has no reply.
-                m_cancel();
+                m_cancel(msg.promptId);
             } else if constexpr (std::is_same_v<T, wire::PromptRequest>) {
                 // The blocking provider call (dispatch_sync(main) + runModal)
                 // runs on the concurrent worker. The block holds its own copies

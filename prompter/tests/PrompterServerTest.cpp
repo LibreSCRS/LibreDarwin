@@ -158,7 +158,7 @@ TEST(PrompterServer, CancelOnASecondConnectionDismissesWhileModalIsUp)
             releaseProvider.wait(1, std::chrono::seconds(10)); // the "modal"
             return okReply({'4', '2'});
         },
-        rejectMultiProvider(), [&] { cancelSeen.signal(); }, rejectConfirmProvider(),
+        rejectMultiProvider(), [&](const std::string&) { cancelSeen.signal(); }, rejectConfirmProvider(),
         [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
@@ -313,7 +313,8 @@ TEST(PrompterServer, CancelOnASecondConnectionDismissesWhileChangeModalIsUp)
             releaseProvider.wait(1, std::chrono::seconds(10)); // the "change modal"
             return okMultiReply({'1'}, {'2'});
         },
-        [&] { cancelSeen.signal(); }, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        [&](const std::string&) { cancelSeen.signal(); }, rejectConfirmProvider(),
+        [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     const int conn1 = connectClient(path);
@@ -498,6 +499,42 @@ TEST(PrompterServer, UnauthorizedPeerFailsClosedForChangeRequestsToo)
     char buf[8] = {0};
     EXPECT_EQ(::recv(conn, buf, sizeof(buf), 0), 0);
     EXPECT_FALSE(providerCalled.wait(1, std::chrono::milliseconds(0)));
+
+    ::close(conn);
+    server.stop();
+    std::filesystem::remove(path);
+}
+
+// The dismissal must arrive with the id it addresses. A handler that receives
+// nothing can only close whatever modal is up -- on a second reader, another
+// card's window.
+TEST(PrompterServer, CancelDeliversTheIdItAddresses)
+{
+    const std::string path = uniqueSocketPath();
+    Latch cancelSeen;
+    std::mutex receivedMutex;
+    std::string received;
+    PrompterServer server(
+        path, rejectSingleProvider(), rejectMultiProvider(),
+        [&](const std::string& id) {
+            {
+                const std::lock_guard<std::mutex> lk(receivedMutex);
+                received = id;
+            }
+            cancelSeen.signal();
+        },
+        rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+    ASSERT_TRUE(server.start().has_value());
+
+    wire::PromptCancel cancelMsg;
+    cancelMsg.promptId = "n9:2";
+    const int conn = connectClient(path);
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn, wire::toCbor(cancelMsg).encode()).has_value());
+    ASSERT_TRUE(cancelSeen.wait(1, std::chrono::seconds(2)));
+    {
+        const std::lock_guard<std::mutex> lk(receivedMutex);
+        EXPECT_EQ(received, "n9:2");
+    }
 
     ::close(conn);
     server.stop();

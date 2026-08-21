@@ -71,12 +71,18 @@ struct PromptRequest
     // out of scope for RequestSecrets (change_pin is never a CAN/MRZ retry).
     std::uint32_t attempt{0};
     std::string lastError;
+    // The prompt this request raises, as the agent addresses it. The prompt
+    // gate is keyed by card, so a later dismissal has to name one window.
+    std::string promptId;
     bool operator==(const PromptRequest&) const = default;
 };
 
-// CancelCurrent (agent -> prompter): dismiss the current modal. Idempotent.
+// CancelCurrent (agent -> prompter): dismiss the window `promptId` names.
+// Idempotent. An empty id is an unaddressed dismissal -- what a caller that
+// knows no id can send, and what the server treats as "the current modal".
 struct PromptCancel
 {
+    std::string promptId;
     bool operator==(const PromptCancel&) const = default;
 };
 
@@ -97,6 +103,9 @@ struct RequestSecrets
     std::uint32_t primaryMaxLength{0};
     std::uint32_t newMinLength{0};
     std::uint32_t newMaxLength{0};
+    // Addressed like the single-secret prompt: a change modal is a window the
+    // agent may have to dismiss by name.
+    std::string promptId;
     bool operator==(const RequestSecrets&) const = default;
 };
 
@@ -152,7 +161,7 @@ struct ConfirmReply
 
 // --- encode (build the CBOR body; the caller frames it) ----------------------
 [[nodiscard]] CborValue toCbor(const PromptRequest& r);
-[[nodiscard]] CborValue toCbor(const PromptCancel&);
+[[nodiscard]] CborValue toCbor(const PromptCancel& r);
 [[nodiscard]] CborValue toCbor(const RequestSecrets& r);
 [[nodiscard]] CborValue toCbor(const PromptReply& r);
 [[nodiscard]] CborValue toCbor(const MultiPromptReply& r);

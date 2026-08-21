@@ -66,6 +66,9 @@ wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptio
     // omitted from the wire then — same convention as every other field here.
     r.attempt = o.attempt;
     r.lastError = o.lastError;
+    // The agent's address for this prompt: the prompter records it and matches
+    // a later dismissal against it.
+    r.promptId = o.promptId;
     return r;
 }
 
@@ -91,6 +94,7 @@ wire::RequestSecrets buildChangeRequest(const Agent::PromptOptions& o)
     r.primaryMaxLength = o.maxLength;
     r.newMinLength = o.minLength;
     r.newMaxLength = o.maxLength;
+    r.promptId = o.promptId;
     return r;
 }
 
@@ -293,16 +297,18 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
     return result;
 }
 
-void MacPrompterClient::cancel() noexcept
+void MacPrompterClient::cancel(const std::string& promptId) noexcept
 {
-    // Best-effort cross-connection dismiss of whatever modal is up. Verified
-    // like the request paths for uniformity (a rejected peer simply gets no
-    // frame at all).
+    // Best-effort cross-connection dismiss of the window this id names.
+    // Verified like the request paths for uniformity (a rejected peer simply
+    // gets no frame at all).
     Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
     if (!fd || !m_peerVerifier(fd.get())) {
         return;
     }
-    const auto body = wire::toCbor(wire::PromptCancel{}).encode();
+    wire::PromptCancel cancelMsg;
+    cancelMsg.promptId = promptId;
+    const auto body = wire::toCbor(cancelMsg).encode();
     static_cast<void>(Agent::Wire::sendFrame(fd.get(), body));
 }
 

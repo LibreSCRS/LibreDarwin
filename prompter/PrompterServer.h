@@ -24,9 +24,9 @@ namespace LibreSCRS::Darwin {
 // to drive the credential window and harvest a secret), and dispatches each
 // RequestSecret to an injected SecretProvider (the AppKit window), each
 // RequestSecrets to a MultiSecretProvider (the change modal) and each
-// CancelCurrent to a CancelHandler. LM-free (links wire-core only); the
-// providers + peer-auth are seams so the server logic is unit-testable without
-// a display or real code signing.
+// CancelCurrent to a CancelHandler with the id it addresses. LM-free (links
+// wire-core only); the providers + peer-auth are seams so the server logic is
+// unit-testable without a display or real code signing.
 //
 // Event-driven on GCD dispatch sources (mirroring the agent SocketTransport):
 // one serial queue hosts the accept source, every per-connection read source,
@@ -47,10 +47,11 @@ public:
     // "change_pin"), return the outcome. Same worker-queue calling convention
     // as SecretProvider.
     using MultiSecretProvider = std::function<wire::MultiPromptReply(const wire::RequestSecrets& req)>;
-    // Dismiss whatever modal is currently up (CancelCurrent). Called inline on
+    // Dismiss the window @p promptId names (CancelCurrent). Called inline on
     // the serial queue; must not block (the window impl dispatches abortModal
-    // asynchronously to the main queue).
-    using CancelHandler = std::function<void()>;
+    // asynchronously to the main queue). An empty id is an unaddressed
+    // dismissal from a caller that knows no id.
+    using CancelHandler = std::function<void(const std::string& promptId)>;
     // Ask the human to confirm a non-card action (ConfirmAction). Same
     // worker-queue calling convention as the secret providers: it blocks until
     // the human answers, so it must never run on the serial queue that serves

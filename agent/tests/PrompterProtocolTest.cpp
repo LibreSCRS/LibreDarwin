@@ -201,6 +201,72 @@ TEST(PrompterProtocol, CancelParsesAsCancelVariant)
     EXPECT_TRUE(std::holds_alternative<PromptCancel>(*parsed));
 }
 
+// The dismissal names ONE window. Without this the prompter can only close
+// whichever modal happens to be up, which on a second reader is another
+// card's.
+TEST(PrompterProtocol, CancelCarriesTheIdItAddresses)
+{
+    PromptCancel in;
+    in.promptId = "n7:3";
+    const auto bytes = toCbor(in).encode();
+    auto parsed = parsePrompterRequest(bytes);
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(std::holds_alternative<PromptCancel>(*parsed));
+    EXPECT_EQ(std::get<PromptCancel>(*parsed).promptId, "n7:3");
+}
+
+// An id-less CancelCurrent is what a caller that knows no id sends; it parses
+// to an empty id rather than failing the frame.
+TEST(PrompterProtocol, CancelWithoutAnIdParsesToAnEmptyId)
+{
+    const auto bytes = toCbor(PromptCancel{}).encode();
+    auto parsed = parsePrompterRequest(bytes);
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(std::holds_alternative<PromptCancel>(*parsed));
+    EXPECT_TRUE(std::get<PromptCancel>(*parsed).promptId.empty());
+}
+
+// Present-but-mistyped fails the whole request closed, like every other field
+// on this wire.
+TEST(PrompterProtocol, CancelRejectsAMistypedPromptId)
+{
+    CborValue::Map m;
+    m.emplace("t", CborValue("CancelCurrent"));
+    m.emplace("promptId", CborValue::uint(7));
+    EXPECT_EQ(parsePrompterRequest(CborValue(std::move(m)).encode()).error(), PrompterParseError::WrongType);
+}
+
+// The request carries the address the later dismissal will use; a request that
+// dropped it would leave the prompter with nothing to match against.
+TEST(PrompterProtocol, RequestCarriesThePromptId)
+{
+    PromptRequest in;
+    in.kind = PromptKind::Pin;
+    in.promptId = "n7:4";
+    EXPECT_EQ(roundTripRequest(in).promptId, "n7:4");
+}
+
+TEST(PrompterProtocol, ChangeRequestCarriesThePromptId)
+{
+    RequestSecrets in;
+    in.kind = "change_pin";
+    in.promptId = "n7:5";
+    const auto bytes = toCbor(in).encode();
+    auto parsed = parsePrompterRequest(bytes);
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(std::holds_alternative<RequestSecrets>(*parsed));
+    EXPECT_EQ(std::get<RequestSecrets>(*parsed).promptId, "n7:5");
+}
+
+TEST(PrompterProtocol, ChangeRequestRejectsAMistypedPromptId)
+{
+    CborValue::Map m;
+    m.emplace("t", CborValue("RequestSecrets"));
+    m.emplace("kind", CborValue("change_pin"));
+    m.emplace("promptId", CborValue::uint(7));
+    EXPECT_EQ(parsePrompterRequest(CborValue(std::move(m)).encode()).error(), PrompterParseError::WrongType);
+}
+
 TEST(PrompterProtocol, ReplyRoundTrips)
 {
     for (const auto st : {PromptReplyStatus::Cancelled, PromptReplyStatus::Error, PromptReplyStatus::Unauthorized}) {

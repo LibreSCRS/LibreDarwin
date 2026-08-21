@@ -75,7 +75,7 @@ int main(int /*argc*/, char** /*argv*/)
             prompterSocketPath(),
             [window](const LibreSCRS::Darwin::wire::PromptRequest& req) { return window->showPrompt(req); },
             [window](const LibreSCRS::Darwin::wire::RequestSecrets& req) { return window->showChangePrompt(req); },
-            [window] { window->dismiss(); },
+            [window](const std::string& promptId) { window->dismiss(promptId); },
             // Not a window of ours: the confirmation is the platform's own
             // device-owner prompt, so there is nothing here to dismiss and
             // nothing that could collect a secret.
