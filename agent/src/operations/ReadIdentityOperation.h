@@ -52,6 +52,12 @@ protected:
 
 private:
     Deps m_deps;
+    // The MRZ deposit target for an in-dialog CAN->MRZ renegotiation. This
+    // host has no such renegotiation: its prompt window offers no CAN/MRZ
+    // switch, so the flow can never reach a deposit. Wired explicitly as the
+    // no-op rather than left dangling, the same fallback LibreLinux takes
+    // when its own depositor is unwired.
+    NullCredentialDepositor m_noDeposit;
 };
 
 } // namespace LibreSCRS::Agent::Operations
