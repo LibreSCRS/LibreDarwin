@@ -120,3 +120,35 @@ jobs:
         # tests run against fakes + a real bound socket (no PC/SC reader needed).
         working-directory: LibreDarwin
         run: ctest --test-dir build --output-on-failure
+
+      - name: Crash detail
+        # DIAGNOSTIC, on this verify branch only. ctest reports a signal death as
+        # a bare "Bus error" with no output at all, which says nothing about which
+        # case died or where. Re-running the binary directly keeps gtest's own
+        # [ RUN ] / [ OK ] trail -- the case that opens without closing is the one
+        # that dies -- and macOS files a crash report carrying the faulting
+        # thread's backtrace.
+        if: failure()
+        working-directory: LibreDarwin
+        run: |
+          set +e
+          bin=$(find build -type f -name SocketFrontendTest | head -1)
+          echo "binary: ${bin:-NOT FOUND}"
+          [ -n "$bin" ] || exit 0
+          "$bin" > /tmp/sft.log 2>&1
+          echo "=== exit code: $? ==="
+          echo "=== last cases entered ==="
+          grep -a "\[ RUN" /tmp/sft.log | tail -5
+          echo "=== tail of the run ==="
+          tail -80 /tmp/sft.log
+          # The report lands a moment after the process dies.
+          for i in $(seq 1 15); do
+            ls ~/Library/Logs/DiagnosticReports/ 2>/dev/null | grep -q . && break
+            sleep 2
+          done
+          echo "=== diagnostic reports ==="
+          ls -t ~/Library/Logs/DiagnosticReports/ 2>/dev/null | head -5
+          for f in $(ls -t ~/Library/Logs/DiagnosticReports/* 2>/dev/null | head -2); do
+            echo "===== $f"
+            head -200 "$f"
+          done
