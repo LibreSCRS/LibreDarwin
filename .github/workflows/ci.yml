@@ -55,9 +55,14 @@ jobs:
       # Git ref of LibreMiddleware to build against — track its trunk during the
       # development cycle (as LibreAgent/LibreCelik/LibreMac do). The 4.2 pin in
       # CMakeLists.txt enforces the required version independently of this ref.
-      MIDDLEWARE_REF: main
+      # TEMPORARY, for this verification branch only: build against the
+      # LibreMiddleware and LibreAgent commits that are about to become trunk,
+      # so this job compiles the combination that will actually exist rather
+      # than a new agent against an old middleware. Both revert to `main`
+      # before this lands.
+      MIDDLEWARE_REF: verify/macos-prompt-outcome
       # LibreAgent ref consumed as the sibling FetchContent source.
-      AGENT_REF: main
+      AGENT_REF: verify/macos-prompt-outcome
     steps:
       - name: Install build tools
         # ninja drives the CMake builds; autoconf/automake/libtool/pkg-config are
