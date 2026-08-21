@@ -892,7 +892,7 @@ TEST(SocketFrontend, SetDefaultLevelSucceeds)
     EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
 }
 
-// QUARANTINED (backlog 155). This case dies with SIGBUS against the current
+// QUARANTINED. This case dies with SIGBUS against the current
 // LibreAgent -- EXC_BAD_ACCESS on the transport queue, inside the CborValue
 // map's copy, at an address whose bytes are string payload rather than a node
 // pointer. The cause is NOT known. What is known, and measured rather than
@@ -906,7 +906,7 @@ TEST(SocketFrontend, SetDefaultLevelSucceeds)
 // skip lifts when the test PASSES, not when someone has an explanation.
 TEST(SocketFrontend, GetConfigReturnsEntries)
 {
-    GTEST_SKIP() << "backlog 155: SIGBUS against the current LibreAgent, cause unknown -- "
+    GTEST_SKIP() << "SIGBUS against the current LibreAgent, cause unknown -- "
                     "dies on the transport queue inside the CborValue map copy";
     Rig rig;
     const auto reply = rig.roundTrip(9, Agent::Wire::GetConfig{});
