@@ -21,7 +21,8 @@ namespace LibreSCRS::Darwin {
 
 struct PromptWindow::Impl
 {
-    NSAlert* activeAlert{nil}; // non-nil while a modal is up (main-thread only)
+    NSAlert* activeAlert{nil};  // non-nil while a modal is up (main-thread only)
+    std::string activePromptId; // the id that modal answers to (main-thread only)
 };
 
 PromptWindow::PromptWindow() : m_impl(new Impl) {}
@@ -167,8 +168,10 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
           [alert.window setInitialFirstResponder:field];
 
           impl->activeAlert = alert;
+          impl->activePromptId = req.promptId;
           const NSModalResponse resp = [alert runModal];
           impl->activeAlert = nil;
+          impl->activePromptId.clear();
 
           if (resp == NSAlertFirstButtonReturn) {
               // Read-before-hide: pull the secret out of the field NOW, then scrub.
@@ -257,8 +260,10 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
           }
 
           impl->activeAlert = alert;
+          impl->activePromptId = req.promptId;
           const NSModalResponse resp = [alert runModal];
           impl->activeAlert = nil;
+          impl->activePromptId.clear();
           for (id token in observers) {
               [center removeObserver:token];
           }
@@ -297,9 +302,10 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
     return std::move(reply);
 }
 
-void PromptWindow::dismiss()
+void PromptWindow::dismiss(const std::string& promptId)
 {
     Impl* impl = m_impl;
+    const std::string wanted = promptId;
     // GCD main-queue blocks are NOT drained while [NSAlert runModal] spins the
     // modal run loop (NSModalPanelRunLoopMode excludes the common-modes source
     // that services the main queue), so a dispatch_async(main) abort would only
@@ -308,7 +314,12 @@ void PromptWindow::dismiss()
     // case) and wake it. The block is idempotent: activeAlert is nil once the
     // modal ended, so double-scheduling across modes is harmless.
     void (^abortBlock)(void) = ^{
-      if (impl->activeAlert != nil) {
+      if (impl->activeAlert == nil) {
+          return;
+      }
+      // Addressed when both sides know the address. This window has no
+      // deadline of its own yet, so an unmatchable id must not strand it.
+      if (wanted.empty() || impl->activePromptId.empty() || impl->activePromptId == wanted) {
           [NSApp abortModal]; // runModal returns != FirstButton -> Cancelled
       }
     };

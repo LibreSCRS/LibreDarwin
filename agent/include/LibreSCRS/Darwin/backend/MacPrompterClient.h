@@ -21,8 +21,8 @@ namespace LibreSCRS::Darwin {
 // agent (peer-auth) before serving.
 //
 // requestX runs on a per-reader worker (off the main actor); the blocking
-// request/reply over prompter.sock is fine there. cancel() opens a separate
-// connection and sends CancelCurrent so an in-flight prompt on another
+// request/reply over prompter.sock is fine there. cancel(promptId) opens a
+// separate connection and sends CancelCurrent so an in-flight prompt on another
 // connection returns Cancelled (mirrors the Linux cross-connection dismiss).
 class MacPrompterClient final : public Agent::Operations::PrompterClientBase
 {
@@ -55,7 +55,10 @@ public:
     // consent is polkit's job. Returns Error (fail closed) if the prompter is
     // unreachable, unresponsive or answers something this build cannot read.
     [[nodiscard]] wire::ConfirmReply requestConfirmation(const wire::ConfirmAction& action);
-    void cancel() noexcept override;
+    // Dismiss the ONE prompt @p promptId names. The prompt gate is keyed by
+    // card, so an unaddressed dismissal would close whichever window is up --
+    // very often another card's.
+    void cancel(const std::string& promptId) noexcept override;
 
 private:
     [[nodiscard]] Agent::PromptResult request(wire::PromptKind kind, const Agent::PromptOptions& options);
