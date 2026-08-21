@@ -127,7 +127,8 @@ TEST(PrompterServer, AuthorizedRequestGetsProviderReply)
     const std::string path = uniqueSocketPath();
     PrompterServer server(
         path, [](const wire::PromptRequest&) { return okReply({'8', '8', '8', '8'}); }, // fake test value
-        rejectMultiProvider(), [] {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+        [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
@@ -198,7 +199,8 @@ TEST(PrompterServer, StopReturnsPromptlyWithAModalPending)
             releaseProvider.wait(1, std::chrono::seconds(10));
             return okReply({'7'});
         },
-        rejectMultiProvider(), [] {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+        [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
@@ -235,7 +237,7 @@ TEST(PrompterServer, UnauthorizedPeerFailsClosedWithNoProviderCall)
             providerCalled.signal();
             return okReply({'0'});
         },
-        rejectMultiProvider(), [] {}, rejectConfirmProvider(),
+        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
         [](const PeerCredentials&) { return false; }); // NOT the agent
     ASSERT_TRUE(server.start().has_value());
 
@@ -271,7 +273,7 @@ TEST(PrompterServer, ChangeRequestRoutesToMultiProviderAndReplyRoundTrips)
             }
             return okMultiReply({'1', '2', '3', '4'}, {'5', '6', '7', '8'}); // fake test values
         },
-        [] {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        [](const std::string&) {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
@@ -366,7 +368,7 @@ TEST(PrompterServer, UnknownKindChangeRequestFailsClosedWithNoModal)
             ADD_FAILURE() << "unknown kind must be rejected before any modal dispatch";
             return okMultiReply({'0'}, {'0'});
         },
-        [] {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        [](const std::string&) {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     auto request = kChangeRequest();
@@ -396,7 +398,7 @@ TEST(PrompterServer, UnknownConfirmKindIsRefusedWithoutAskingTheHuman)
 {
     const std::string path = uniqueSocketPath();
     PrompterServer server(
-        path, rejectSingleProvider(), rejectMultiProvider(), [] {}, rejectConfirmProvider(),
+        path, rejectSingleProvider(), rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
         [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
@@ -429,7 +431,7 @@ TEST(PrompterServer, ConfirmActionReachesTheProviderAndItsVerdictIsReturned)
             ADD_FAILURE() << "a confirmation must never reach the secret providers";
             return wire::MultiPromptReply{};
         },
-        [] {},
+        [](const std::string&) {},
         [](const wire::ConfirmAction& req) {
             EXPECT_EQ(req.kind, "configure_trust");
             EXPECT_EQ(req.requester, "org.librescrs.LibreMac");
@@ -476,7 +478,8 @@ TEST(PrompterServer, UnauthorizedPeerFailsClosedForChangeRequestsToo)
             providerCalled.signal();
             return okMultiReply({'0'}, {'0'});
         },
-        [] {}, rejectConfirmProvider(), [](const PeerCredentials&) { return false; }); // NOT the agent
+        [](const std::string&) {}, rejectConfirmProvider(),
+        [](const PeerCredentials&) { return false; }); // NOT the agent
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
