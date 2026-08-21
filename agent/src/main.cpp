@@ -324,11 +324,9 @@ int main()
         lifecycle.stop();
         bridge.stop();
         core.requestCryptoShutdown();
-        // One dismissal per prompt the agent raised: the gate is keyed by card,
-        // so more than one window can be standing when the agent quiesces.
-        for (const auto& promptId : core.promptSerializer().liveIds()) {
-            prompter->cancel(promptId);
-        }
+        // ISOLATION ROUND -- NOT the shipping behaviour (see the operations'
+        // cancel hooks and the branch's commit message).
+        prompter->cancel({});
         core.objectRegistry().setObservers({}, {}, {}, {});
         CFRunLoopStop(CFRunLoopGetMain());
     };

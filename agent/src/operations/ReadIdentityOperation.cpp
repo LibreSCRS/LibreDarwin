@@ -14,13 +14,12 @@ ReadIdentityOperation::ReadIdentityOperation(std::unique_ptr<OperationChannel> c
                     // AwaitingConsent. Capture the prompter pointer (the
                     // owning instance outlives the op via AgentService's
                     // declaration order).
-                    [prompter = &deps.prompter, serializer = &deps.serializer, cardKey = deps.cardKey]() noexcept {
-                        // Dismiss THIS card's live prompt: more than one window
-                        // can stand, and the gate is the only thing that knows
-                        // which id is outstanding for this card.
-                        for (const auto& id : serializer->liveIdsFor(cardKey)) {
-                            prompter->cancel(id);
-                        }
+                    [prompter = &deps.prompter]() noexcept {
+                        // ISOLATION ROUND -- NOT the shipping behaviour. The
+                        // per-card dismissal is removed on purpose so this branch
+                        // differs from trunk only by the signature migration; see
+                        // the branch's commit message.
+                        prompter->cancel({});
                     }),
       m_deps(std::move(deps))
 {}
