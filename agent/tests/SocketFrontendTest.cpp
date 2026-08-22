@@ -892,22 +892,16 @@ TEST(SocketFrontend, SetDefaultLevelSucceeds)
     EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
 }
 
-// QUARANTINED. This case dies with SIGBUS against the current
-// LibreAgent -- EXC_BAD_ACCESS on the transport queue, inside the CborValue
-// map's copy, at an address whose bytes are string payload rather than a node
-// pointer. The cause is NOT known. What is known, and measured rather than
-// argued: it is not the per-card prompt dismissal (removing that behaviour
-// entirely changed nothing), and it is not the wire encoding (the same reply is
-// built, copied and encoded two hundred times under ASan+UBSan, clean on both
-// libstdc++ and libc++).
-//
-// It is skipped rather than deleted, and rather than left to redden trunk,
-// because it arrives with the newer LibreAgent whatever this branch does. The
-// skip lifts when the test PASSES, not when someone has an explanation.
+// This case used to die with SIGBUS here, and the cause was not in this repo.
+// CborValue's map alternative was a std::map named while CborValue was still an
+// incomplete type, which left a relocated map addressing a freed buffer; the
+// deep copy this reply performs was what walked it. Fixed in LibreAgent, where
+// CborRelocationTest now states the property directly and a macOS ASan job
+// checks it. Kept unskipped here because this is the shape that found it: a
+// real config store, a real socket, and a reply built the way the agent builds
+// it.
 TEST(SocketFrontend, GetConfigReturnsEntries)
 {
-    GTEST_SKIP() << "SIGBUS against the current LibreAgent, cause unknown -- "
-                    "dies on the transport queue inside the CborValue map copy";
     Rig rig;
     const auto reply = rig.roundTrip(9, Agent::Wire::GetConfig{});
     const auto* entries = reply.find("entries");
