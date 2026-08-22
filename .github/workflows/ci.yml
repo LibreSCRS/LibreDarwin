@@ -106,8 +106,26 @@ jobs:
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_PREFIX_PATH="$LM_PREFIX" \
             -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT="$GITHUB_WORKSPACE/LibreAgent"
+
+      - name: Check -fexperimental-library is uniform
+        # Runs BEFORE the build, because the point is to catch a translation unit
+        # compiled against a different libc++ than the one it will link with --
+        # a mismatch that produces a green build and a wrong program, so waiting
+        # for a failure is waiting for something that does not come.
+        #
+        # It reads what the compiler was actually told, not what the CMake files
+        # look like they say. Proved by ci/scripts/check-experimental-library.selftest.sh.
+        working-directory: LibreDarwin
+        run: python3 ci/scripts/check-experimental-library.py build
+
+      - name: Prove the flag gate still fails when it should
+        # A gate nobody has seen fail is a line in a workflow file. Seven cases,
+        # instant, no build required.
+        working-directory: LibreDarwin
+        run: ./ci/scripts/check-experimental-library.selftest.sh
 
       - name: Build
         working-directory: LibreDarwin

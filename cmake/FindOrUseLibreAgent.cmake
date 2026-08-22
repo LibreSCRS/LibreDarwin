@@ -43,19 +43,15 @@ else()
         GIT_TAG 5bc0a51980e1c5a8b680fb58e9e029aa4925d40f)
     FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core + LibreAgent::Wire
 
-    # The neutral core uses std::jthread/std::stop_token, which AppleClang 16/17
-    # (Xcode 16, the macos-15 CI image) still gates behind -fexperimental-library
-    # (harmless on newer AppleClang where the types are stable). The core's own
-    # build is GCC-based and needs no flag, so the consumer adds it to the
-    # fetched target from its side.
-    if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang" AND TARGET LibreAgentCore)
-        target_compile_options(LibreAgentCore PRIVATE -fexperimental-library)
-        target_link_options(LibreAgentCore PRIVATE -fexperimental-library)
-    endif()
-
-    # NOTE: no equivalent patch is added for LibreAgentWire here. Unlike Core,
-    # Wire's own CMakeLists.txt already applies -fexperimental-library PUBLIC
-    # for AppleClang (LibreAgent's top-level CMakeLists.txt, LIBREAGENT_BUILD_WIRE
-    # block) specifically so every Darwin consumer inherits it for free — adding
-    # a second copy here would be redundant, not defensive.
+    # No -fexperimental-library patching happens here any more. Both fetched
+    # targets carry it as a PUBLIC usage requirement from LibreAgent's own
+    # CMakeLists, and this project sets it for its whole build before this file
+    # is included, so the fetched subproject inherits it as well.
+    #
+    # Patching it in from the consumer side was guarded on `TARGET LibreAgentCore`,
+    # which is the shape of a check that silently does nothing if the target is
+    # ever renamed — the flag would simply stop being applied, with no error and
+    # no failing build, and the resulting libc++ mismatch is an ODR violation the
+    # compiler cannot diagnose. ci/scripts/check-experimental-library.py now
+    # fails the build if any translation unit lacks the flag.
 endif()

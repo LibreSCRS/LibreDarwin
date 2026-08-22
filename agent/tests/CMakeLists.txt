@@ -15,8 +15,6 @@ target_link_libraries(OsLogSinkTest
         LibreDarwinAgentBackend
         GTest::gtest
         GTest::gtest_main)
-target_compile_options(OsLogSinkTest PRIVATE -fexperimental-library)
-target_link_options(OsLogSinkTest PRIVATE -fexperimental-library)
 add_test(NAME OsLogSinkTest COMMAND OsLogSinkTest)
 
 # Backend: peer identity + the socket transport (real bound socket + GCD loop).
@@ -27,8 +25,6 @@ foreach(backend_test PeerIdentityTest PeerCodeSigningTest SocketTransportTest Se
             LibreDarwinAgentBackend
             GTest::gtest
             GTest::gtest_main)
-    target_compile_options(${backend_test} PRIVATE -fexperimental-library)
-    target_link_options(${backend_test} PRIVATE -fexperimental-library)
     add_test(NAME ${backend_test} COMMAND ${backend_test})
 endforeach()
 

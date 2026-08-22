@@ -15,9 +15,9 @@ find_library(BSM_LIB bsm REQUIRED) # audit_token_to_pid / _pidversion (PeerIdent
 # creation (the memfd_create analog), the private agent<->prompter CBOR
 # protocol, and BSM peer identity. Links NO LibreMiddleware/LibreAgent::Core,
 # so the agent-owned prompter (and, later, the PKCS#11 facade) can reuse it
-# without pulling the card stack. -fexperimental-library is still needed for the
-# libc++ std::expected/std::format this layer uses on AppleClang (also carried
-# PUBLIC by LibreAgent::Wire itself, linked below).
+# without pulling the card stack. The libc++ std::expected/std::format this
+# layer uses on AppleClang need -fexperimental-library, which the root
+# CMakeLists sets for the whole build.
 add_library(LibreDarwinWireCore STATIC
     src/backend/wire/AnonFd.cpp
     src/backend/wire/PrompterProtocol.cpp
@@ -27,8 +27,6 @@ add_library(LibreDarwinWireCore STATIC
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(LibreDarwinWireCore PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinWireCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_compile_options(LibreDarwinWireCore PUBLIC -fexperimental-library)
-target_link_options(LibreDarwinWireCore PUBLIC -fexperimental-library)
 target_link_libraries(LibreDarwinWireCore
     PUBLIC
         LibreAgent::Wire # AnonFd.h/PrompterProtocol.h expose UniqueFd/CborValue in their public API
@@ -78,19 +76,12 @@ target_link_libraries(LibreDarwinAgentBackend
         ${APPKIT_FRAMEWORK}
         ${IOKIT_FRAMEWORK})
 
-# AppleClang needs the experimental C++23 library flag when compiling against
-# LM's <expected>/<stop_token>. Do NOT swap for a backport/polyfill — the flag is
-# the documented upstream mechanism.
-target_compile_options(LibreDarwinAgentBackend PRIVATE -fexperimental-library)
-target_link_options(LibreDarwinAgentBackend PRIVATE -fexperimental-library)
 
 # The daemon: wires the macOS backend into an AgentCore and runs the run loop.
 add_executable(librescrs-agent src/main.cpp)
 target_link_libraries(librescrs-agent PRIVATE LibreDarwinAgentBackend ${CORE_FOUNDATION_FRAMEWORK})
 target_compile_definitions(librescrs-agent PRIVATE
     LIBREDARWIN_VERSION_STR="${PROJECT_VERSION}")
-target_compile_options(librescrs-agent PRIVATE -fexperimental-library)
-target_link_options(librescrs-agent PRIVATE -fexperimental-library)
 
 # Bundle-ready: the LibreMac host stages this binary at
 # Contents/MacOS/librescrs-agent with LM dylibs + the pkcs11 module at

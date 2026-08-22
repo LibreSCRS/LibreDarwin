@@ -18,8 +18,6 @@ find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(SECURITY_FRAMEWORK Security REQUIRED)
 find_library(LOCALAUTH_FRAMEWORK LocalAuthentication REQUIRED)
 add_executable(librescrs-prompter PrompterMain.mm PromptWindow.mm ConfirmAuthorizer.mm)
-target_compile_options(librescrs-prompter PRIVATE -fexperimental-library)
-target_link_options(librescrs-prompter PRIVATE -fexperimental-library)
 target_link_libraries(librescrs-prompter
     PRIVATE
         LibreDarwinPrompterServer
@@ -46,8 +44,6 @@ install(TARGETS librescrs-prompter RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDI
 if(PROJECT_IS_TOP_LEVEL)
     find_package(GTest REQUIRED)
     add_executable(PrompterServerTest tests/PrompterServerTest.cpp)
-    target_compile_options(PrompterServerTest PRIVATE -fexperimental-library)
-    target_link_options(PrompterServerTest PRIVATE -fexperimental-library)
     target_link_libraries(PrompterServerTest PRIVATE LibreDarwinPrompterServer GTest::gtest GTest::gtest_main)
     add_test(NAME PrompterServerTest COMMAND PrompterServerTest)
 endif()
