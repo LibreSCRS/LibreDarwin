@@ -33,6 +33,23 @@ endif()
 
 include(GNUInstallDirs)
 
+# Apple Clang gates std::expected and std::jthread/std::stop_token behind
+# -fexperimental-library, and the flag also selects a libc++ ABI. That makes it
+# a property of the whole build rather than of individual targets: one
+# translation unit compiled without it sees a different libc++ than everything
+# it links against, and the mismatch is an ODR violation no compiler diagnoses.
+#
+# Declared once, here, before the first target exists, so nothing can be left
+# out by being forgotten from a list. It sits above the LibreAgent include below
+# on purpose, so the FetchContent subproject inherits it too. Per-target copies
+# used to be spread across agent/, agent/tests/, prompter/ and the LibreAgent
+# glue; they are gone, and ci/scripts/check-experimental-library.py fails the
+# build if a translation unit ever appears without the flag again.
+if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
+    add_compile_options(-fexperimental-library)
+    add_link_options(-fexperimental-library)
+endif()
+
 # The single LibreMiddleware owner: the daemon links LM through LibreAgent::Core.
 find_package(LibreMiddleware 4.2 REQUIRED CONFIG)
 
