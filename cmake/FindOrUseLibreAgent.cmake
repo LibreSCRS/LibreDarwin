@@ -40,7 +40,7 @@ else()
     # that moves this line and the client's recorded revision together.
     FetchContent_Declare(LibreAgent
         GIT_REPOSITORY https://github.com/LibreSCRS/LibreAgent.git
-        GIT_TAG 5bc0a51980e1c5a8b680fb58e9e029aa4925d40f)
+        GIT_TAG 7680c1eb21ada7d4673735942fa3178dbcabc67a)
     FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core + LibreAgent::Wire
 
     # No -fexperimental-library patching happens here any more. Both fetched
