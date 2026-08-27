@@ -136,4 +136,4 @@ jobs:
         # this is green unattended. All wire/transport/frontend/lifecycle unit
         # tests run against fakes + a real bound socket (no PC/SC reader needed).
         working-directory: LibreDarwin
-        run: ctest --test-dir build --output-on-failure
+        run: ctest --test-dir build --output-on-failure --no-tests=error
