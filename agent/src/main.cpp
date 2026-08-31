@@ -21,6 +21,7 @@
 #include "FullScrubCaches.h"   // clearFullScrubCaches (shared with the scrub test)
 
 #include <LibreSCRS/Agent/AgentCore.h>
+#include <LibreSCRS/Agent/trust/CscaAnchorImport.h>
 #include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>
 #include <LibreSCRS/Agent/presence/MonitorBridge.h>
@@ -140,7 +141,11 @@ int main()
     // unusable, which from the outside is indistinguishable from a card nothing
     // supports — and nothing else in the process names the directory.
     Darwin::reportPluginLoad(pluginDir, *pluginService);
-    Agent::PluginCapabilityResolver resolver(std::move(pluginService));
+    // Copied, not moved: the resolver takes ownership and never hands the
+    // service back, but the anchor directory cannot be published until the
+    // config store exists, which is two steps down. Keeping a handle here is
+    // cheaper than a resolver accessor nothing else would use.
+    Agent::PluginCapabilityResolver resolver(pluginService);
 
     // [2] Interface impls the core borrows: the SecCode identity gate + the
     // agent-owned prompter client. Default-allow posture (PIN-as-consent); the
@@ -168,6 +173,19 @@ int main()
     std::mutex stateMutex;
     Agent::AgentCore core(resolver, *transport, authorizer, prompter, configFile, cacheRoot,
                           makeResolveReaderCard(*transport), makeResolveCardKey(*transport));
+
+    // Tell the plugins where the country-signing anchors live, before any card
+    // can be read against them. The DIRECTORY travels, never its contents, so a
+    // master list imported later in this process's life is picked up by the
+    // next read rather than needing a restart. The path comes from the
+    // CONFIGURED cache directory: rebuilding it from the cache root would be
+    // right for a default installation and quietly wrong for one that has set
+    // CscaCacheDir, which imports into one directory and judges documents
+    // against another with nothing on screen to say so.
+    if (pluginService != nullptr) {
+        const auto anchorDir = Agent::Trust::publishAnchorDirectory(*pluginService, core.configStore().cscaCacheDir());
+        Agent::log::infof("country-signing anchors for card plugins: {}", anchorDir.string());
+    }
 
     // [4] The inbound frontend (borrows the core; built after it). std::optional so
     // teardown can release it explicitly before the core it borrows.

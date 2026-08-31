@@ -25,7 +25,9 @@
 #include <LibreSCRS/Agent/FeatureTokens.h>
 #include <LibreSCRS/Agent/Reply.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
+#include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/config/ConfigStore.h>
+#include <LibreSCRS/Agent/trust/CscaAnchorImport.h>
 #include <LibreSCRS/Agent/crypto/Mechanism.h>
 #include <LibreSCRS/Agent/operations/BatchSignFlow.h> // isValidBatchDocumentCount, kMin/kMaxBatchDocuments, BatchDocumentInput
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h>
@@ -60,6 +62,7 @@ namespace LibreSCRS::Darwin {
 namespace {
 
 namespace A = LibreSCRS::Agent;
+namespace log = LibreSCRS::Agent::log;
 namespace Ops = LibreSCRS::Agent::Operations;
 namespace sp = LibreSCRS::Agent::Operations::SignatureParams;
 
@@ -434,6 +437,27 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handleLayoutVisual(connId, req, *m);
     } else if (std::get_if<A::Wire::GetAppearanceFont>(&body)) {
         handleGetAppearanceFont(connId, req);
+    } else if (const auto* m = std::get_if<A::Wire::ImportCscaMasterList>(&body)) {
+        handleImportCscaMasterList(in, *m);
+    } else {
+        // A request family this chain does not name used to fall out of here
+        // with no reply and no log: the client waited out its timeout and
+        // nothing recorded that the agent had been asked. Silence is the worst
+        // of the three possible answers -- worse than refusing, because it
+        // leaves no trace to find.
+        //
+        // The static_assert is the other half. The handlers take four different
+        // shapes -- (connId, req, msg), (connId, req), (in, msg) and
+        // (connId, req, msg, caller) -- so a std::visit here would mean
+        // reshaping every call site, which is a larger change than the silence
+        // is worth today. Instead, adding an alternative to Wire::Request breaks
+        // THIS line, which forces a person to look at this chain rather than
+        // let the new message class disappear into the else.
+        static_assert(std::variant_size_v<A::Wire::Request> == 25,
+                      "Wire::Request grew or shrank: give the new alternative a branch above "
+                      "(or confirm the floor is right for it) and update this count");
+        log::warnf("socket: unhandled request family on conn {} req {}", connId, req);
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
     }
 }
 
@@ -1332,6 +1356,37 @@ void SocketFrontend::handleGetConfig(std::uint64_t connId, std::uint64_t req)
     reply.entries.emplace("DefaultReason", A::Wire::CborValue(cfg.defaultReason()));
     reply.entries.emplace("DefaultLocation", A::Wire::CborValue(cfg.defaultLocation()));
     reply.entries.emplace("PluginDir", A::Wire::CborValue(cfg.pluginDir()));
+    {
+        A::Wire::CborValue::Array sources;
+        for (const auto& s : cfg.cscaSources()) {
+            A::Wire::CborValue::Map m;
+            m.emplace("uri", A::Wire::CborValue(s.uri));
+            m.emplace("eager", A::Wire::CborValue(s.eager));
+            sources.emplace_back(std::move(m));
+        }
+        reply.entries.emplace("CscaSources", A::Wire::CborValue(std::move(sources)));
+    }
+    // Absent until an import has been accepted, and absent is not zero: a
+    // zeroed report and an accepted list that vouched for nothing mean
+    // opposite things. An empty map is this wire's "nothing installed".
+    {
+        A::Wire::CborValue::Map state;
+        if (const auto held = cfg.cscaAnchorState()) {
+            state.emplace("anchors", A::Wire::CborValue(static_cast<std::uint64_t>(held->anchors)));
+            state.emplace("issuers", A::Wire::CborValue(static_cast<std::uint64_t>(held->issuers)));
+            state.emplace("replayRefusalActive", A::Wire::CborValue(held->replayRefusalActive));
+            state.emplace("signer", A::Wire::CborValue(held->signer));
+            state.emplace("signerPinned", A::Wire::CborValue(held->signerPinned));
+            state.emplace("origin", A::Wire::CborValue(held->origin));
+            if (held->acceptedAt) {
+                state.emplace("acceptedAt", A::Wire::CborValue(*held->acceptedAt));
+            }
+            if (held->signedAt) {
+                state.emplace("signedAt", A::Wire::CborValue(*held->signedAt));
+            }
+        }
+        reply.entries.emplace("CscaAnchorState", A::Wire::CborValue(std::move(state)));
+    }
     sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
 }
 
@@ -1430,6 +1485,33 @@ void SocketFrontend::applyConfigWrite(std::uint64_t connId, std::uint64_t req, c
             sources.push_back(std::move(src));
         }
         r = cfg.setTslSources(std::move(sources));
+    } else if (msg.key == "CscaSources") {
+        const auto* arr = msg.value.asArray();
+        if (!arr) {
+            replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
+            return;
+        }
+        std::vector<A::Config::CscaSource> sources;
+        for (const auto& e : *arr) {
+            // Two members, not three: a country-signing source has no LOTL
+            // equivalent, so mirroring TslSource's shape here would invent a
+            // field with nothing to put in it.
+            if (e.asMap() == nullptr) {
+                replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
+                return;
+            }
+            A::Config::CscaSource src;
+            const auto* uri = e.find("uri");
+            const auto* eager = e.find("eager");
+            if (uri == nullptr || !uri->asText()) {
+                replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
+                return;
+            }
+            src.uri = *uri->asText();
+            src.eager = eager != nullptr && eager->asBool().value_or(false);
+            sources.push_back(std::move(src));
+        }
+        r = cfg.setCscaSources(std::move(sources));
     } else {
         replyError(connId, req, A::Wire::SyncError::UnknownConfigKey);
         return;
@@ -1440,6 +1522,119 @@ void SocketFrontend::applyConfigWrite(std::uint64_t connId, std::uint64_t req, c
         return;
     }
     sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
+}
+
+namespace {
+
+// The refusal the core reports, in this wire's vocabulary. Replayed is the one
+// name a person can act on directly ("you already have this list"), so it stays
+// separate; the rest share the invalid-argument bucket because a malformed
+// file, a bad signature and a wrong publisher are all "this file will not do"
+// to the caller, and the agent's log carries which one it was.
+A::Wire::SyncError syncErrorFor(A::Trust::ImportRefusal reason) noexcept
+{
+    switch (reason) {
+    case A::Trust::ImportRefusal::Replayed:
+        return A::Wire::SyncError::MasterListReplayed;
+    case A::Trust::ImportRefusal::CacheNotWritable:
+        return A::Wire::SyncError::CommunicationError;
+    case A::Trust::ImportRefusal::NotAMasterList:
+    case A::Trust::ImportRefusal::Empty:
+    case A::Trust::ImportRefusal::Malformed:
+    case A::Trust::ImportRefusal::BadSignature:
+    case A::Trust::ImportRefusal::SignerChanged:
+        break;
+    }
+    return A::Wire::SyncError::InvalidRequest;
+}
+
+} // namespace
+
+void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, const A::Wire::ImportCscaMasterList& msg)
+{
+    const std::uint64_t connId = in.connId;
+    const std::uint64_t req = in.request.req;
+
+    // ORDER IS THE CONTRACT, and it is not observable from the error name: an
+    // implementation that reads first and authorizes after answers NotAuthorized
+    // just the same. What separates them is the descriptor. It arrives sharing
+    // an open file description with the sender, so a read here MOVES THE
+    // SENDER'S OFFSET -- which is how a test can tell whether a refused caller
+    // was turned away before or after the agent touched what they handed over.
+    //
+    // Authorize the client, then rate-limit, and only then read. The trust-tier
+    // action is shared with CscaSources: an import is a larger trust change than
+    // naming a source, not a smaller one.
+    if (!m_core.authorizer().authorize(A::kActionConfigureTrust, in.caller)) {
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    }
+    if (!m_core.rateLimiter().allow(in.caller)) {
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
+        return;
+    }
+
+    // A PLAIN descriptor, deliberately: a master list is public data, and the
+    // sealed anonymous file this agent uses elsewhere is its vocabulary for
+    // secrets.
+    if (msg.list >= in.fds.size()) {
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
+        return;
+    }
+    auto input = readDocument(in.fds[msg.list].get(), A::Trust::kMaxMasterListBytes);
+    if (input.status == ReadStatus::NotRegular) {
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
+        return;
+    }
+    if (input.status == ReadStatus::TooLarge) {
+        replyError(connId, req, A::Wire::SyncError::InputTooLarge);
+        return;
+    }
+    if (input.status == ReadStatus::Error) {
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
+        return;
+    }
+
+    auto& cfg = m_core.configStore();
+    A::Trust::AnchorCache cache(cfg.cscaCacheDir());
+    const auto now =
+        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+    auto imported = A::Trust::importMasterList(input.bytes, cache, now);
+    if (!imported) {
+        replyError(connId, req, syncErrorFor(imported.error().reason));
+        return;
+    }
+
+    // Says what was DONE, never that anything was proved: on a first import
+    // signerPinned is false, and a surface that renders "authenticity verified"
+    // over that is claiming more than the agent measured.
+    log::infof("country signing anchors imported: anchors={} issuers={} pinned={}", imported->anchorCount,
+               imported->issuerCount, imported->signerPinned);
+
+    // The reply tells THIS client what it installed; the record is what tells
+    // the next client to connect, which has no reply to read. The store
+    // persists it and notifies observers itself.
+    A::Config::CscaAnchorState recorded;
+    recorded.anchors = imported->anchorCount;
+    recorded.issuers = imported->issuerCount;
+    recorded.replayRefusalActive = imported->replayRefusalActive();
+    recorded.signer = A::Trust::toHex(imported->signer);
+    recorded.signerPinned = imported->signerPinned;
+    recorded.acceptedAt = imported->acceptedAt;
+    recorded.signedAt = imported->signedAt;
+    recorded.origin = imported->origin;
+    cfg.recordCscaAnchorState(recorded);
+
+    A::Wire::CscaAnchorStateReply reply;
+    reply.anchors = recorded.anchors;
+    reply.issuers = recorded.issuers;
+    reply.replayRefusalActive = recorded.replayRefusalActive;
+    reply.signer = recorded.signer;
+    reply.signerPinned = recorded.signerPinned;
+    reply.acceptedAt = recorded.acceptedAt;
+    reply.signedAt = recorded.signedAt;
+    reply.origin = recorded.origin;
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
 }
 
 void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, const A::Wire::ResetConfig& msg,

@@ -103,6 +103,11 @@ private:
     // D-Bus daemon's Manager1 calls through.
     void handleLayoutVisual(std::uint64_t connId, std::uint64_t req, const Agent::Wire::LayoutVisual& msg);
     void handleGetAppearanceFont(std::uint64_t connId, std::uint64_t req);
+
+    // Takes the whole Inbound, not (connId, req, msg): the list rides
+    // SCM_RIGHTS in `in.fds` and the caller identity in `in.caller`, and both
+    // are needed before a single byte is read.
+    void handleImportCscaMasterList(SocketTransport::Inbound& in, const Agent::Wire::ImportCscaMasterList& msg);
     void handleReadIdentity(SocketTransport::Inbound& in, const Agent::Wire::ReadIdentity& msg);
     void handleGetPhoto(SocketTransport::Inbound& in, const Agent::Wire::GetPhoto& msg);
     void handleReadCertificates(SocketTransport::Inbound& in, const Agent::Wire::ReadCertificates& msg);
