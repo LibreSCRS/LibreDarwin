@@ -56,8 +56,17 @@ jobs:
       # development cycle (as LibreAgent/LibreCelik/LibreMac do). The 4.2 pin in
       # CMakeLists.txt enforces the required version independently of this ref.
       MIDDLEWARE_REF: main
-      # LibreAgent ref consumed as the sibling FetchContent source.
-      AGENT_REF: main
+      # LibreAgent ref: READ FROM THE PIN, not a branch name.
+      #
+      # This was `main`, and the pin in cmake/FindOrUseLibreAgent.cmake was
+      # therefore decorative: CI never once built the combination this repo
+      # declares. The producer landed a reshaped trust type on its trunk and
+      # this repo went red on a commit that had not changed -- a break with no
+      # bump to point at, in a repo whose whole convention is that the bump
+      # rides in the commit that needs it.
+      #
+      # Read at run time from the cmake file rather than copied here: two
+      # places holding one hash is the defect this is fixing, one level up.
     steps:
       - name: Install build tools
         # ninja drives the CMake builds; autoconf/automake/libtool/pkg-config are
@@ -73,11 +82,26 @@ jobs:
         with:
           path: LibreDarwin
 
+      - name: Resolve the pinned LibreAgent revision
+        id: agent_pin
+        # Fails loudly on a pin that is not 40 hex: a blank ref would silently
+        # check out the default branch, which is exactly the behaviour being
+        # removed here.
+        run: |
+          pin=$(sed -n 's/.*GIT_TAG \([0-9a-f]\{40\}\).*/\1/p' \
+                LibreDarwin/cmake/FindOrUseLibreAgent.cmake | head -1)
+          if [ -z "$pin" ]; then
+            echo "no 40-hex GIT_TAG found in cmake/FindOrUseLibreAgent.cmake" >&2
+            exit 1
+          fi
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+          echo "LibreAgent pinned at $pin"
+
       - name: Checkout LibreAgent (sibling FetchContent source)
         uses: actions/checkout@v4
         with:
           repository: LibreSCRS/LibreAgent
-          ref: ${{ env.AGENT_REF }}
+          ref: ${{ steps.agent_pin.outputs.ref }}
           path: LibreAgent
 
       - name: Checkout LibreMiddleware
