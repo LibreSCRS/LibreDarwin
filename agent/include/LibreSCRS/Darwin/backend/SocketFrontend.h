@@ -9,6 +9,8 @@
 #include <LibreSCRS/Agent/Identity.h>
 #include <LibreSCRS/Agent/PresenceTypes.h>
 #include <LibreSCRS/Agent/backend/OperationChannel.h> // Operations::SignedArtifact
+#include <LibreSCRS/Agent/config/ConfigStore.h>       // Config::CscaAnchorState (detail::recordedStateFor)
+#include <LibreSCRS/Agent/trust/CscaAnchorImport.h>   // Trust::AnchorState (detail::recordedStateFor)
 #include <LibreSCRS/Auth/AuthRequirement.h>           // LibreSCRS::Auth::PreReadAuthMethod (applyCardResolution)
 
 #include <cstdint>
@@ -229,5 +231,24 @@ private:
     void applyConfigWrite(std::uint64_t connId, std::uint64_t req, const Agent::Wire::SetConfig& msg);
     void applyConfigReset(std::uint64_t connId, std::uint64_t req, const Agent::Wire::ResetConfig& msg);
 };
+
+namespace detail {
+
+/// The remembered record for what an import accepted.
+///
+/// Free and declared, rather than folded into the import handler where it began,
+/// because it is the whole of a decision that cannot be reached from outside: an
+/// import takes in a COLLECTION of separately signed lists, while this record and
+/// the property built from it speak a single-publisher vocabulary. Which fields
+/// that leaves unfillable is pure logic over a public type, so it can be measured
+/// directly — the alternative was a signed multi-list fixture, which lives in the
+/// producer's test tree and would have left this untested on this side.
+///
+/// Two fields are ABSENT rather than picked when several publishers were
+/// accepted, and `signerPinned` is the aggregate: true only when every publisher
+/// was established.
+[[nodiscard]] Agent::Config::CscaAnchorState recordedStateFor(const Agent::Trust::AnchorState& imported);
+
+} // namespace detail
 
 } // namespace LibreSCRS::Darwin

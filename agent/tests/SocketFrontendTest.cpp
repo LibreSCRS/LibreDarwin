@@ -1500,3 +1500,90 @@ TEST(SocketFrontend, AnAuthorizedImportDoesAdvanceTheDescriptor)
     EXPECT_GT(::lseek(fd, 0, SEEK_CUR), 0) << "nothing read the descriptor, so the refusal test above proves nothing";
     ::close(fd);
 }
+
+// --- what a collection leaves fillable ---------------------------------------
+//
+// One import takes in a COLLECTION of separately signed lists, while the
+// remembered record and the property built from it speak a single-publisher
+// vocabulary. Which fields that leaves unfillable is the decision under test.
+//
+// Measured against hand-built states rather than a signed multi-list file: the
+// mapping is pure logic over a public type, and the only signed fixture that
+// carries several publishers lives in the producer's test tree, which this repo
+// does not link. Arguing this from the type and shipping it untested was the
+// first draft, and it would have left the collection path — the one a person
+// actually hits with the real directory export — measured nowhere.
+
+namespace {
+
+Agent::Trust::AcceptedSigner signer(std::uint8_t tag, bool established,
+                                    std::optional<std::int64_t> signedAt = std::nullopt)
+{
+    Agent::Trust::AcceptedSigner s;
+    s.fingerprint.fill(tag);
+    s.identityEstablished = established;
+    s.signedAt = signedAt;
+    return s;
+}
+
+Agent::Trust::AnchorState stateWith(std::vector<Agent::Trust::AcceptedSigner> signers)
+{
+    Agent::Trust::AnchorState st;
+    st.present = true;
+    st.signers = std::move(signers);
+    st.anchorCount = 903;
+    st.issuerCount = 146;
+    st.acceptedAt = 1'700'000'000;
+    st.origin = "import";
+    return st;
+}
+
+} // namespace
+
+TEST(CscaRecordedState, OnePublisherFillsEverythingTheVocabularyCanSay)
+{
+    const auto out = LibreSCRS::Darwin::detail::recordedStateFor(stateWith({signer(0xAB, true, 1'690'000'000)}));
+    EXPECT_FALSE(out.signer.empty()) << "one publisher is exactly what this vocabulary was written for";
+    EXPECT_TRUE(out.signerPinned);
+    ASSERT_TRUE(out.signedAt.has_value());
+    EXPECT_EQ(*out.signedAt, 1'690'000'000);
+    EXPECT_EQ(out.anchors, 903u);
+    EXPECT_EQ(out.issuers, 146u);
+}
+
+TEST(CscaRecordedState, SeveralPublishersNameNoneOfThem)
+{
+    const auto out = LibreSCRS::Darwin::detail::recordedStateFor(
+        stateWith({signer(0xAB, true, 1'690'000'000), signer(0xCD, true, 1'695'000'000)}));
+    // The whole point: one fingerprint out of many, under a label a dialog
+    // renders as "the publisher", is a concrete untruth. Absence is not.
+    EXPECT_TRUE(out.signer.empty()) << "one publisher out of several was named as THE publisher";
+    EXPECT_FALSE(out.signedAt.has_value()) << "one publisher's signing time was served as the collection's";
+    EXPECT_EQ(out.anchors, 903u) << "the counts are the union and stay fillable";
+}
+
+TEST(CscaRecordedState, OneUnestablishedPublisherAmongManyClearsTheAggregate)
+{
+    const auto out = LibreSCRS::Darwin::detail::recordedStateFor(stateWith({signer(0xAB, true), signer(0xCD, false)}));
+    // Deliberately the WEAKEST of its parts. One unestablished publisher is a
+    // trust-on-first-import for that country's anchors, and a surface rendering
+    // "authenticity verified" over the aggregate would overstate the
+    // measurement for every other publisher too.
+    EXPECT_FALSE(out.signerPinned) << "the aggregate claimed more than every part had";
+}
+
+TEST(CscaRecordedState, EveryPublisherEstablishedSetsTheAggregate)
+{
+    const auto out = LibreSCRS::Darwin::detail::recordedStateFor(stateWith({signer(0xAB, true), signer(0xCD, true)}));
+    EXPECT_TRUE(out.signerPinned);
+}
+
+TEST(CscaRecordedState, NoPublisherAtAllIsNotPinned)
+{
+    // Guards the aggregate's own vacuous case: all_of over an empty range is
+    // true, and a record claiming an established publisher it does not have
+    // would be the strongest possible overstatement.
+    const auto out = LibreSCRS::Darwin::detail::recordedStateFor(stateWith({}));
+    EXPECT_FALSE(out.signerPinned);
+    EXPECT_TRUE(out.signer.empty());
+}

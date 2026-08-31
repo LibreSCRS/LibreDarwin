@@ -1557,6 +1557,43 @@ A::Wire::SyncError syncErrorFor(A::Trust::ImportRefusal reason) noexcept
 
 } // namespace
 
+namespace detail {
+
+A::Config::CscaAnchorState recordedStateFor(const A::Trust::AnchorState& imported)
+{
+    // One import can now take in a COLLECTION of separately signed lists, so
+    // the single-publisher vocabulary this record and the wire reply speak
+    // cannot always be filled. Two fields are left ABSENT rather than picked:
+    // handing one fingerprint out of twenty-eight to a surface whose label
+    // reads "the publisher" is a concrete untruth, and on a trust surface a
+    // wrong answer and no answer are not failures of the same size. Absence is
+    // a shape this reply has always had -- a list with no signing time has
+    // omitted signedAt since the first version -- so a client written before
+    // collections reads it correctly without knowing they exist.
+    const A::Trust::AcceptedSigner* only = imported.signers.size() == 1 ? &imported.signers.front() : nullptr;
+
+    A::Config::CscaAnchorState out;
+    out.anchors = imported.anchorCount;
+    out.issuers = imported.issuerCount;
+    out.replayRefusalActive = imported.replayRefusalActive();
+    out.signer = only != nullptr ? A::Trust::toHex(only->fingerprint) : std::string{};
+    // The AGGREGATE, and deliberately the weakest of its parts: true only when
+    // EVERY publisher was established. One unestablished publisher among many
+    // is a trust-on-first-import for that country's anchors, and a surface
+    // rendering "authenticity verified" over it would overstate what was
+    // measured. Mirrors LibreLinux's everyPublisherEstablished; both belong in
+    // the shared library next to the reconciliation this host is still missing.
+    out.signerPinned =
+        !imported.signers.empty() &&
+        std::ranges::all_of(imported.signers, [](const A::Trust::AcceptedSigner& s) { return s.identityEstablished; });
+    out.acceptedAt = imported.acceptedAt;
+    out.signedAt = only != nullptr ? only->signedAt : std::nullopt;
+    out.origin = imported.origin;
+    return out;
+}
+
+} // namespace detail
+
 void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, const A::Wire::ImportCscaMasterList& msg)
 {
     const std::uint64_t connId = in.connId;
@@ -1626,41 +1663,14 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
     // The reply tells THIS client what it installed; the record is what tells
     // the next client to connect, which has no reply to read. The store
     // persists it and notifies observers itself.
-    // One import can now take in a COLLECTION of separately signed lists, so
-    // the single-publisher vocabulary this record and the wire reply speak
-    // cannot always be filled. Two fields are left ABSENT rather than picked:
-    // handing one fingerprint out of twenty-eight to a surface whose label
-    // reads "the publisher" is a concrete untruth, and on a trust surface a
-    // wrong answer and no answer are not failures of the same size. Absence is
-    // a shape this reply has always had -- a list with no signing time has
-    // omitted signedAt since the first version -- so a client written before
-    // collections reads it correctly without knowing they exist.
-    const A::Trust::AcceptedSigner* only = imported->signers.size() == 1 ? &imported->signers.front() : nullptr;
-
-    A::Config::CscaAnchorState recorded;
-    recorded.anchors = imported->anchorCount;
-    recorded.issuers = imported->issuerCount;
-    recorded.replayRefusalActive = imported->replayRefusalActive();
-    recorded.signer = only != nullptr ? A::Trust::toHex(only->fingerprint) : std::string{};
-    // The AGGREGATE, and deliberately the weakest of its parts: true only when
-    // EVERY publisher was established. One unestablished publisher among many
-    // is a trust-on-first-import for that country's anchors, and a surface
-    // rendering "authenticity verified" over it would overstate what was
-    // measured. Mirrors LibreLinux's everyPublisherEstablished; both belong in
-    // the shared library next to the reconciliation this host is still missing.
-    recorded.signerPinned =
-        !imported->signers.empty() &&
-        std::ranges::all_of(imported->signers, [](const A::Trust::AcceptedSigner& s) { return s.identityEstablished; });
-    recorded.acceptedAt = imported->acceptedAt;
-    recorded.signedAt = only != nullptr ? only->signedAt : std::nullopt;
-    recorded.origin = imported->origin;
+    const A::Config::CscaAnchorState recorded = detail::recordedStateFor(*imported);
     cfg.recordCscaAnchorState(recorded);
 
     A::Wire::CscaAnchorStateReply reply;
     reply.anchors = recorded.anchors;
     reply.issuers = recorded.issuers;
     reply.replayRefusalActive = recorded.replayRefusalActive;
-    reply.signer = only != nullptr ? std::optional<std::string>{recorded.signer} : std::nullopt;
+    reply.signer = recorded.signer.empty() ? std::nullopt : std::optional<std::string>{recorded.signer};
     reply.signerPinned = recorded.signerPinned;
     reply.acceptedAt = recorded.acceptedAt;
     reply.signedAt = recorded.signedAt;
