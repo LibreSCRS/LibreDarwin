@@ -38,6 +38,8 @@
 #include <gtest/gtest.h>
 
 #include <dispatch/dispatch.h>
+#include <fstream>
+#include <sstream>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <unistd.h>
@@ -215,9 +217,16 @@ struct Rig
     // Overrides let the credentials tests swap the policy gate (deny-all) or the
     // prompter (cancelling / blocking multi-secret fakes) while every other test
     // keeps the hermetic defaults.
+    // tmpOverride lets a test build a SECOND rig over the FIRST one's state
+    // directory -- the only way to observe what construction does to a report
+    // that was already on disk, which is a restart in everything but name.
     explicit Rig(Agent::Authorizer* authorizerOverride = nullptr,
-                 std::shared_ptr<Agent::Operations::PrompterClientBase> prompterOverride = nullptr)
+                 std::shared_ptr<Agent::Operations::PrompterClientBase> prompterOverride = nullptr,
+                 std::filesystem::path tmpOverride = {})
     {
+        if (!tmpOverride.empty()) {
+            tmp = std::move(tmpOverride);
+        }
         std::filesystem::create_directories(tmp);
         transport = std::move(*SocketTransport::create(path));
         core.emplace(
@@ -1586,4 +1595,71 @@ TEST(CscaRecordedState, NoPublisherAtAllIsNotPinned)
     const auto out = LibreSCRS::Darwin::detail::recordedStateFor(stateWith({}));
     EXPECT_FALSE(out.signerPinned);
     EXPECT_TRUE(out.signer.empty());
+}
+
+// --- a report the cache no longer bears out ----------------------------------
+//
+// The store remembers what an import accepted so a client that has just
+// connected can be told what is installed without one. That record can outlive
+// what it describes: anchors deleted from the cache directory, or a cache that
+// no longer establishes the pinned publisher, leave a claim behind with nothing
+// under it -- and a claim of "903 anchors" over an empty directory is worse on a
+// trust surface than showing nothing at all.
+//
+// Reconciling is the library's judgement (WHAT is stale) and this host's timing
+// (WHEN to ask). Asserted here rather than taken on the library's word, because
+// this host owning the timing means this host can simply never ask -- which is
+// exactly what it did before, with every library test still green.
+
+TEST(CscaReconciliation, ConstructionDiscardsAReportTheCacheDoesNotBearOut)
+{
+    const auto shared = std::filesystem::temp_directory_path() /
+                        ("ld-fe-recon-" + std::to_string(::getpid()) + "-" + std::to_string(std::rand()));
+
+    // The second rig is built while the FIRST is still alive, deliberately: a
+    // Rig deletes its state directory on the way out, so tearing the first one
+    // down before building the second hands the second an empty directory and
+    // the assertion below passes with the reconciliation removed. That is what
+    // the first draft did, and perturbing the call away is what exposed it.
+    Rig first(nullptr, nullptr, shared);
+    Agent::Config::CscaAnchorState recorded;
+    recorded.anchors = 903;
+    recorded.issuers = 146;
+    recorded.replayRefusalActive = true;
+    recorded.signer = std::string(64, 'a');
+    recorded.signerPinned = true;
+    recorded.acceptedAt = 1'700'000'000;
+    recorded.origin = "import";
+    first.core->configStore().recordCscaAnchorState(recorded);
+    ASSERT_TRUE(first.core->configStore().cscaAnchorState().has_value())
+        << "the fixture must record something for the reconciliation to have anything to discard";
+
+    // Nothing was ever imported, so the cache under this root holds no anchor
+    // and establishes no signer: the record above is a claim with nothing
+    // behind it, which is the state a wiped cache leaves.
+    Rig second(nullptr, nullptr, shared);
+    EXPECT_FALSE(second.core->configStore().cscaAnchorState().has_value())
+        << "a report the cache does not bear out was served as current";
+}
+
+TEST(CscaReconciliation, ConstructionLeavesAStoreWithNothingRecordedAlone)
+{
+    // Guards the guard. If construction cleared the key unconditionally the
+    // test above would pass for the wrong reason, and this one would too -- so
+    // it asserts the OTHER half: a second rig over a directory whose report was
+    // never written must find the store no worse off, and must not have written
+    // a cleared key into a file that had none.
+    const auto shared = std::filesystem::temp_directory_path() /
+                        ("ld-fe-recon2-" + std::to_string(::getpid()) + "-" + std::to_string(std::rand()));
+    Rig first(nullptr, nullptr, shared);
+    ASSERT_FALSE(first.core->configStore().cscaAnchorState().has_value());
+
+    Rig second(nullptr, nullptr, shared);
+    EXPECT_FALSE(second.core->configStore().cscaAnchorState().has_value());
+
+    std::ifstream in(shared / "config.json");
+    std::stringstream buffer;
+    buffer << in.rdbuf();
+    EXPECT_EQ(buffer.str().find("CscaAnchorState"), std::string::npos)
+        << "a key nothing had recorded was written out by reconciling";
 }

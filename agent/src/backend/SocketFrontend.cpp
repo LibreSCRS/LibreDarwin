@@ -339,6 +339,20 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
 SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, std::string version)
     : m_transport(transport), m_core(core), m_version(std::move(version))
 {
+    // Reconcile before this object can answer anything. The store has just been
+    // loaded from its file and the loop is entered after construction, so no
+    // client can have read the stale report and none can read it afterwards.
+    //
+    // It belongs to the object that SERVES the report rather than to the
+    // composition root: not serving a claim known to be unbacked is this
+    // object's own obligation. The library owns WHAT is stale -- anchors gone
+    // from the cache, or a pinned signer the cache no longer establishes -- and
+    // the host owns WHEN to ask. Same split, and the same placement, as the bus
+    // host's.
+    //
+    // Without it this host served a remembered "903 anchors" over a directory
+    // someone had emptied, and nothing anywhere would have said otherwise.
+    A::Trust::discardStaleAnchorReport(m_core.configStore());
     m_confirmQueue = dispatch_queue_create("rs.librescrs.agent.confirm", DISPATCH_QUEUE_CONCURRENT);
     // Refuse by default. Nothing here knows how to ask a human until main.cpp
     // injects the prompter client, and a build that forgot to inject one must
@@ -1577,15 +1591,13 @@ A::Config::CscaAnchorState recordedStateFor(const A::Trust::AnchorState& importe
     out.issuers = imported.issuerCount;
     out.replayRefusalActive = imported.replayRefusalActive();
     out.signer = only != nullptr ? A::Trust::toHex(only->fingerprint) : std::string{};
-    // The AGGREGATE, and deliberately the weakest of its parts: true only when
-    // EVERY publisher was established. One unestablished publisher among many
-    // is a trust-on-first-import for that country's anchors, and a surface
-    // rendering "authenticity verified" over it would overstate what was
-    // measured. Mirrors LibreLinux's everyPublisherEstablished; both belong in
-    // the shared library next to the reconciliation this host is still missing.
-    out.signerPinned =
-        !imported.signers.empty() &&
-        std::ranges::all_of(imported.signers, [](const A::Trust::AcceptedSigner& s) { return s.identityEstablished; });
+    // Asked of the state rather than recomputed here. The aggregate is a
+    // property of what was accepted, and it has one owner now: both hosts had
+    // written the same fold independently, and both had to remember on their
+    // own that all_of over an empty range is true -- which would report a state
+    // with NO publisher as fully established, the strongest possible
+    // overstatement on a trust surface.
+    out.signerPinned = imported.everyPublisherEstablished();
     out.acceptedAt = imported.acceptedAt;
     out.signedAt = only != nullptr ? only->signedAt : std::nullopt;
     out.origin = imported.origin;
