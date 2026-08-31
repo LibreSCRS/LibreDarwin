@@ -26,6 +26,8 @@
 #include <LibreSCRS/Agent/Reply.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
 #include <LibreSCRS/Agent/backend/Logging.h>
+
+#include <algorithm>
 #include <LibreSCRS/Agent/config/ConfigStore.h>
 #include <LibreSCRS/Agent/trust/CscaAnchorImport.h>
 #include <LibreSCRS/Agent/crypto/Mechanism.h>
@@ -1375,7 +1377,12 @@ void SocketFrontend::handleGetConfig(std::uint64_t connId, std::uint64_t req)
             state.emplace("anchors", A::Wire::CborValue(static_cast<std::uint64_t>(held->anchors)));
             state.emplace("issuers", A::Wire::CborValue(static_cast<std::uint64_t>(held->issuers)));
             state.emplace("replayRefusalActive", A::Wire::CborValue(held->replayRefusalActive));
-            state.emplace("signer", A::Wire::CborValue(held->signer));
+            // Absent when the import took in several publishers: there is then
+            // no publisher for this key to name, and an empty string would read
+            // as one whose fingerprint happens to be blank.
+            if (!held->signer.empty()) {
+                state.emplace("signer", A::Wire::CborValue(held->signer));
+            }
             state.emplace("signerPinned", A::Wire::CborValue(held->signerPinned));
             state.emplace("origin", A::Wire::CborValue(held->origin));
             if (held->acceptedAt) {
@@ -1605,23 +1612,47 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
         return;
     }
 
-    // Says what was DONE, never that anything was proved: on a first import
-    // signerPinned is false, and a surface that renders "authenticity verified"
-    // over that is claiming more than the agent measured.
-    log::infof("country signing anchors imported: anchors={} issuers={} pinned={}", imported->anchorCount,
-               imported->issuerCount, imported->signerPinned);
+    // Says what was DONE, never that anything was proved: on a first import no
+    // publisher is established, and a surface rendering "authenticity verified"
+    // over that claims more than the agent measured. The publisher COUNT is
+    // logged rather than served, because the remembered record has no member
+    // that carries it: a key present in the import reply and gone from the
+    // property a moment later would be worse than silence.
+    log::infof("country signing anchors imported: anchors={} issuers={} publishers={} established={}",
+               imported->anchorCount, imported->issuerCount, imported->signers.size(),
+               std::ranges::count_if(imported->signers,
+                                     [](const A::Trust::AcceptedSigner& s) { return s.identityEstablished; }));
 
     // The reply tells THIS client what it installed; the record is what tells
     // the next client to connect, which has no reply to read. The store
     // persists it and notifies observers itself.
+    // One import can now take in a COLLECTION of separately signed lists, so
+    // the single-publisher vocabulary this record and the wire reply speak
+    // cannot always be filled. Two fields are left ABSENT rather than picked:
+    // handing one fingerprint out of twenty-eight to a surface whose label
+    // reads "the publisher" is a concrete untruth, and on a trust surface a
+    // wrong answer and no answer are not failures of the same size. Absence is
+    // a shape this reply has always had -- a list with no signing time has
+    // omitted signedAt since the first version -- so a client written before
+    // collections reads it correctly without knowing they exist.
+    const A::Trust::AcceptedSigner* only = imported->signers.size() == 1 ? &imported->signers.front() : nullptr;
+
     A::Config::CscaAnchorState recorded;
     recorded.anchors = imported->anchorCount;
     recorded.issuers = imported->issuerCount;
     recorded.replayRefusalActive = imported->replayRefusalActive();
-    recorded.signer = A::Trust::toHex(imported->signer);
-    recorded.signerPinned = imported->signerPinned;
+    recorded.signer = only != nullptr ? A::Trust::toHex(only->fingerprint) : std::string{};
+    // The AGGREGATE, and deliberately the weakest of its parts: true only when
+    // EVERY publisher was established. One unestablished publisher among many
+    // is a trust-on-first-import for that country's anchors, and a surface
+    // rendering "authenticity verified" over it would overstate what was
+    // measured. Mirrors LibreLinux's everyPublisherEstablished; both belong in
+    // the shared library next to the reconciliation this host is still missing.
+    recorded.signerPinned =
+        !imported->signers.empty() &&
+        std::ranges::all_of(imported->signers, [](const A::Trust::AcceptedSigner& s) { return s.identityEstablished; });
     recorded.acceptedAt = imported->acceptedAt;
-    recorded.signedAt = imported->signedAt;
+    recorded.signedAt = only != nullptr ? only->signedAt : std::nullopt;
     recorded.origin = imported->origin;
     cfg.recordCscaAnchorState(recorded);
 
@@ -1629,7 +1660,7 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
     reply.anchors = recorded.anchors;
     reply.issuers = recorded.issuers;
     reply.replayRefusalActive = recorded.replayRefusalActive;
-    reply.signer = recorded.signer;
+    reply.signer = only != nullptr ? std::optional<std::string>{recorded.signer} : std::nullopt;
     reply.signerPinned = recorded.signerPinned;
     reply.acceptedAt = recorded.acceptedAt;
     reply.signedAt = recorded.signedAt;
