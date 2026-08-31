@@ -1323,3 +1323,180 @@ TEST(SocketFrontend, ApprovedTrustResetClearsTheValue)
 }
 
 } // namespace
+
+// --- country-signing config surface ------------------------------------------
+//
+// Three completeness gates over ConfigStore's key table, and the ordering
+// invariant the import path owes.
+//
+// The gates ask the STORE which keys exist and how each may be changed, never a
+// list of spellings kept here: a hand-written list is the same species of
+// artefact as the surface it checks, so the two drift together and stay green.
+// Both directions of the drift matter -- a key the store owns and this host
+// never serves is a client that cannot read its own configuration, and a key
+// this host would write that the store calls read-only is a policy hole -- so
+// each direction gets its own assertion rather than one combined pass.
+
+namespace {
+
+using Agent::Config::ConfigStore;
+using Agent::Config::Mutability;
+
+// A value of the wrong SHAPE on purpose. The gates below assert which REFUSAL
+// comes back, not that a write succeeds: a branch that exists answers
+// "invalid value", and one that does not answers "unknown key". That
+// distinction is the whole measurement, and it needs no valid value per key.
+Agent::Wire::CborValue wrongShapeValue()
+{
+    return Agent::Wire::CborValue(std::uint64_t{0});
+}
+
+std::string joined(const std::vector<std::string>& keys)
+{
+    std::string out;
+    for (const auto& k : keys) {
+        out += (out.empty() ? "" : ", ") + k;
+    }
+    return out;
+}
+
+} // namespace
+
+TEST(SocketFrontendConfigSurface, GetConfigServesEveryKeyTheStoreOwnsAndDoesNotHide)
+{
+    Rig rig;
+    const auto reply = rig.roundTrip(1, Agent::Wire::GetConfig{});
+    const auto* entries = reply.find("entries");
+    ASSERT_NE(entries, nullptr) << "GetConfig reply carried no entries map";
+    const auto* served = entries->asMap();
+    ASSERT_NE(served, nullptr);
+
+    // File-only keys MAY be served (three are today, read-only) but need not be:
+    // publishing one is a free choice this gate does not make for the host. What
+    // it does hold is that everything else arrives -- a key a client cannot read
+    // is a client that cannot see its own configuration.
+    std::vector<std::string> missing;
+    for (const std::string& key : ConfigStore::keys()) {
+        const auto how = ConfigStore::mutability(key);
+        ASSERT_TRUE(how.has_value()) << key << " is owned by the store but classified by nothing";
+        if (*how == Mutability::FileOnly) {
+            continue;
+        }
+        if (served->find(key) == served->end()) {
+            missing.push_back(key);
+        }
+    }
+    EXPECT_TRUE(missing.empty()) << joined(missing)
+                                 << " :: the store owns these keys and GetConfig does not serve them";
+}
+
+TEST(SocketFrontendConfigSurface, SetConfigAcceptsEveryKeyTheStoreCallsWritable)
+{
+    Rig rig;
+    // Trust-tier writes go through a human confirmation before any branch runs.
+    // Without a provider that answers, every one of them stops at NotAuthorized
+    // and this gate measures the confirmation step instead of the surface it
+    // was written for.
+    rig.frontend->setConfirmProvider([](const auto&) {
+        return LibreSCRS::Darwin::wire::ConfirmReply{LibreSCRS::Darwin::wire::PromptReplyStatus::Ok, ""};
+    });
+    std::uint64_t req = 1;
+    std::vector<std::string> unknown;
+    for (const std::string& key : ConfigStore::keys()) {
+        const auto how = ConfigStore::mutability(key);
+        ASSERT_TRUE(how.has_value()) << key;
+        if (*how != Mutability::DbusMutable && *how != Mutability::DbusMutableTrust) {
+            continue;
+        }
+        const auto reply = rig.roundTrip(req++, Agent::Wire::SetConfig{key, wrongShapeValue()});
+        // "invalid value" means a branch took the key and disliked what came
+        // with it. "unknown key" means no branch exists -- which is the failure
+        // this gate is here to catch, and which today reads to a client as a
+        // key the agent has never heard of even though the vocabulary lists it.
+        // Positive, not "anything but unknown": a branch that exists takes the
+        // key and rejects the shape. Accepting merely "not UnknownConfigKey"
+        // was this gate's first form and it PASSED with the branch deleted,
+        // because the trust tier answered NotAuthorized long before reaching
+        // any branch -- the confirmation step is what a rig without a
+        // confirming provider fails first. Measured, then fixed.
+        if (errName(reply) != "InvalidConfigValue") {
+            unknown.push_back(key + " -> " + errName(reply));
+        }
+    }
+    EXPECT_TRUE(unknown.empty()) << joined(unknown)
+                                 << " :: the store calls these keys writable and SetConfig has no branch for them";
+}
+
+TEST(SocketFrontendConfigSurface, SetConfigRefusesEveryKeyTheStoreCallsReadOnly)
+{
+    Rig rig;
+    std::uint64_t req = 1;
+    std::vector<std::string> accepted;
+    for (const std::string& key : ConfigStore::keys()) {
+        const auto how = ConfigStore::mutability(key);
+        ASSERT_TRUE(how.has_value()) << key;
+        if (*how != Mutability::ReadOnly && *how != Mutability::FileOnly) {
+            continue;
+        }
+        const auto reply = rig.roundTrip(req++, Agent::Wire::SetConfig{key, wrongShapeValue()});
+        if (errName(reply) != "ReadOnlyConfig") {
+            accepted.push_back(key + " -> " + errName(reply));
+        }
+    }
+    EXPECT_TRUE(accepted.empty()) << joined(accepted)
+                                  << " :: these keys are not client-settable and the refusal did not say so";
+}
+
+// --- the ordering the import path owes ---------------------------------------
+//
+// THE ERROR NAME CANNOT TELL THESE APART. An implementation that reads the
+// descriptor and authorizes afterwards answers NotAuthorized exactly like one
+// that refuses first, so no assertion over the reply can separate them.
+//
+// What separates them is the descriptor itself. It arrives over SCM_RIGHTS,
+// which duplicates the descriptor but NOT the open file description behind it:
+// sender and receiver share one file offset. So a read on the agent's side
+// moves OUR offset, and lseek(SEEK_CUR) here measures whether the agent touched
+// what a refused caller handed over.
+//
+// The pair is deliberate. The refusal case alone would pass just as happily if
+// the frontend never read the fd under any circumstance -- if the fd index were
+// wrong, say, or the handler unreachable -- so the companion below proves the
+// same measurement DOES move when the read is allowed to happen. Without it
+// this is a test that cannot fail for the reason it was written.
+
+TEST(SocketFrontend, RefusedImportNeverAdvancesTheDescriptorItWasHanded)
+{
+    DenyAllAuthorizer deny;
+    Rig rig(&deny);
+
+    const int fd = makeInputFile(std::string(8192, '\x30'));
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::lseek(fd, 0, SEEK_CUR), 0) << "the fixture must start at the beginning";
+
+    const std::array<int, 1> fds{fd};
+    const auto reply = rig.roundTrip(1, Agent::Wire::ImportCscaMasterList{0}, fds);
+    EXPECT_EQ(errName(reply), "NotAuthorized");
+
+    EXPECT_EQ(::lseek(fd, 0, SEEK_CUR), 0)
+        << "the agent read the master list before deciding the caller was allowed to send one";
+    ::close(fd);
+}
+
+TEST(SocketFrontend, AnAuthorizedImportDoesAdvanceTheDescriptor)
+{
+    Rig rig; // allow-all
+
+    const int fd = makeInputFile(std::string(8192, '\x30'));
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::lseek(fd, 0, SEEK_CUR), 0);
+
+    const std::array<int, 1> fds{fd};
+    const auto reply = rig.roundTrip(1, Agent::Wire::ImportCscaMasterList{0}, fds);
+    // Eight kilobytes of 0x30 is not a master list, and being refused as one is
+    // the point: the bytes had to be READ to be judged.
+    EXPECT_EQ(errName(reply), "InvalidRequest");
+
+    EXPECT_GT(::lseek(fd, 0, SEEK_CUR), 0) << "nothing read the descriptor, so the refusal test above proves nothing";
+    ::close(fd);
+}
