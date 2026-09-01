@@ -1663,3 +1663,96 @@ TEST(CscaReconciliation, ConstructionLeavesAStoreWithNothingRecordedAlone)
     EXPECT_EQ(buffer.str().find("CscaAnchorState"), std::string::npos)
         << "a key nothing had recorded was written out by reconciling";
 }
+
+// --- a way out of the pin ----------------------------------------------------
+//
+// The rotation rule refuses a list signed by a publisher the agent does not
+// follow unless it chains to an anchor already held. Right, and it has a
+// consequence nobody chose: import one country's list, then be offered the ICAO
+// collection, and every list in it is refused. Without a way out the protection
+// is also a trap, and the only cure is knowing about a cache directory and
+// deleting it by hand -- outside the authorization covering every other change
+// to this store, which is the point of putting it on the wire at all.
+
+namespace {
+
+// Trust-tier calls stop at a human confirmation before any work runs. A rig
+// without a provider answers NotAuthorized to all of them, which would make the
+// cases below measure the confirmation step rather than the verb -- the exact
+// shape that let a config-surface gate pass with its branch deleted.
+void confirmEverything(Rig& rig)
+{
+    rig.frontend->setConfirmProvider([](const auto&) {
+        return LibreSCRS::Darwin::wire::ConfirmReply{LibreSCRS::Darwin::wire::PromptReplyStatus::Ok, ""};
+    });
+}
+
+} // namespace
+
+TEST(SocketFrontend, ForgetCscaAnchorsClearsTheRecordedReport)
+{
+    Rig rig;
+    confirmEverything(rig);
+
+    Agent::Config::CscaAnchorState recorded;
+    recorded.anchors = 903;
+    recorded.issuers = 146;
+    recorded.replayRefusalActive = true;
+    recorded.signer = std::string(64, 'a');
+    recorded.signerPinned = true;
+    recorded.acceptedAt = 1'700'000'000;
+    recorded.origin = "import";
+    rig.core->configStore().recordCscaAnchorState(recorded);
+    ASSERT_TRUE(rig.core->configStore().cscaAnchorState().has_value());
+
+    const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
+    ASSERT_NE(reply.find("t"), nullptr);
+    EXPECT_EQ(*reply.find("t")->asText(), "Reply") << "forgetting answered " << errName(reply);
+
+    EXPECT_FALSE(rig.core->configStore().cscaAnchorState().has_value())
+        << "the report survived the verb whose whole purpose is to remove it";
+
+    // Zero, and correct: the count comes from the CACHE's own record of what it
+    // believed it held, and nothing was ever imported into this rig's cache.
+    // Counting files instead would put a second, disagreeing answer next to the
+    // one every other surface here gives.
+    ASSERT_NE(reply.find("anchorsForgotten"), nullptr);
+    EXPECT_EQ(reply.find("anchorsForgotten")->asUInt().value_or(999u), 0u);
+}
+
+TEST(SocketFrontend, ForgetCscaAnchorsHoldingNothingIsNotAFailure)
+{
+    Rig rig;
+    confirmEverything(rig);
+
+    // An installation with nothing imported must not be told the operation
+    // failed: there is a difference between "could not remove" and "there was
+    // nothing to remove", and only the first is a refusal.
+    const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
+    ASSERT_NE(reply.find("t"), nullptr);
+    EXPECT_EQ(*reply.find("t")->asText(), "Reply") << "holding nothing was reported as " << errName(reply);
+    ASSERT_NE(reply.find("hadPinnedSigner"), nullptr);
+    EXPECT_FALSE(reply.find("hadPinnedSigner")->asBool().value_or(true));
+}
+
+TEST(SocketFrontend, ARefusedCallerForgetsNothing)
+{
+    DenyAllAuthorizer deny;
+    Rig rig(&deny);
+    confirmEverything(rig);
+
+    Agent::Config::CscaAnchorState recorded;
+    recorded.anchors = 903;
+    recorded.issuers = 146;
+    recorded.origin = "import";
+    rig.core->configStore().recordCscaAnchorState(recorded);
+
+    const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
+    EXPECT_EQ(errName(reply), "NotAuthorized");
+
+    // The assertion that matters. A refusal that still destroyed the anchors
+    // would answer exactly like one that did not, so the reply cannot tell
+    // these apart and the store is the only place the difference shows.
+    EXPECT_TRUE(rig.core->configStore().cscaAnchorState().has_value())
+        << "a caller the policy refused still cleared the report";
+}

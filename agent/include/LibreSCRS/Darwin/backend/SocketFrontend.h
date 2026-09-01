@@ -110,6 +110,10 @@ private:
     // SCM_RIGHTS in `in.fds` and the caller identity in `in.caller`, and both
     // are needed before a single byte is read.
     void handleImportCscaMasterList(SocketTransport::Inbound& in, const Agent::Wire::ImportCscaMasterList& msg);
+
+    // No message members and none possible: forgetting is all-or-nothing,
+    // because the rotation rule is applied against the whole anchor set.
+    void handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t req, const Agent::CallerToken& caller);
     void handleReadIdentity(SocketTransport::Inbound& in, const Agent::Wire::ReadIdentity& msg);
     void handleGetPhoto(SocketTransport::Inbound& in, const Agent::Wire::GetPhoto& msg);
     void handleReadCertificates(SocketTransport::Inbound& in, const Agent::Wire::ReadCertificates& msg);

@@ -455,6 +455,8 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handleGetAppearanceFont(connId, req);
     } else if (const auto* m = std::get_if<A::Wire::ImportCscaMasterList>(&body)) {
         handleImportCscaMasterList(in, *m);
+    } else if (std::get_if<A::Wire::ForgetCscaAnchors>(&body)) {
+        handleForgetCscaAnchors(connId, req, caller);
     } else {
         // A request family this chain does not name used to fall out of here
         // with no reply and no log: the client waited out its timeout and
@@ -469,7 +471,7 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         // is worth today. Instead, adding an alternative to Wire::Request breaks
         // THIS line, which forces a person to look at this chain rather than
         // let the new message class disappear into the else.
-        static_assert(std::variant_size_v<A::Wire::Request> == 25,
+        static_assert(std::variant_size_v<A::Wire::Request> == 26,
                       "Wire::Request grew or shrank: give the new alternative a branch above "
                       "(or confirm the floor is right for it) and update this count");
         log::warnf("socket: unhandled request family on conn {} req {}", connId, req);
@@ -1688,6 +1690,38 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
     reply.signedAt = recorded.signedAt;
     reply.origin = recorded.origin;
     sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
+}
+
+void SocketFrontend::handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t req, const A::CallerToken& caller)
+{
+    // The trust tier, shared with the import and with CscaSources: undoing a
+    // trust decision is the same size of decision as making one, and a person
+    // who may not add anchors may not silently drop them either.
+    if (!m_core.authorizer().authorize(A::kActionConfigureTrust, caller)) {
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    }
+    // Human confirmation, same as a trust-tier config write. This one destroys
+    // rather than replaces, and there is nothing to read it back from
+    // afterwards, so the reply below is the only account of what went.
+    confirmThenApply(connId, req, "CscaAnchorState", caller, [this, connId, req] {
+        auto& cfg = m_core.configStore();
+        const auto forgotten = A::Trust::forgetCscaAnchors(cfg);
+        if (!forgotten) {
+            // Nothing was changed, the report included -- which is why this is
+            // not reported as a partial success. Holding nothing would have
+            // answered a zeroed report, so an empty answer here really does
+            // mean the anchors could not be removed.
+            replyError(connId, req, A::Wire::SyncError::CommunicationError);
+            return;
+        }
+        A::log::infof("country signing anchors forgotten: anchors={} hadPinnedSigner={}", forgotten->anchors,
+                      forgotten->hadPinnedSigner);
+        A::Wire::ForgetCscaAnchorsReply reply;
+        reply.anchorsForgotten = forgotten->anchors;
+        reply.hadPinnedSigner = forgotten->hadPinnedSigner;
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
+    });
 }
 
 void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, const A::Wire::ResetConfig& msg,
