@@ -24,6 +24,15 @@ LABEL="org.librescrs.agent"
 BUILD_DIR="${BUILD_DIR:-build}"
 AGENT_BIN="${AGENT_BIN:-$BUILD_DIR/agent/librescrs-agent}"
 
+# Card plugins the agent dlopens. Defaults to the workspace install prefix that
+# rebuild-all populates, because the agent's own compiled default points at a
+# system prefix a development machine does not have -- and an agent with no
+# plugins fails in the one way that leaves no trace: every card comes back
+# unusable and nothing says why.
+LM_PREFIX="${LM_PREFIX:-$(cd "$(dirname "$0")/../.." && pwd)/lm-prefix}"
+PLUGIN_DIR="${LIBRESCRS_PLUGIN_DIR:-$LM_PREFIX/lib/librescrs/plugins}"
+LM_LIB="${LM_LIB:-$LM_PREFIX/lib}"
+
 die() { echo "error: $*" >&2; exit 1; }
 
 ensure_container() {
@@ -49,8 +58,20 @@ case "${1:-run}" in
         PLIST_DIR="$HOME/Library/LaunchAgents"
         mkdir -p "$PLIST_DIR"
         DEST="$PLIST_DIR/$LABEL.plist"
-        sed "s|@LIBRESCRS_AGENT_PROGRAM@|$ABS_BIN|g" \
+        # Warn rather than fail: an agent with no plugins still starts, still
+        # serves config, and is a legitimate thing to run -- but silently, so
+        # say it here where someone is watching.
+        [ -d "$PLUGIN_DIR" ] || echo "WARNING: plugin dir does not exist: $PLUGIN_DIR (the agent will load no plugins)" >&2
+        # Fail rather than warn: without the middleware libraries the agent does
+        # not start at all, and launchd answers a crash loop with a throttle, so
+        # the report arrives ten seconds late and looks like something else.
+        [ -d "$LM_LIB" ] || die "middleware lib dir does not exist: $LM_LIB (the agent will not start; build+install LibreMiddleware, or set LM_PREFIX)"
+        sed -e "s|@LIBRESCRS_AGENT_PROGRAM@|$ABS_BIN|g" \
+            -e "s|@LIBRESCRS_PLUGIN_DIR@|$PLUGIN_DIR|g" \
+            -e "s|@LIBRESCRS_LM_LIB@|$LM_LIB|g" \
             "$(dirname "$0")/launchd/$LABEL.plist" > "$DEST"
+        echo "plugins: $PLUGIN_DIR"
+        echo "lm libs: $LM_LIB"
         launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
         launchctl bootstrap "gui/$UID" "$DEST"
         echo "bootstrapped $LABEL (gui/$UID). Teardown: launchctl bootout gui/$UID/$LABEL"
