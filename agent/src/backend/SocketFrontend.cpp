@@ -136,8 +136,9 @@ ReadDoc readDocument(int fd, std::size_t cap)
     }
 }
 
-// Pkcs11Broker::CryptoOutcome -> wire sync error. CardError/Cancelled fail
-// closed to CommunicationError (no dedicated cancelled sync error).
+// Pkcs11Broker::CryptoOutcome -> wire sync error. A dismissed prompt has its
+// own name now; CardError still fails closed to CommunicationError, which is
+// what it means. Ok is not an outcome this function is called for.
 A::Wire::SyncError mapCryptoOutcome(A::Pkcs11Broker::CryptoOutcome oc) noexcept
 {
     using CO = A::Pkcs11Broker::CryptoOutcome;
@@ -154,8 +155,9 @@ A::Wire::SyncError mapCryptoOutcome(A::Pkcs11Broker::CryptoOutcome oc) noexcept
         return A::Wire::SyncError::UserNotLoggedIn;
     case CO::RateLimited:
         return A::Wire::SyncError::RateLimited;
-    case CO::Ok:
     case CO::Cancelled:
+        return A::Wire::SyncError::Cancelled;
+    case CO::Ok:
     case CO::CardError:
         break;
     }
@@ -172,8 +174,11 @@ A::Wire::SyncError mapLoginOutcome(A::Pkcs11Broker::LoginOutcome oc) noexcept
         return A::Wire::SyncError::UnknownCard;
     case LO::NotAuthorized:
         return A::Wire::SyncError::NotAuthorized;
-    case LO::Ok:
+    // The one a person produces on purpose. It used to arrive at the loader as
+    // a device error, so dismissing the PIN prompt looked like a broken reader.
     case LO::Cancelled:
+        return A::Wire::SyncError::Cancelled;
+    case LO::Ok:
     case LO::CardError:
         break;
     }
