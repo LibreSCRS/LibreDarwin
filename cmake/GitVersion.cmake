@@ -49,7 +49,7 @@ if(NOT DEFINED PROJECT_VERSION)
   # the authoritative fallback BEFORE the 0.0.1 last-resort: without it a
   # tarball build silently stamps the installed CONFIG package
   # (LibreAgentConfigVersion.cmake, SameMajorVersion) with major version 0,
-  # which breaks every downstream `find_package(LibreAgent 4.x CONFIG)` at
+  # which breaks every downstream `find_package(LibreAgent 5.x CONFIG)` at
   # configure time. VERSION mirrors the most recent release tag and is bumped
   # in lockstep with each new tag as part of the release process.
   if(EXISTS "${SRC_DIR}/VERSION")

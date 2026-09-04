@@ -18,8 +18,8 @@ option(LIBREDARWIN_USE_INSTALLED_AGENT_CORE
        "Consume LibreAgent via find_package(CONFIG) instead of FetchContent" OFF)
 
 if(LIBREDARWIN_USE_INSTALLED_AGENT_CORE)
-    # LibreAgent is on the 4.x train (VERSION 4.2.0 today); bump in lockstep.
-    find_package(LibreAgent 4.2 REQUIRED CONFIG)
+    # LibreAgent is on the 5.x train (VERSION 5.0.0 today); bump in lockstep.
+    find_package(LibreAgent 5.0 REQUIRED CONFIG)
     message(STATUS "LibreAgent: using installed package (CONFIG)")
 else()
     message(STATUS "LibreAgent: building from source (FetchContent)")

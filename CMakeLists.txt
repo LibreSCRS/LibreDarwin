@@ -51,7 +51,7 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
 endif()
 
 # The single LibreMiddleware owner: the daemon links LM through LibreAgent::Core.
-find_package(LibreMiddleware 4.2 REQUIRED CONFIG)
+find_package(LibreMiddleware 5.0 REQUIRED CONFIG)
 
 # The platform-neutral agent core (flows, scheduler, presence model, caches,
 # lease/broker policy, LM-backed seams, the 5 backend interfaces). The macOS
