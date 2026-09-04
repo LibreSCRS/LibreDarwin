@@ -26,6 +26,7 @@ jobs:
     # The format gate needs neither Xcode nor LibreMiddleware, so it runs on
     # ubuntu with the clang-format-21 the rest of the org pins. Covers the C++
     # and Objective-C++ backend sources.
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -67,10 +68,18 @@ jobs:
         # the tag's version.
         run: ci/scripts/check-release-lockstep.sh "$(head -n1 VERSION | tr -d '[:space:]')"
 
+      - name: Every job carries a time bound
+        # An unbounded job that hangs holds a runner for six hours and will
+        # not serve its log until the run is cancelled, so the failing test
+        # cannot even be named. This fails when a new job arrives without a
+        # bound, which is the only moment the omission is cheap to fix.
+        run: ci/scripts/check-job-timeouts.sh
+
   build-macos:
     # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
     # LibreMiddleware SHARED build and the -fexperimental-library C++23 the
     # backend uses on AppleClang.
+    timeout-minutes: 60
     runs-on: macos-15
     env:
       # Where LibreMiddleware installs and where LibreDarwin (+ the FetchContent
