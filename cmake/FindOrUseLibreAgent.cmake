@@ -37,10 +37,30 @@ else()
     # A fixed revision, not a branch: the client's contract conformance is
     # proven against exactly this revision, and a moving branch would let the
     # built agent run ahead of what was proven. Raising it is a deliberate act
-    # that moves this line and the client's recorded revision together.
+    # that moves this file and the client's recorded revision together.
+    #
+    # The revision lives in cmake/libreagent.pin rather than on the line below,
+    # as it already does in the three sibling consumers. That is what lets all
+    # four be checked the same way — including the release-time assertion that
+    # the pin equals the commit the agent's tag points at, which cannot read a
+    # SHA embedded in a CMake call.
+    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/libreagent.pin")
+        message(FATAL_ERROR
+            "cmake/libreagent.pin is missing. It carries the LibreAgent revision this "
+            "project is proven against; without it the fetch would have no revision to "
+            "pin and would silently follow whatever the agent's default branch holds.")
+    endif()
+    file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/libreagent.pin" LIBREAGENT_PIN LIMIT_COUNT 1)
+    string(STRIP "${LIBREAGENT_PIN}" LIBREAGENT_PIN)
+    if(NOT LIBREAGENT_PIN MATCHES "^[0-9a-f]{40}$")
+        message(FATAL_ERROR
+            "cmake/libreagent.pin does not hold a 40-character commit hash: '${LIBREAGENT_PIN}'. "
+            "A tag or branch name here would reintroduce exactly the moving target the pin exists "
+            "to remove.")
+    endif()
     FetchContent_Declare(LibreAgent
         GIT_REPOSITORY https://github.com/LibreSCRS/LibreAgent.git
-        GIT_TAG ca4f355f893822f8b875fd81cbd04e8422b26b93)
+        GIT_TAG ${LIBREAGENT_PIN})
     FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core + LibreAgent::Wire
 
     # No -fexperimental-library patching happens here any more. Both fetched
