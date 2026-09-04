@@ -38,10 +38,27 @@ jobs:
           sudo apt-get install -y clang-format-21
 
       - name: Check clang-format
+        # The roots live in ci/format-dirs.txt, which the scope check below
+        # reads too: a directory nobody formats cannot appear without one of
+        # these two steps saying so.
+        #
+        # -print0/-0 for paths with spaces, a parenthesised extension filter so
+        # the -o cannot swallow the directory list, and -r because without it an
+        # empty result makes clang-format read stdin and hang rather than fail.
+        # One wedged job in this project cost most of a working afternoon.
         run: |
-          find agent prompter pkcs11-module \
-            \( -name '*.cpp' -o -name '*.h' -o -name '*.mm' \) -print0 \
-            | xargs -0 clang-format-21 --dry-run --Werror
+          mapfile -t dirs < <(grep -v '^#' ci/format-dirs.txt)
+          find "${dirs[@]}" \
+            \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.mm' \) -print0 \
+            | xargs -0 -r clang-format-21 --dry-run --Werror
+
+      - name: Check every tracked source is reachable by the formatter
+        run: ./ci/scripts/check-format-scope.sh
+
+      - name: Check every skip carries a reason
+        # A test that skips without saying why is indistinguishable from a test
+        # that passed. Costs a second and builds nothing.
+        run: ./ci/scripts/check-skip-reasons.sh
 
   build-macos:
     # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
