@@ -416,3 +416,15 @@ jobs:
         # tests run against fakes + a real bound socket (no PC/SC reader needed).
         working-directory: LibreDarwin
         run: ctest --test-dir build --output-on-failure --no-tests=error
+
+      - name: Check the discovered test set
+        # ctest reports whatever the build directory discovered, so a suite that
+        # quietly stops being registered reads as success. Every other repository
+        # in the project has carried this listing for a while; this one did not,
+        # which is how its roster went unwatched.
+        working-directory: LibreDarwin
+        run: ./ci/scripts/test-manifest-gate.sh --check build macos
+
+      - name: Prove the manifest gate
+        working-directory: LibreDarwin
+        run: bash ci/scripts/test-manifest-gate.selftest.sh

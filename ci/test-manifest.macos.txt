@@ -1,0 +1,16 @@
+MacPrompterClientTest
+ManagePinOperationTest
+OsLogSinkTest
+PeerCodeSigningTest
+PeerIdentityTest
+PluginDirectoryTest
+ProcessHardeningTest
+PrompterProtocolTest
+PrompterServerTest
+ReadCertificatesOperationTest
+SecCodeAuthorizerTest
+SignHwSmokeTest
+SocketFrontendTest
+SocketOperationChannelTest
+SocketTransportTest
+SystemLifecycleTest
