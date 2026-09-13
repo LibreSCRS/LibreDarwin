@@ -801,8 +801,16 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sig
 
     // Authorize the CLIENT then apply the sign-flood rate-limit BEFORE ingesting
     // the document (a rejected caller never makes the agent read up to 256 MiB).
-    if (!m_core.authorizer().authorize(A::kActionSign, in.caller)) {
+    switch (m_core.authorizer().authorize(A::kActionSign, in.caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
@@ -934,8 +942,16 @@ void SocketFrontend::handleSignBatch(SocketTransport::Inbound& in, const A::Wire
     // charging again, so one SignBatch call (of any size 1-kMaxBatchDocuments)
     // always costs exactly one charge, the same one-call-one-charge
     // discipline handleSign's own dispatch already relies on.
-    if (!m_core.authorizer().authorize(A::kActionSign, in.caller)) {
+    switch (m_core.authorizer().authorize(A::kActionSign, in.caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
@@ -1132,8 +1148,16 @@ void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const A::Wire
     }
 
     // Authorize + rate-limit (BEFORE any prompt), same posture + ordering as Sign.
-    if (!m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
+    switch (m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
@@ -1227,8 +1251,16 @@ void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, cons
         replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
-    if (!m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
+    switch (m_core.authorizer().authorize(A::kActionCredentialsManage, in.caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
@@ -1432,8 +1464,16 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
     }
     const char* action =
         (*mut == A::Config::Mutability::DbusMutableTrust) ? A::kActionConfigureTrust : A::kActionConfigure;
-    if (!m_core.authorizer().authorize(action, caller)) {
+    switch (m_core.authorizer().authorize(action, caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
 
@@ -1628,8 +1668,16 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
     // Authorize the client, then rate-limit, and only then read. The trust-tier
     // action is shared with CscaSources: an import is a larger trust change than
     // naming a source, not a smaller one.
-    if (!m_core.authorizer().authorize(A::kActionConfigureTrust, in.caller)) {
+    switch (m_core.authorizer().authorize(A::kActionConfigureTrust, in.caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
     if (!m_core.rateLimiter().allow(in.caller)) {
@@ -1702,8 +1750,16 @@ void SocketFrontend::handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t
     // The trust tier, shared with the import and with CscaSources: undoing a
     // trust decision is the same size of decision as making one, and a person
     // who may not add anchors may not silently drop them either.
-    if (!m_core.authorizer().authorize(A::kActionConfigureTrust, caller)) {
+    switch (m_core.authorizer().authorize(A::kActionConfigureTrust, caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
     // Human confirmation, same as a trust-tier config write. This one destroys
@@ -1743,8 +1799,16 @@ void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, 
     }
     const char* action =
         (*mut == A::Config::Mutability::DbusMutableTrust) ? A::kActionConfigureTrust : A::kActionConfigure;
-    if (!m_core.authorizer().authorize(action, caller)) {
+    switch (m_core.authorizer().authorize(action, caller)) {
+    case A::AuthorizationOutcome::Granted:
+        break;
+    case A::AuthorizationOutcome::Denied:
         replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    case A::AuthorizationOutcome::Undecided:
+        // Nothing was decided and nothing was changed -- see the LibreLinux
+        // ManagerObject/CardObject switches this mirrors.
+        replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
     if (*mut == A::Config::Mutability::DbusMutableTrust) {

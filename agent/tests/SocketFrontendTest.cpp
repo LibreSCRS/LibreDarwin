@@ -91,9 +91,10 @@ struct NoPrompter final : Agent::Operations::PrompterClientBase
 // authorization gate.
 struct DenyAllAuthorizer final : Agent::Authorizer
 {
-    [[nodiscard]] bool authorize(std::string_view /*actionId*/, const Agent::CallerToken& /*caller*/) override
+    [[nodiscard]] Agent::AuthorizationOutcome authorize(std::string_view /*actionId*/,
+                                                        const Agent::CallerToken& /*caller*/) override
     {
-        return false;
+        return Agent::AuthorizationOutcome::Denied;
     }
 };
 

@@ -35,19 +35,19 @@ void SecCodeAuthorizer::setAuthResolverForTest(AuthResolver resolver)
     m_authResolver = std::move(resolver);
 }
 
-bool SecCodeAuthorizer::authorize(std::string_view actionId, const Agent::CallerToken& caller)
+Agent::AuthorizationOutcome SecCodeAuthorizer::authorize(std::string_view actionId, const Agent::CallerToken& caller)
 {
     const bool isDefault = actionId == Agent::kActionConfigure || actionId == Agent::kActionSign ||
                            actionId == Agent::kActionPkcs11Login || actionId == Agent::kActionCredentialsManage;
     const bool isTrust = actionId == Agent::kActionConfigureTrust;
     if (!isDefault && !isTrust) {
-        return false; // unknown action -> deny
+        return Agent::AuthorizationOutcome::Denied; // unknown action -> deny
     }
 
     const auto creds = m_credentials(caller);
     if (!creds) {
         log::warnf("authz: denying {} - unidentifiable peer", actionId);
-        return false; // fail closed
+        return Agent::AuthorizationOutcome::Denied; // fail closed
     }
     const PeerAuth peer = m_authResolver(*creds);
 
@@ -79,15 +79,17 @@ bool SecCodeAuthorizer::authorize(std::string_view actionId, const Agent::Caller
         // exists. And-ing the two unconditionally would leave the tier sealed
         // exactly as before, only after bothering the user first.
         if (m_policy.trustTierSigningIds.empty()) {
-            return true;
+            return Agent::AuthorizationOutcome::Granted;
         }
-        return signingIdAllowed(m_policy.trustTierSigningIds);
+        return signingIdAllowed(m_policy.trustTierSigningIds) ? Agent::AuthorizationOutcome::Granted
+                                                              : Agent::AuthorizationOutcome::Denied;
     }
     // Default action: default-allow unless a site allow-list is configured.
     if (m_policy.allowedSigningIds.empty()) {
-        return true;
+        return Agent::AuthorizationOutcome::Granted;
     }
-    return signingIdAllowed(m_policy.allowedSigningIds);
+    return signingIdAllowed(m_policy.allowedSigningIds) ? Agent::AuthorizationOutcome::Granted
+                                                        : Agent::AuthorizationOutcome::Denied;
 }
 
 } // namespace LibreSCRS::Darwin

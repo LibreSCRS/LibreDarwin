@@ -67,7 +67,8 @@ public:
     SecCodeAuthorizer(CredentialsResolver credentials, Policy policy);
     ~SecCodeAuthorizer() override;
 
-    [[nodiscard]] bool authorize(std::string_view actionId, const Agent::CallerToken& caller) override;
+    [[nodiscard]] Agent::AuthorizationOutcome authorize(std::string_view actionId,
+                                                        const Agent::CallerToken& caller) override;
 
     // Test seam: override the SecTask resolution with a fake.
     void setAuthResolverForTest(AuthResolver resolver);

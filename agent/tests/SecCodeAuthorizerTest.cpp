@@ -41,16 +41,16 @@ const Agent::CallerToken kCaller{"conn:1"};
 TEST(SecCodeAuthorizer, DefaultActionsAllowedByDefault)
 {
     auto authz = make({}, {}); // empty policy, unsigned peer
-    EXPECT_TRUE(authz.authorize(Agent::kActionConfigure, kCaller));
-    EXPECT_TRUE(authz.authorize(Agent::kActionSign, kCaller));
-    EXPECT_TRUE(authz.authorize(Agent::kActionPkcs11Login, kCaller));
-    EXPECT_TRUE(authz.authorize(Agent::kActionCredentialsManage, kCaller));
+    EXPECT_EQ(authz.authorize(Agent::kActionConfigure, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(authz.authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(authz.authorize(Agent::kActionPkcs11Login, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(authz.authorize(Agent::kActionCredentialsManage, kCaller), Agent::AuthorizationOutcome::Granted);
 }
 
 TEST(SecCodeAuthorizer, UnknownActionDenied)
 {
     auto authz = make({}, {});
-    EXPECT_FALSE(authz.authorize("org.librescrs.agent.nonsense", kCaller));
+    EXPECT_EQ(authz.authorize("org.librescrs.agent.nonsense", kCaller), Agent::AuthorizationOutcome::Denied);
 }
 
 TEST(SecCodeAuthorizer, TrustTierWithNoAllowListIsNotNarrowed)
@@ -63,7 +63,7 @@ TEST(SecCodeAuthorizer, TrustTierWithNoAllowListIsNotNarrowed)
     // after the human had agreed.
     SecCodeAuthorizer::PeerAuth peer{std::string("org.librescrs.LibreMac"), {}};
     auto authz = make({}, peer); // no trustTierSigningIds
-    EXPECT_TRUE(authz.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(authz.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Granted);
 }
 
 TEST(SecCodeAuthorizer, TrustTierAllowedForListedSigningId)
@@ -73,7 +73,7 @@ TEST(SecCodeAuthorizer, TrustTierAllowedForListedSigningId)
     policy.requiredAppGroup = "group.org.librescrs.LibreMac"; // allow-list must be group-bound
     SecCodeAuthorizer::PeerAuth peer{std::string("org.librescrs.LibreMac"), {"group.org.librescrs.LibreMac"}};
     auto authz = make(policy, peer);
-    EXPECT_TRUE(authz.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(authz.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Granted);
 }
 
 TEST(SecCodeAuthorizer, AllowListWithoutRequiredAppGroupFailsClosed)
@@ -83,12 +83,12 @@ TEST(SecCodeAuthorizer, AllowListWithoutRequiredAppGroupFailsClosed)
     SecCodeAuthorizer::Policy trust;
     trust.trustTierSigningIds = {"org.librescrs.LibreMac"};
     auto a1 = make(trust, SecCodeAuthorizer::PeerAuth{std::string("org.librescrs.LibreMac"), {}});
-    EXPECT_FALSE(a1.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(a1.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Denied);
 
     SecCodeAuthorizer::Policy dflt;
     dflt.allowedSigningIds = {"org.librescrs.LibreMac"};
     auto a2 = make(dflt, SecCodeAuthorizer::PeerAuth{std::string("org.librescrs.LibreMac"), {}});
-    EXPECT_FALSE(a2.authorize(Agent::kActionSign, kCaller));
+    EXPECT_EQ(a2.authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Denied);
 }
 
 TEST(SecCodeAuthorizer, TrustTierDeniedForUnlistedOrUnsignedPeer)
@@ -97,10 +97,10 @@ TEST(SecCodeAuthorizer, TrustTierDeniedForUnlistedOrUnsignedPeer)
     policy.trustTierSigningIds = {"org.librescrs.LibreMac"};
     // Unlisted signing id.
     auto a1 = make(policy, SecCodeAuthorizer::PeerAuth{std::string("com.evil.app"), {}});
-    EXPECT_FALSE(a1.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(a1.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Denied);
     // Unsigned peer (no signing id).
     auto a2 = make(policy, SecCodeAuthorizer::PeerAuth{std::nullopt, {}});
-    EXPECT_FALSE(a2.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(a2.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Denied);
 }
 
 TEST(SecCodeAuthorizer, DefaultActionAllowListRestricts)
@@ -110,10 +110,10 @@ TEST(SecCodeAuthorizer, DefaultActionAllowListRestricts)
     policy.requiredAppGroup = "group.org.librescrs.LibreMac"; // allow-list must be group-bound
     auto allowed = make(
         policy, SecCodeAuthorizer::PeerAuth{std::string("org.librescrs.LibreMac"), {"group.org.librescrs.LibreMac"}});
-    EXPECT_TRUE(allowed.authorize(Agent::kActionSign, kCaller));
+    EXPECT_EQ(allowed.authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Granted);
     auto denied =
         make(policy, SecCodeAuthorizer::PeerAuth{std::string("com.evil.app"), {"group.org.librescrs.LibreMac"}});
-    EXPECT_FALSE(denied.authorize(Agent::kActionSign, kCaller));
+    EXPECT_EQ(denied.authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Denied);
 }
 
 TEST(SecCodeAuthorizer, RequiredAppGroupBindsTheAllowList)
@@ -124,18 +124,19 @@ TEST(SecCodeAuthorizer, RequiredAppGroupBindsTheAllowList)
     // Matching signing id but WITHOUT the app group -> denied (a self-signed
     // binary could claim the id but not our Team-ID-bound group).
     auto without = make(policy, SecCodeAuthorizer::PeerAuth{std::string("org.librescrs.LibreMac"), {}});
-    EXPECT_FALSE(without.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(without.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Denied);
     // With the app group -> allowed.
     auto with = make(
         policy, SecCodeAuthorizer::PeerAuth{std::string("org.librescrs.LibreMac"), {"group.org.librescrs.LibreMac"}});
-    EXPECT_TRUE(with.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(with.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Granted);
 }
 
 TEST(SecCodeAuthorizer, UnidentifiablePeerFailsClosed)
 {
     auto authz = make({}, {}, /*identifiable=*/false);
-    EXPECT_FALSE(authz.authorize(Agent::kActionSign, kCaller)); // even a default action
-    EXPECT_FALSE(authz.authorize(Agent::kActionConfigureTrust, kCaller));
+    EXPECT_EQ(authz.authorize(Agent::kActionSign, kCaller),
+              Agent::AuthorizationOutcome::Denied); // even a default action
+    EXPECT_EQ(authz.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Denied);
 }
 
 } // namespace
