@@ -74,7 +74,7 @@ fi
 
 sed -nE 's/^ *Test +#[0-9]+: +//p' "$raw" | sort > "$listing"
 
-count=$(wc -l < "$listing" | tr -d "[:space:]")   # see the note below: BSD wc pads
+count=$(wc -l < "$listing" | tr -d "[:space:]")   # BSD wc pads; see below
 if [ "$count" -eq 0 ]; then
     echo "FATAL: ctest -N discovered no tests in '$BUILD_DIR' — this is a build that did not happen, not a test set" >&2
     exit 2
@@ -103,9 +103,9 @@ if cmp -s "$listing" "$MANIFEST"; then
     exit 0
 fi
 
-# BSD `wc -l` pads its output to a fixed width, so on macOS these became
-# "+       1 / -       0 tests" and nothing reading the summary matched.
-# GNU wc does not pad, which is why five repositories shipped this unnoticed.
+# BSD `wc -l` pads its output to a fixed width, so on a macOS runner these
+# read "+       1 / -       0 tests". GNU wc does not pad, which is why the
+# Linux legs never showed it.
 added=$(comm -23 "$listing" "$MANIFEST" | wc -l | tr -d "[:space:]")
 removed=$(comm -13 "$listing" "$MANIFEST" | wc -l | tr -d "[:space:]")
 diff -u "$MANIFEST" "$listing" || true
