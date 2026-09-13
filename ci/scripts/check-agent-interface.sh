@@ -274,21 +274,60 @@ elif [ -s "$SCRATCH/unknown-kind.txt" ]; then
     echo "  note    $(wc -l < "$SCRATCH/unknown-kind.txt") file(s) of a kind neither list names; none of them mentions authorize(), so nothing here reads them"
 fi
 
+# Extra include roots come from LIBRESCRS_EXTRA_INCLUDE (colon-separated), or
+# from a sibling LibreMiddleware checkout when there is one. They are named in
+# the output, so what was on the path is part of the verdict rather than
+# something the reader has to guess.
+EXTRA_INC="${LIBRESCRS_EXTRA_INCLUDE:-}"
+if [ -z "$EXTRA_INC" ] && [ -d "$REPO_ROOT/../LibreMiddleware/include" ]; then
+    EXTRA_INC="$REPO_ROOT/../LibreMiddleware/include"
+fi
+extra_inc=()
+extra_named=""
+oldifs=$IFS; IFS=:
+for d in $EXTRA_INC; do
+    [ -d "$d" ] || continue
+    extra_inc+=(-isystem "$d")
+    extra_named="${extra_named:+$extra_named }$d"
+done
+IFS=$oldifs
+
+# NOTE: these roots are built HERE, above R1, because R1 compiles too. They
+# used to be assembled just before R5, so R1 ran without them: on a machine
+# where gtest is not in a default system path -- every macOS box -- R1 could
+# not compile the authorizer's test at all, and LIBRESCRS_EXTRA_INCLUDE, the
+# documented way to say where the headers are, could not reach it.
+
 # ---------------------------------------------------------------- R1
 mkdir -p "$SCRATCH/shim/bsm"
 cat > "$SCRATCH/shim/bsm/libbsm.h" <<'EOF'
 #pragma once
 // Stand-in for the Darwin header, supplying only what PeerIdentity.h names.
-// If this ever drifts from the real one, the macOS build says so first: it
-// includes the real header and this file is not on its include path.
+// Used ONLY where the real header is unreachable -- see the probe below, which
+// asks the compiler rather than guessing a path. Where the real one is
+// reachable this file stays off the include path, so drift shows up as a
+// compile error against the real declarations.
 typedef struct { unsigned int val[8]; } audit_token_t;
 extern "C" int audit_token_to_pid(audit_token_t);
 extern "C" int audit_token_to_pidversion(audit_token_t);
 EOF
 echo '#include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>' > "$SCRATCH/tu.cpp"
 
+# Is the REAL <bsm/libbsm.h> reachable? Ask the compiler, not the filesystem.
+# This used to test `-e /usr/include/bsm/libbsm.h`, which is a Linux path: on
+# macOS /usr/include does not exist at all (the header lives in the SDK), so the
+# probe always missed and the shim was ALWAYS injected -- on the one platform
+# that ships the real header. The shim's audit_token_t then collided with the
+# SDK's own typedef in <mach/message.h> (reached via <dispatch/dispatch.h> under
+# -fblocks), and because that first error stands outside the checkout, R5
+# declined to judge two translation units and reported 3 of 5 instead of 5 of 5.
+# The compiler knows about SDK roots, framework paths and sysroots; a literal
+# path knows about one distribution's layout.
+echo '#include <bsm/libbsm.h>' > "$SCRATCH/bsmprobe.cpp"
 shim_inc=()
-[ -e /usr/include/bsm/libbsm.h ] || shim_inc=(-isystem "$SCRATCH/shim")
+if ! "$CXX_BIN" -fsyntax-only -x c++ "$SCRATCH/bsmprobe.cpp" >/dev/null 2>&1; then
+    shim_inc=(-isystem "$SCRATCH/shim")
+fi
 
 # The translation units R1 compiles. The first is the header on its own. The
 # second is a real source file from this repository -- the authorizer's test,
@@ -320,10 +359,15 @@ done
 r1=0
 for t in "${tus[@]}"; do
     "$CXX_BIN" -std=c++23 -fsyntax-only "${shim_inc[@]}" \
-        -I agent/include -isystem "$LA_INCLUDE" "$t" >> "$SCRATCH/r1.log" 2>&1 || r1=1
+        -I agent/include -isystem "$LA_INCLUDE" "${extra_inc[@]}" "$t" >> "$SCRATCH/r1.log" 2>&1 || r1=1
 done
-if grep -q "gtest/gtest.h: No such file" "$SCRATCH/r1.log"; then
-    echo "FATAL: gtest's headers are not on the include path, so the authorizer's test cannot be compiled — install them (Debian/Ubuntu: libgtest-dev) rather than letting this rule measure one header" >&2
+# Both spellings: GCC says `gtest/gtest.h: No such file or directory`, clang says
+# `'gtest/gtest.h' file not found`. Matching only GCC's meant that on macOS this
+# precise diagnosis never fired and the run fell through to the generic "failed
+# to compile for a reason that is not the authorize() contract", which sends the
+# reader looking at the contract for a missing package.
+if grep -qE "gtest/gtest\.h: No such file|'gtest/gtest\.h' file not found" "$SCRATCH/r1.log"; then
+    echo "FATAL: gtest's headers are not on the include path, so the authorizer's test cannot be compiled — install them (Debian/Ubuntu: libgtest-dev; macOS: point LIBRESCRS_EXTRA_INCLUDE at a prefix that has gtest/, e.g. the LibreMiddleware install prefix's include/) rather than letting this rule measure one header" >&2
     exit 2
 fi
 
@@ -1026,23 +1070,6 @@ fi
 # A unit it CAN reach and that fails on the contract is rc=1 -- the strongest
 # verdict in this file, and the only one no spelling can answer.
 #
-# Extra include roots come from LIBRESCRS_EXTRA_INCLUDE (colon-separated), or
-# from a sibling LibreMiddleware checkout when there is one. They are named in
-# the output, so what was on the path is part of the verdict rather than
-# something the reader has to guess.
-EXTRA_INC="${LIBRESCRS_EXTRA_INCLUDE:-}"
-if [ -z "$EXTRA_INC" ] && [ -d "$REPO_ROOT/../LibreMiddleware/include" ]; then
-    EXTRA_INC="$REPO_ROOT/../LibreMiddleware/include"
-fi
-extra_inc=()
-extra_named=""
-oldifs=$IFS; IFS=:
-for d in $EXTRA_INC; do
-    [ -d "$d" ] || continue
-    extra_inc+=(-isystem "$d")
-    extra_named="${extra_named:+$extra_named }$d"
-done
-IFS=$oldifs
 
 # Apple blocks: the socket frontend dispatches with `^{ }`, which is a clang
 # extension. Probed rather than assumed, because a compiler without it reports

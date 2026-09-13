@@ -916,5 +916,78 @@ else
     echo "  note  clang++ is not installed here, so the two clang-wording cases were not measured"
 fi
 
+
+# ---------------------------------------------------------------------------
+# Portability of the gate itself. All three cases below are RED against the
+# revision of check-agent-interface.sh that shipped before 2026-09-13, and that
+# revision passed the other 59 -- which is why they exist: the suite was green
+# on macOS while the gate could not judge there at all.
+
+# P1 -- LIBRESCRS_EXTRA_INCLUDE must reach R1, not only R5. It is the documented
+# way to say where foreign headers are; wired into R5 alone it cannot help R1,
+# and R1 is the rule that compiles the authorizer's test. On any host where
+# gtest is not in a default system path -- every macOS box -- that made the whole
+# gate unreachable.
+mkdir -p "$WORK/extra-inc"
+echo '#pragma once
+inline int librescrs_selftest_marker() { return 1; }' > "$WORK/extra-inc/librescrs_selftest_marker.h"
+mkderived "$WORK/p1" enum none
+{ echo '#include <librescrs_selftest_marker.h>'
+  echo '#include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>'
+  echo 'namespace LibreSCRS::Darwin {'
+  echo 'void probe(SecCodeAuthorizer& a) {'
+  echo '    switch (a.authorize("x", {})) { default: break; }'
+  echo '    (void)librescrs_selftest_marker();'
+  echo '}'
+  echo '}'
+} > "$WORK/p1/agent/tests/SecCodeAuthorizerTest.cpp"
+REPO_ROOT="$WORK/p1" LIBRESCRS_EXTRA_INCLUDE="$WORK/extra-inc" bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
+if [ "$rc" = 0 ]; then
+    echo "  ok    LIBRESCRS_EXTRA_INCLUDE reaches R1, not only R5 (rc=$rc)"; pass=$((pass+1))
+else
+    echo "  FAIL  extra include root did not reach R1: want rc=0, got rc=$rc"
+    sed 's/^/        /' "$WORK/out.txt"; fail=$((fail+1))
+fi
+
+# P2 -- the shim decision must not be a hard-coded absolute path. `/usr/include`
+# does not exist on macOS at all (the real bsm/libbsm.h is in the SDK), so a
+# `[ -e /usr/include/... ]` probe always missed there and forced the Linux shim
+# onto the one platform that ships the real header; its audit_token_t then
+# collided with <mach/message.h> and two translation units were written off as
+# out of reach. Ask the compiler instead -- it knows sysroots and frameworks.
+if grep -qE '^\s*\[\s*-e\s+/usr/include/' "$GATE"; then
+    echo "  FAIL  the shim decision tests a literal /usr/include path; probe the compiler instead"
+    grep -nE '^\s*\[\s*-e\s+/usr/include/' "$GATE" | sed 's/^/        /'; fail=$((fail+1))
+elif grep -q 'bsmprobe' "$GATE"; then
+    echo "  ok    the real bsm/libbsm.h is probed through the compiler, not a literal path"; pass=$((pass+1))
+else
+    echo "  FAIL  no compiler probe for bsm/libbsm.h found in the gate"; fail=$((fail+1))
+fi
+
+# P3 -- the missing-gtest diagnosis must fire under both compilers' wording.
+# GCC says `gtest/gtest.h: No such file or directory`; clang says
+# `'gtest/gtest.h' file not found`. Matching GCC alone meant that on macOS this
+# rule fell through to the generic "not the authorize() contract" FATAL, which
+# points the reader at the contract for what is a missing package.
+if command -v clang++ >/dev/null 2>&1; then
+    mkderived "$WORK/p3" enum none
+    { echo '#include <gtest/gtest.h>'
+      echo '#include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>'
+      echo 'namespace LibreSCRS::Darwin {'
+      echo 'void probe(SecCodeAuthorizer& a) { switch (a.authorize("x", {})) { default: break; } }'
+      echo '}'
+    } > "$WORK/p3/agent/tests/SecCodeAuthorizerTest.cpp"
+    REPO_ROOT="$WORK/p3" CXX=clang++ LIBRESCRS_EXTRA_INCLUDE="$WORK/extra-inc" \
+        bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
+    if [ "$rc" = 2 ] && grep -q "gtest's headers are not on the include path" "$WORK/out.txt"; then
+        echo "  ok    clang wording: missing gtest is named as missing gtest (rc=$rc)"; pass=$((pass+1))
+    else
+        echo "  FAIL  clang wording, missing gtest: want rc=2 naming gtest, got rc=$rc"
+        sed 's/^/        /' "$WORK/out.txt"; fail=$((fail+1))
+    fi
+else
+    echo "  note  clang++ is not installed here, so the gtest-wording case was not measured"
+fi
+
 echo "check-agent-interface.selftest: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
