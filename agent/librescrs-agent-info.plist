@@ -18,6 +18,6 @@ without one, App Sandbox init SIGTRAPs in libsystem_secinit.
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>5.0.0</string>
 </dict>
 </plist>

@@ -28,6 +28,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
   against this file on every push, rather than first checked on a tag that
   cannot be taken back.
 
+- The agent and the prompter binaries report the version they are part of. Their
+  embedded bundle information said 0.1 while everything else in the tree said 5.0.0,
+  so Finder, `mdls` and the crash reporter named a version that does not exist.
+
 - The macOS socket host now names a dismissed prompt on the wire instead of
   folding it into a generic communication failure, so a user who cancels a PIN
   prompt is no longer reported as a device error.

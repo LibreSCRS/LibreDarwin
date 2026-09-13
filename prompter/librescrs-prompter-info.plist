@@ -18,7 +18,7 @@ LSUIElement keeps the AppKit run loop dock- and menu-bar-less.
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>5.0.0</string>
     <key>LSUIElement</key>
     <true/>
 </dict>

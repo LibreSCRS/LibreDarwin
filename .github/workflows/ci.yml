@@ -68,6 +68,17 @@ jobs:
         # the tag's version.
         run: ci/scripts/check-release-lockstep.sh "$(head -n1 VERSION | tr -d '[:space:]')"
 
+      - name: Prove the version-surface check still fails when it should
+        # Both sides of the lockstep check above read VERSION, so it cannot
+        # notice a build that ships a different number -- and for a while the
+        # embedded bundle information said 0.1 while every label said 5.0.0.
+        # This selftest is what keeps the check below from being a check that
+        # cannot fail.
+        run: ./ci/scripts/check-version-surfaces.selftest.sh
+
+      - name: Every surface states the version in VERSION
+        run: ./ci/scripts/check-version-surfaces.sh
+
       - name: Every job carries a time bound
         # An unbounded job that hangs holds a runner for six hours and will
         # not serve its log until the run is cancelled, so the failing test
