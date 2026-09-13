@@ -519,8 +519,8 @@ else
 fi
 
 # R2 -- nobody looks at a GIT_TAG occurrence, or at the CMake file the
-# revision used to live in. The three repositories that own a pin file all
-# call that file FindOrUseLibreAgent.cmake.
+# revision used to live in. Every repository that owns a pin file calls
+# that file FindOrUseLibreAgent.cmake, the name checked for below.
 cmakefile=FindOrUseLibreAgent.cmake
 mined=0
 cmakelines=0

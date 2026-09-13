@@ -87,9 +87,9 @@ jobs:
         run: ci/scripts/check-job-timeouts.sh
 
       - name: The agent pin is read from the pin file, not mined out of CMake
-        # The revision moved into cmake/libreagent.pin; the workflow that used
-        # to mine it out of cmake/FindOrUseLibreAgent.cmake with a regex then
-        # resolved to the empty string and died naming a file that was correct.
+        # The revision lives in cmake/libreagent.pin, so a regex hunting for a
+        # SHA in cmake/FindOrUseLibreAgent.cmake resolves to the empty string:
+        # the call there names a variable, not a hash.
         # Nothing here could see that: the two scripts that read a workflow
         # look at timeout-minutes (check-job-timeouts.sh) and at which gate
         # scripts are named (check-gates-wired.sh), not at where the agent ref

@@ -814,13 +814,13 @@ else
 fi
 
 # Fifty-one: whose error it is. The compiler rule takes extra include roots, and
-# those roots are somebody else's tree. It used to accept a list of generic
-# diagnostic phrases whoever raised them: measured, one unrelated ill-formed
-# expression in a sibling repository's header printed
-# `::error file=<a source of THIS repository>::this translation unit does not
-# compile against the authorize() contract` for two innocent files and took the
-# gate from rc=0 to rc=1. A first error standing outside this checkout is out of
-# reach, and the verdict says which header it was.
+# those roots are somebody else's tree. Accepting a list of generic diagnostic
+# phrases whoever raised them puts an ill-formed expression in a foreign header
+# under `::error file=<a source of THIS repository>::this translation unit does
+# not compile against the authorize() contract`, and takes the gate from rc=0 to
+# rc=1. A first error standing outside this checkout is out of reach for the
+# unit that includes it rather than a failure of this repository, and the
+# verdict says which header it was.
 mkderived "$WORK/c51" enum switch
 mkdir -p "$WORK/c51-extra/Foreign"
 { echo '#pragma once'

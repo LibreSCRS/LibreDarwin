@@ -84,9 +84,9 @@
 #       unit the compiler opened and rejected for none of them is counted apart
 #       and the verdict word becomes INCOMPLETE, because the count is the whole
 #       signal and nobody keeps it between runs. And when R5 does report a break
-#       it says FAILED rather than ok -- it printed "R5 ok" on the same run in
-#       which it set rc=1, five verdict lines all reading ok over a red gate,
-#       and the lines are what this repository quotes as evidence.
+#       it says FAILED rather than ok: a rule that prints "R5 ok" on the run in
+#       which it sets rc=1 leaves a log whose verdict lines all read ok over a
+#       red gate, and those lines are the only record of what was judged.
 #
 # What they read is every tracked source in the repository, by extension, minus
 # ci/ -- this gate, its selftest and this paragraph name the interface by
