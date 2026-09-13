@@ -75,6 +75,19 @@ jobs:
         # bound, which is the only moment the omission is cheap to fix.
         run: ci/scripts/check-job-timeouts.sh
 
+      - name: The agent pin is read from the pin file, not mined out of CMake
+        # The revision moved into cmake/libreagent.pin; the workflow that used
+        # to mine it out of cmake/FindOrUseLibreAgent.cmake with a regex then
+        # resolved to the empty string and died naming a file that was correct.
+        # Nothing here could see that: the two scripts that read a workflow
+        # look at timeout-minutes (check-job-timeouts.sh) and at which gate
+        # scripts are named (check-gates-wired.sh), not at where the agent ref
+        # comes from.
+        run: ci/scripts/check-agent-pin-wiring.sh
+
+      - name: Prove the pin-wiring gate still fails when it should
+        run: ./ci/scripts/check-agent-pin-wiring.selftest.sh
+
       - name: Every shipped gate is wired into CI
         # A gate nobody runs is not a gate: dup-scan.py and canonical-types.py
         # shipped in five repositories for a whole release cycle and no
@@ -107,8 +120,8 @@ jobs:
       # bump to point at, in a repo whose whole convention is that the bump
       # rides in the commit that needs it.
       #
-      # Read at run time from the cmake file rather than copied here: two
-      # places holding one hash is the defect this is fixing, one level up.
+      # Read at run time from cmake/libreagent.pin rather than copied here:
+      # two places holding one hash is the defect this is fixing, one level up.
     steps:
       - name: Install build tools
         # ninja drives the CMake builds; autoconf/automake/libtool/pkg-config are
@@ -126,18 +139,24 @@ jobs:
 
       - name: Resolve the pinned LibreAgent revision
         id: agent_pin
-        # Fails loudly on a pin that is not 40 hex: a blank ref would silently
-        # check out the default branch, which is exactly the behaviour being
-        # removed here.
+        # Read from the pin file rather than mined out of the CMake call: the
+        # revision moved into cmake/libreagent.pin, so the regex that used to
+        # find it there now resolves to the empty string. This is the same
+        # shape the three sibling consumers already use.
+        #
+        # A pin that is not 40 hex FAILS here rather than being passed on. An
+        # empty ref makes actions/checkout silently take the default branch --
+        # which is exactly the behaviour this step removes, so falling back to
+        # it on a malformed pin would reintroduce the bug at the moment the
+        # guard was most needed.
         run: |
-          pin=$(sed -n 's/.*GIT_TAG \([0-9a-f]\{40\}\).*/\1/p' \
-                LibreDarwin/cmake/FindOrUseLibreAgent.cmake | head -1)
-          if [ -z "$pin" ]; then
-            echo "no 40-hex GIT_TAG found in cmake/FindOrUseLibreAgent.cmake" >&2
-            exit 1
-          fi
+          pin=$(tr -d '[:space:]' < LibreDarwin/cmake/libreagent.pin)
+          case "$pin" in
+            *[!0-9a-f]* | "") echo "::error::cmake/libreagent.pin is not 40 hex: '$pin'"; exit 1 ;;
+          esac
+          [ ${#pin} -eq 40 ] || { echo "::error::cmake/libreagent.pin is ${#pin} chars, want 40"; exit 1; }
           echo "ref=$pin" >> "$GITHUB_OUTPUT"
-          echo "LibreAgent pinned at $pin"
+          echo "LibreAgent pinned revision: $pin"
 
       - name: Checkout LibreAgent (sibling FetchContent source)
         uses: actions/checkout@v4
