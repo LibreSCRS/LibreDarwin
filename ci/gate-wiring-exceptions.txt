@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Scripts CI really runs, but not under a name any workflow spells out, and
+# scripts that are deliberately hand-run. One path per line, then the reason.
+# check-gates-wired.sh treats every line here as a reachability root, so what
+# these scripts call counts as run too. A path that stops being tracked fails.
+ci/scripts/skip-ledger.sh  OWNER: delete or wire -- format-check:62 already runs check-skip-reasons.sh
+ci/scripts/warning-gate.py  OWNER: delete or wire -- this repo has no ci/warning-baseline.json

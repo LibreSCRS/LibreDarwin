@@ -75,6 +75,15 @@ jobs:
         # bound, which is the only moment the omission is cheap to fix.
         run: ci/scripts/check-job-timeouts.sh
 
+      - name: Every shipped gate is wired into CI
+        # A gate nobody runs is not a gate: dup-scan.py and canonical-types.py
+        # shipped in five repositories for a whole release cycle and no
+        # workflow ever named either.
+        run: ci/scripts/check-gates-wired.sh
+
+      - name: Gate-wiring check self-test
+        run: ci/scripts/check-gates-wired.selftest.sh
+
   build-macos:
     # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
     # LibreMiddleware SHARED build and the -fexperimental-library C++23 the
