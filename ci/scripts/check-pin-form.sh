@@ -2,13 +2,14 @@
 # check-pin-form.sh -- the pin's form check must be able to accept a real pin.
 #
 # cmake/FindOrUseLibreAgent.cmake refuses a libreagent.pin that is not exactly
-# forty lowercase hex characters. From 2026-09-04 to 2026-09-10 it spelled that
-# as `MATCHES "^[0-9a-f]{40}$"`. CMake's regex engine has no {n} repetition --
-# the braces are literal characters there -- so the pattern matched no hash at
-# all and the FATAL_ERROR beneath it rejected EVERY pin, including the one a
-# correct release would write. Nothing noticed for six days: this repository's
-# other pin gate reads the pin FILE, and the guard only speaks when someone
-# configures the project.
+# forty lowercase hex characters. The obvious spelling of that test,
+# `MATCHES "^[0-9a-f]{40}$"`, is a trap: CMake's regex engine has no {n}
+# repetition -- the braces are literal characters there -- so that pattern
+# matches the five-character string `a{40}` and no real hash at all, and the
+# FATAL_ERROR beneath it would reject EVERY pin, including the one a correct
+# release writes. Such a guard would say nothing until someone tripped over
+# it: this repository's other pin gate reads the pin FILE, and the guard only
+# speaks when someone configures the project.
 #
 # So this gate runs the guard instead of reading it. It cuts the length and
 # character-class test out of the tracked CMake file, wraps it in a standalone

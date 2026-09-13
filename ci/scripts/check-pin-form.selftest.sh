@@ -47,8 +47,8 @@ CMAKE
 fixture "$work/good.cmake" 'NOT LIBREAGENT_PIN_LENGTH EQUAL 40 OR NOT LIBREAGENT_PIN MATCHES "^[0-9a-f]+$"'
 run "case_1 length + character class is correct" 0 "$work/good.cmake"
 
-# case_2 -- the 2026-09-04 defect, exactly: CMake has no {n} repetition, so
-# this pattern matches the literal brace form and no hash. The guard then
+# case_2 -- the {n} trap, exactly: CMake has no {n} repetition, so this
+# pattern matches the literal brace form and no hash. The guard then
 # refuses EVERY pin. A gate that only tries malformed values reads this green.
 fixture "$work/brace.cmake" 'NOT LIBREAGENT_PIN MATCHES "^[0-9a-f]{40}$"'
 run "case_2 the brace form refuses even a correct pin" 1 "$work/brace.cmake"

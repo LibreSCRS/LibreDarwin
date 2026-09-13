@@ -102,10 +102,10 @@ jobs:
       - name: The pin's form check can accept a real pin
         # The wiring gate above proves the workflow reads cmake/libreagent.pin.
         # It says nothing about the guard in cmake/FindOrUseLibreAgent.cmake
-        # that decides whether a pin is well formed -- and for six days that
-        # guard was spelled with a {n} repetition CMake's regex engine does not
-        # have, so it refused every hash, including a correct one. Nothing
-        # spoke because the guard only runs when someone configures the
+        # that decides whether a pin is well formed -- and the obvious spelling
+        # of that guard uses a {n} repetition CMake's regex engine does not
+        # have, so it refuses every hash, including a correct one. Nothing
+        # would speak, because the guard only runs when someone configures the
         # project. This step runs it, in both directions.
         run: ci/scripts/check-pin-form.sh
 
@@ -113,18 +113,20 @@ jobs:
         run: ./ci/scripts/check-pin-form.selftest.sh
 
       - name: Every shipped gate is wired into CI
-        # A gate nobody runs is not a gate: dup-scan.py and canonical-types.py
-        # shipped in five repositories for a whole release cycle and no
-        # workflow ever named either.
+        # A gate nobody runs is not a gate. Every script this repository ships
+        # under ci/scripts/ has to be reachable by name from something CI runs,
+        # or be listed with a reason in ci/gate-wiring-exceptions.txt -- and a
+        # listed path that is no longer tracked fails too, so the amnesty
+        # cannot go stale.
         run: ci/scripts/check-gates-wired.sh
 
       - name: Gate-wiring check self-test
         run: ci/scripts/check-gates-wired.selftest.sh
 
       - name: Every first-party version floor names the major in VERSION
-        # The 4.x sweep before 5.0 searched for the token `4.2`; the floor that
-        # mattered read `4.0`, in the only executable consumer the project
-        # ships, and survived. This measures the property instead: every
+        # Searching a tree for one literal version token misses the floor that
+        # matters: a `4.0` floor survives a sweep that looked for `4.2`, and
+        # nothing says it was never read. This measures the property: every
         # first-party find_package/find_dependency floor must name the major
         # the VERSION file names. It reads VERSION and never `git describe`, so
         # it is decidable before a tag exists -- which is the whole window in
@@ -133,8 +135,9 @@ jobs:
         run: ci/scripts/check-version-floors.sh --min 1
 
       - name: Prove the floor gate still fails when it should
-        # Twenty cases, instant, no build. A gate nobody has seen fail is a
-        # line in a workflow file.
+        # Every case runs the gate against a fixture tree built here, so this
+        # needs no build, no compiler and no network. A gate nobody has seen
+        # fail is a line in a workflow file.
         run: ./ci/scripts/check-version-floors.selftest.sh
 
       - name: The version this tree stamps names the major in VERSION
@@ -334,9 +337,9 @@ jobs:
       - name: Resolve the pinned LibreAgent revision
         id: agent_pin
         # Read from the pin file rather than mined out of the CMake call: the
-        # revision moved into cmake/libreagent.pin, so the regex that used to
-        # find it there now resolves to the empty string. This is the same
-        # shape the three sibling consumers already use.
+        # revision lives in cmake/libreagent.pin, so a regex hunting for a SHA
+        # in the CMake that declares the fetch resolves to the empty string --
+        # the call names a variable, not a hash.
         #
         # A pin that is not 40 hex FAILS here rather than being passed on. An
         # empty ref makes actions/checkout silently take the default branch --

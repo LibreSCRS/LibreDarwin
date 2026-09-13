@@ -1169,11 +1169,11 @@ while IFS= read -r t; do
     fi
 done < "$SCRATCH/r5-tus.txt"
 
-# The verdict line says what the rule found, not merely how far it reached. It
-# printed "R5 ok" on the same run in which it reported a contract failure and
-# set rc=1 -- five verdict lines all reading ok over a red gate. Every other
-# rule here prints no ok line when it has an ::error to report, and the record
-# this programme keeps is made of these lines.
+# The verdict line says what the rule found, not merely how far it reached. A
+# rule that prints "R5 ok" on the same run in which it reports a contract
+# failure and sets rc=1 leaves a log whose verdict lines all read ok over a red
+# gate. Every other rule here prints no ok line when it has an ::error to
+# report, and these lines are the only record of what was judged.
 r5_reach_note=""
 [ "$r5_unreached" -gt 0 ] && r5_reach_note="; $r5_unreached out of reach and left to R2-R4"
 r5_with="${extra_named:+ with $extra_named}"
