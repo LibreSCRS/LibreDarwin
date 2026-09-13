@@ -1,0 +1,31 @@
+# Steps allowed to check LibreSCRS/LibreAgent out at a ref cmake/libreagent.pin
+# does not name. Read by ci/scripts/check-agent-pin-wiring.sh.
+#
+# The revision this repository BUILDS against comes from the pin, and a checkout
+# on any other ref is the moving target the pin exists to remove. Exactly one
+# shape is different: a job that measures drift rather than building anything.
+# A pin is by construction the interface as it WAS, so a job that reads it can
+# never report that the base class has moved -- it is green on a combination no
+# release ships. That job has to look at the agent's trunk, and it has to say so
+# here rather than being invisible.
+#
+# Format: <workflow file>:<job>:<step id>  <reason>. An entry with no reason is
+# rejected, and a listed address that no agent checkout carries any more fails:
+# an amnesty that outlives its job reads like a rule somebody still needs.
+#
+# "Builds nothing" is measured, not taken on trust: the gate reads the exempt
+# step's whole job and fails if it invokes a build system or publishes an
+# artefact. Without that, the rule "at least one checkout must still be pinned"
+# is satisfied by any gate job that reads headers, and the job that ships can be
+# written an exemption of its own.
+#
+# It is asked three ways, because naming the builders is the easiest of the
+# three to stop doing: the job's own lines, one level into any script of this
+# repository the job runs, and the INPUTS a build needs -- the dependency
+# checkout, the prefix it installs to, the ref it tracks, an artefact from
+# another job. A job that measures drift needs none of them.
+#
+# The address, not the id alone. A step id is unique only inside its job, so an
+# exemption keyed on the name follows the name: give the building job's checkout
+# that id and a branch ref, and it is pardoned without this file being opened.
+ci.yml:agent-interface:agent_trunk  the interface gate compares this repository against the agent trunk on purpose; it builds nothing and ships nothing

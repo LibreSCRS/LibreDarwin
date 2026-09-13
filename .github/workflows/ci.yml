@@ -97,6 +97,143 @@ jobs:
       - name: Gate-wiring check self-test
         run: ci/scripts/check-gates-wired.selftest.sh
 
+  agent-interface:
+    # The macOS job builds against cmake/libreagent.pin -- the agent interface as
+    # it WAS. That is not the combination a release ships, and it stayed green
+    # while SecCodeAuthorizer::authorize still returned bool and the base class
+    # had already moved to AuthorizationOutcome. So this job runs the same check
+    # against BOTH revisions, and they answer different questions:
+    #
+    #   the agent's main branch -- what a release is cut from. Green here means
+    #   this repository has followed the interface. The unpinned checkout is
+    #   named in ci/agent-ref-exceptions.txt: an agent ref the pin does not name
+    #   is otherwise exactly what check-agent-pin-wiring.sh exists to report, and
+    #   this one step has to be visible rather than exempt by accident.
+    #
+    # The other direction -- the check against cmake/libreagent.pin, which is
+    # what build-macos actually compiles -- is the job below. It is deliberately
+    # a JOB and not a step here: the two answer different questions and one of
+    # them is expected to be red until the pin moves, and a step folded into
+    # this job would take this job's verdict down with it and hide whether the
+    # repository has followed the trunk at all.
+    #
+    # Ubuntu: the check needs a C++ compiler and nothing Apple, so it also
+    # answers while the macOS job is unavailable.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: LibreDarwin
+
+      - uses: actions/checkout@v4
+        id: agent_trunk
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: main
+          path: LibreAgent
+
+      - name: Install gtest headers
+        # Headers only -- the check compiles with -fsyntax-only and links
+        # nothing. The authorizer's own test is one of the translation units the
+        # check compiles, and without these it refuses to judge rather than
+        # quietly measuring one header.
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev
+
+      - name: Prove the interface gate still fails when it should
+        # Synthetic pairs, so the suite does not pass or fail with the defect it
+        # guards. A gate whose compile step quietly stopped compiling would
+        # otherwise report a green.
+        run: LibreDarwin/ci/scripts/check-agent-interface.selftest.sh
+
+      - name: Darwin authorizer implements the agent interface
+        # `trunk` names where those headers came from, and it changes one
+        # sentence: if the agent turns out to predate the outcome type, this
+        # job is told to publish that revision rather than to raise a pin it
+        # never reads.
+        run: |
+          cd LibreDarwin
+          ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgent/include" trunk
+
+  agent-interface-pin:
+    # The same check against cmake/libreagent.pin -- the revision this
+    # repository DECLARES, and the one build-macos compiles. The job above
+    # answers "has this repository followed the agent trunk"; this one answers
+    # "does what it declares still build", and the two can disagree.
+    #
+    # It is red on purpose right now, and this is what turns it green: the pin
+    # names a LibreAgent revision from before the authorizer's return type
+    # became a three-way outcome, so the header this repository ships does not
+    # compile against it. A pin may only name a revision that exists on the
+    # remote, so the order is fixed -- the agent is published first, then this
+    # pin is moved to a published revision that carries the outcome type, and
+    # only then is anything tagged here. Raising the pin by hand to a revision
+    # nobody can fetch would turn this green and every checkout that uses it
+    # red.
+    #
+    # Until that first step happens the job ABOVE is red as well, for the same
+    # missing type: the outcome type is not on the agent's published branch
+    # either, so `ref: main` fetches headers that predate it. The benefit of
+    # splitting the two -- a trunk verdict that survives a stale pin -- is
+    # therefore pending, not yet demonstrated; what the split does buy today is
+    # that the two reds name different next steps, publish and re-pin, instead
+    # of one job naming a pin for both.
+    #
+    # Failing here rather than inside the macOS build is the whole point: the
+    # same headers fail the same way in build-macos, an hour in, naming no
+    # cause.
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: LibreDarwin
+
+      - name: Resolve the pinned LibreAgent revision
+        id: agent_pin_interface
+        # Same read and same validation as build-macos: the revision lives in
+        # the pin file, and a pin that is not 40 hex fails here rather than
+        # being passed to actions/checkout, which would silently take the
+        # default branch and measure the trunk instead.
+        run: |
+          pin=$(tr -d '[:space:]' < LibreDarwin/cmake/libreagent.pin)
+          case "$pin" in
+            *[!0-9a-f]* | "") echo "::error::cmake/libreagent.pin is not 40 hex: '$pin'"; exit 1 ;;
+          esac
+          [ ${#pin} -eq 40 ] || { echo "::error::cmake/libreagent.pin is ${#pin} chars, want 40"; exit 1; }
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+          echo "LibreAgent pinned revision: $pin"
+
+      - name: Checkout LibreAgent at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ steps.agent_pin_interface.outputs.ref }}
+          path: LibreAgentPinned
+
+      - name: Install gtest headers
+        run: sudo apt-get update && sudo apt-get install -y libgtest-dev
+
+      - name: Darwin authorizer compiles against the revision this repository declares
+        # The gate's own message names which side is stale. This adds the one
+        # thing it cannot know: what has to happen, and in what order, for the
+        # pinned side to stop being stale.
+        #
+        # Only on rc=1. The gate exits 2 to say it is REFUSING TO JUDGE -- no
+        # compiler, no headers, a named translation unit gone -- and blaming the
+        # pin for that would name a cause it just declined to name, which is how
+        # a gate ends up distrusted and then deleted. Both exits stay red.
+        run: |
+          cd LibreDarwin
+          rc=0
+          ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgentPinned/include" pin || rc=$?
+          if [ "$rc" -eq 1 ]; then
+            echo "::error file=cmake/libreagent.pin::this repository does not build against the LibreAgent revision it declares. Publish the agent revision that carries the three-way authorization outcome, move this pin to it, and re-run; the pin may name only a revision that exists on the remote, so moving it first would break every checkout that reads it."
+          elif [ "$rc" -ne 0 ]; then
+            echo "::error::the interface check refused to judge the pinned revision (rc=$rc); its own output above names why. This says nothing about the pin."
+          fi
+          exit "$rc"
+
   build-macos:
     # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
     # LibreMiddleware SHARED build and the -fexperimental-library C++23 the
