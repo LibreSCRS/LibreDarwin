@@ -110,6 +110,22 @@ jobs:
       - name: Gate-wiring check self-test
         run: ci/scripts/check-gates-wired.selftest.sh
 
+      - name: Every first-party version floor names the major in VERSION
+        # The 4.x sweep before 5.0 searched for the token `4.2`; the floor that
+        # mattered read `4.0`, in the only executable consumer the project
+        # ships, and survived. This measures the property instead: every
+        # first-party find_package/find_dependency floor must name the major
+        # the VERSION file names. It reads VERSION and never `git describe`, so
+        # it is decidable before a tag exists -- which is the whole window in
+        # which the mistake is cheap. --min 1 is the vacuum guard: a scan that
+        # matches nothing is unmeasured, not clean.
+        run: ci/scripts/check-version-floors.sh --min 1
+
+      - name: Prove the floor gate still fails when it should
+        # Twenty cases, instant, no build. A gate nobody has seen fail is a
+        # line in a workflow file.
+        run: ./ci/scripts/check-version-floors.selftest.sh
+
   agent-interface:
     # The macOS job builds against cmake/libreagent.pin -- the agent interface as
     # it WAS. That is not the combination a release ships, and it stayed green
@@ -255,10 +271,10 @@ jobs:
     runs-on: macos-15
     env:
       # Where LibreMiddleware installs and where LibreDarwin (+ the FetchContent
-      # LibreAgent) find it via find_package(LibreMiddleware 4.2 CONFIG).
+      # LibreAgent) find it via find_package(LibreMiddleware 5.0 CONFIG).
       LM_PREFIX: ${{ github.workspace }}/lm-prefix
       # Git ref of LibreMiddleware to build against — track its trunk during the
-      # development cycle (as LibreAgent/LibreCelik/LibreMac do). The 4.2 pin in
+      # development cycle (as LibreAgent/LibreCelik/LibreMac do). The 5.0 pin in
       # CMakeLists.txt enforces the required version independently of this ref.
       MIDDLEWARE_REF: main
       # LibreAgent ref: READ FROM THE PIN, not a branch name.
