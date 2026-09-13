@@ -55,7 +55,7 @@ endif()
 # build stamps the OLD major while VERSION, the CHANGELOG and the packaging all
 # state the new one. This repository carries no release tag today, so that half
 # is dormant here rather than absent -- the first tag brings it back at the next
-# code freeze, and it is the defect a sibling repository was measured shipping.
+# code freeze.
 #
 # So VERSION is not a fallback, it is a floor: it carries the version this tree
 # is heading for and is bumped at code freeze. The tag still wins on the release

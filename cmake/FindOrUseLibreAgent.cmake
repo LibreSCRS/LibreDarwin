@@ -39,11 +39,10 @@ else()
     # built agent run ahead of what was proven. Raising it is a deliberate act
     # that moves this file and the client's recorded revision together.
     #
-    # The revision lives in cmake/libreagent.pin rather than on the line below,
-    # as it already does in the three sibling consumers. That is what lets all
-    # four be checked the same way — including the release-time assertion that
-    # the pin equals the commit the agent's tag points at, which cannot read a
-    # SHA embedded in a CMake call.
+    # The revision lives in cmake/libreagent.pin rather than on the line below.
+    # A pin in a file of its own can be read and checked without parsing CMake
+    # — including the release-time assertion that the pin equals the commit the
+    # agent's tag points at, which cannot read a SHA embedded in a CMake call.
     if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/libreagent.pin")
         message(FATAL_ERROR
             "cmake/libreagent.pin is missing. It carries the LibreAgent revision this "
