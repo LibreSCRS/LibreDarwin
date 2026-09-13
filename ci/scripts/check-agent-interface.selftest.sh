@@ -969,6 +969,16 @@ fi
 # `'gtest/gtest.h' file not found`. Matching GCC alone meant that on macOS this
 # rule fell through to the generic "not the authorize() contract" FATAL, which
 # points the reader at the contract for what is a missing package.
+#
+# The case must not depend on the host: a Linux box carries gtest in a default
+# include root (/usr/include/gtest), so a plain clang++ finds it, compiles the
+# test and the gate answers 0 -- the case was red on Linux for exactly the
+# reason the other three were red on macOS. The wrapper below takes the
+# standard include roots away for the authorizer test's translation unit only
+# (every other invocation runs clang++ unchanged), so the real compiler reports
+# the header as missing in its own words on any host. The include of gtest is
+# the first line of that unit, and a missing include is fatal, so it is the
+# one diagnostic the log carries.
 if command -v clang++ >/dev/null 2>&1; then
     mkderived "$WORK/p3" enum none
     { echo '#include <gtest/gtest.h>'
@@ -977,7 +987,14 @@ if command -v clang++ >/dev/null 2>&1; then
       echo 'void probe(SecCodeAuthorizer& a) { switch (a.authorize("x", {})) { default: break; } }'
       echo '}'
     } > "$WORK/p3/agent/tests/SecCodeAuthorizerTest.cpp"
-    REPO_ROOT="$WORK/p3" CXX=clang++ LIBRESCRS_EXTRA_INCLUDE="$WORK/extra-inc" \
+    { echo '#!/usr/bin/env bash'
+      echo 'for a in "$@"; do'
+      echo '    case "$a" in *SecCodeAuthorizerTest.cpp) exec clang++ -nostdinc "$@" ;; esac'
+      echo 'done'
+      echo 'exec clang++ "$@"'
+    } > "$WORK/p3/clang-without-gtest"
+    chmod +x "$WORK/p3/clang-without-gtest"
+    REPO_ROOT="$WORK/p3" CXX="$WORK/p3/clang-without-gtest" LIBRESCRS_EXTRA_INCLUDE="$WORK/extra-inc" \
         bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
     if [ "$rc" = 2 ] && grep -q "gtest's headers are not on the include path" "$WORK/out.txt"; then
         echo "  ok    clang wording: missing gtest is named as missing gtest (rc=$rc)"; pass=$((pass+1))
