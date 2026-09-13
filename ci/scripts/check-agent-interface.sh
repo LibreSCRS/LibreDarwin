@@ -72,10 +72,10 @@
 #       A failure is THIS contract's when the FIRST error -- with the notes
 #       hanging off it, and not the source line echoed under the caret -- names
 #       AuthorizationOutcome, and when that first error stands inside this
-#       checkout: the extra include roots are somebody else's tree, and one
-#       unrelated ill-formed expression in a sibling repository's header once
-#       printed `::error file=<a source of THIS repository>` for two innocent
-#       files. Reading the whole log instead was wrong both ways: a pinned run
+#       checkout: the extra include roots are somebody else's tree, and an
+#       ill-formed expression in a foreign header, outside this checkout, must
+#       not be counted against this repository's translation unit. Reading the
+#       whole log instead was wrong both ways: a pinned run
 #       named a call site here over a first error about an unrelated stale wire
 #       symbol, and clang's wording for an argument conversion (`no matching
 #       function for call to ...`, with the type on the note) read "out of

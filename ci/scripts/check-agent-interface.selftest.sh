@@ -919,8 +919,8 @@ fi
 
 # ---------------------------------------------------------------------------
 # Portability of the gate itself. All three cases below are RED against the
-# revision of check-agent-interface.sh that shipped before 2026-09-13, and that
-# revision passed the other 59 -- which is why they exist: the suite was green
+# previous revision of check-agent-interface.sh, and that revision passed the
+# other cases -- which is why they exist: the suite was green
 # on macOS while the gate could not judge there at all.
 
 # P1 -- LIBRESCRS_EXTRA_INCLUDE must reach R1, not only R5. It is the documented
