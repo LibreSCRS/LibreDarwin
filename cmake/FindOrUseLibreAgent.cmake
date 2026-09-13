@@ -52,7 +52,12 @@ else()
     endif()
     file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/libreagent.pin" LIBREAGENT_PIN LIMIT_COUNT 1)
     string(STRIP "${LIBREAGENT_PIN}" LIBREAGENT_PIN)
-    if(NOT LIBREAGENT_PIN MATCHES "^[0-9a-f]{40}$")
+    # Exactly 40 lowercase hex characters. Spelled as a length test plus a
+    # character-class test because CMake's regex engine has no {n} repetition
+    # operator -- "^[0-9a-f]{40}$" matches the literal brace form and so never
+    # matches a real SHA, which turns this guard into an unconditional refusal.
+    string(LENGTH "${LIBREAGENT_PIN}" LIBREAGENT_PIN_LENGTH)
+    if(NOT LIBREAGENT_PIN_LENGTH EQUAL 40 OR NOT LIBREAGENT_PIN MATCHES "^[0-9a-f]+$")
         message(FATAL_ERROR
             "cmake/libreagent.pin does not hold a 40-character commit hash: '${LIBREAGENT_PIN}'. "
             "A tag or branch name here would reintroduce exactly the moving target the pin exists "

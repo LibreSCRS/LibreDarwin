@@ -88,6 +88,19 @@ jobs:
       - name: Prove the pin-wiring gate still fails when it should
         run: ./ci/scripts/check-agent-pin-wiring.selftest.sh
 
+      - name: The pin's form check can accept a real pin
+        # The wiring gate above proves the workflow reads cmake/libreagent.pin.
+        # It says nothing about the guard in cmake/FindOrUseLibreAgent.cmake
+        # that decides whether a pin is well formed -- and for six days that
+        # guard was spelled with a {n} repetition CMake's regex engine does not
+        # have, so it refused every hash, including a correct one. Nothing
+        # spoke because the guard only runs when someone configures the
+        # project. This step runs it, in both directions.
+        run: ci/scripts/check-pin-form.sh
+
+      - name: Prove the pin-form gate still fails when it should
+        run: ./ci/scripts/check-pin-form.selftest.sh
+
       - name: Every shipped gate is wired into CI
         # A gate nobody runs is not a gate: dup-scan.py and canonical-types.py
         # shipped in five repositories for a whole release cycle and no
