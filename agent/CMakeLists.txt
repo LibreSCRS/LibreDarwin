@@ -44,24 +44,11 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/SystemLifecycle.mm
     src/backend/OsLogSink.cpp
     src/backend/ProcessHardening.cpp
-    src/backend/PluginDirectory.cpp
-    # Operation subclasses: platform-neutral, so they depend only on core flows +
-    # OperationBase + the OperationChannel interface, never on the transport.
-    # They are duplicated per host rather than shared from the core; promoting
-    # them into the core would let every host share one copy.
-    src/operations/ReadIdentityOperation.cpp
-    src/operations/GetPhotoOperation.cpp
-    src/operations/ReadCertificatesOperation.cpp
-    src/operations/ReadTokenInfoOperation.cpp
-    src/operations/SignOperation.cpp
-    src/operations/SignBatchOperation.cpp
-    src/operations/ListCredentialsOperation.cpp
-    src/operations/ManagePinOperation.cpp
-    src/operations/ActivateSigningKeyOperation.cpp)
+    src/backend/PluginDirectory.cpp)
 target_include_directories(LibreDarwinAgentBackend PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src) # operations/*.cpp use "operations/X.h"
+        ${CMAKE_CURRENT_SOURCE_DIR}/src) # CardRemovalCaches.h / FullScrubCaches.h, private to the backend and main.cpp
 target_compile_features(LibreDarwinAgentBackend PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinAgentBackend PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(LibreDarwinAgentBackend

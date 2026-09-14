@@ -17,10 +17,18 @@
 #include <chrono>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 
 namespace LibreSCRS::Agent {
 class AgentCore;
+namespace Operations {
+class CredentialDepositor;
+}
+} // namespace LibreSCRS::Agent
+
+namespace LibreSCRS::Plugin {
+class CardPluginService;
 }
 
 namespace LibreSCRS::Darwin {
@@ -53,11 +61,21 @@ namespace LibreSCRS::Darwin {
 class SocketFrontend
 {
 public:
-    SocketFrontend(SocketTransport& transport, Agent::AgentCore& core, std::string version);
+    // @p plugins is the card-plugin registry, when this host has one. The
+    // identity and photo flows hand a renegotiated passport MRZ to the candidate
+    // plugins through a CredentialDepositor, and only the registry can resolve
+    // those targets: with a registry the LM-backed depositor is bound, without
+    // one (a test rig) the shared core's no-op, so a renegotiated read deposits
+    // nothing and fails auth truthfully -- the Linux host's rule, applied here.
+    SocketFrontend(SocketTransport& transport, Agent::AgentCore& core, std::string version,
+                   std::shared_ptr<LibreSCRS::Plugin::CardPluginService> plugins = nullptr);
     ~SocketFrontend();
 
     SocketFrontend(const SocketFrontend&) = delete;
     SocketFrontend& operator=(const SocketFrontend&) = delete;
+
+    // The depositor every identity and photo read is handed; see the constructor.
+    [[nodiscard]] Agent::Operations::CredentialDepositor& credentialDepositor() noexcept;
 
     // Register with the transport as the inbound-request sink. Call once at
     // startup (after the transport is created, before the loop starts serving).
@@ -184,6 +202,10 @@ private:
     SocketTransport& m_transport;
     Agent::AgentCore& m_core;
     std::string m_version;
+    // The plugin registry this host was composed with (nullptr in a rig with no
+    // plugins) and the depositor bound over it -- see the constructor.
+    std::shared_ptr<LibreSCRS::Plugin::CardPluginService> m_plugins;
+    std::unique_ptr<Agent::Operations::CredentialDepositor> m_depositor;
 
     // reader ObjectId -> human reader name, for the card-resolve worker hop.
     std::map<std::uint64_t, std::string> m_readerNames;

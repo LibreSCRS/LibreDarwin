@@ -28,21 +28,18 @@ foreach(backend_test PeerIdentityTest PeerCodeSigningTest SocketTransportTest Se
     add_test(NAME ${backend_test} COMMAND ${backend_test})
 endforeach()
 
-# White-box unit test of a backend-private operation: the ops headers live under
-# src/ (PRIVATE on the backend target, so they stay off the public surface), so
-# this test reaches them directly the way the backend's own .cpp files do.
-target_include_directories(ReadCertificatesOperationTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-# It also builds a session via the LM-internal detached-session factory
+# ReadCertificatesOperationTest drives the agent's own operation, reached through
+# LibreAgent::Core's public headers like every other consumer (this host carried
+# a copy of it until the core exported one). It builds a session via the
+# LM-internal detached-session factory
 # LibreSCRS::SmartCard::detail::makeDetachedCardSession, whose prototype in
 # <LibreSCRS/SmartCard/CardSession.h> is guarded behind LIBRESCRS_INTERNAL_BUILD.
 # Only this TEST TU opts in; production agent targets never define it, so the
 # internal surface stays out of the shipped binaries.
 target_compile_definitions(ReadCertificatesOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
 
-# ManagePinOperationTest reaches the same backend-private ops headers and builds
-# a detached session the same way, so it takes the identical src/ include +
-# internal-build opt-in.
-target_include_directories(ManagePinOperationTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
+# ManagePinOperationTest builds a detached session the same way, so it takes the
+# identical internal-build opt-in.
 target_compile_definitions(ManagePinOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
 
 # SocketFrontendTest drives the credentials ops end-to-end over the socket: it

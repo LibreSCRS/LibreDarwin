@@ -19,8 +19,8 @@
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h>
 #include <LibreSCRS/Agent/operations/PinChangeFlow.h> // PinManageRequest
 #include <LibreSCRS/Agent/operations/PromptSerializer.h>
-#include "operations/ListCredentialsOperation.h"
-#include "operations/ManagePinOperation.h"
+#include <LibreSCRS/Agent/operations/ListCredentialsOperation.h>
+#include <LibreSCRS/Agent/operations/ManagePinOperation.h>
 
 #include <LibreSCRS/Agent/OperationState.h>
 #include <LibreSCRS/Agent/backend/OperationChannel.h> // OperationChannel, ResultPayload, CredentialResult

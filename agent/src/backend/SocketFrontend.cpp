@@ -10,15 +10,15 @@
 #include <LibreSCRS/Darwin/backend/SocketOperationChannel.h>
 #include <LibreSCRS/Darwin/backend/wire/AnonFd.h>
 
-#include "operations/ActivateSigningKeyOperation.h"
-#include "operations/GetPhotoOperation.h"
-#include "operations/ListCredentialsOperation.h"
-#include "operations/ManagePinOperation.h"
-#include "operations/ReadCertificatesOperation.h"
-#include "operations/ReadTokenInfoOperation.h"
-#include "operations/ReadIdentityOperation.h"
-#include "operations/SignOperation.h"
-#include "operations/SignBatchOperation.h"
+#include <LibreSCRS/Agent/operations/ActivateSigningKeyOperation.h>
+#include <LibreSCRS/Agent/operations/GetPhotoOperation.h>
+#include <LibreSCRS/Agent/operations/ListCredentialsOperation.h>
+#include <LibreSCRS/Agent/operations/ManagePinOperation.h>
+#include <LibreSCRS/Agent/operations/ReadCertificatesOperation.h>
+#include <LibreSCRS/Agent/operations/ReadTokenInfoOperation.h>
+#include <LibreSCRS/Agent/operations/ReadIdentityOperation.h>
+#include <LibreSCRS/Agent/operations/SignOperation.h>
+#include <LibreSCRS/Agent/operations/SignBatchOperation.h>
 
 #include <LibreSCRS/Agent/AgentCore.h>
 #include <LibreSCRS/Agent/CryptoWorkerContext.h>
@@ -34,6 +34,8 @@
 #include <LibreSCRS/Agent/operations/BatchSignFlow.h> // isValidBatchDocumentCount, kMin/kMaxBatchDocuments, BatchDocumentInput
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h>
 #include <LibreSCRS/Agent/operations/LmSeams.h>
+#include <LibreSCRS/Agent/operations/Seams.h> // NullCredentialDepositor
+#include <LibreSCRS/Plugin/CardPluginService.h>
 #include <LibreSCRS/Agent/operations/OperationManager.h>
 #include <LibreSCRS/Agent/operations/PinChangeFlow.h> // PinManageRequest, validatePinManageRequest
 #include <LibreSCRS/Agent/operations/SignatureParams.h>
@@ -341,8 +343,9 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
 
 } // namespace
 
-SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, std::string version)
-    : m_transport(transport), m_core(core), m_version(std::move(version))
+SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, std::string version,
+                               std::shared_ptr<LibreSCRS::Plugin::CardPluginService> plugins)
+    : m_transport(transport), m_core(core), m_version(std::move(version)), m_plugins(std::move(plugins))
 {
     // Reconcile before this object can answer anything. The store has just been
     // loaded from its file and the loop is entered after construction, so no
@@ -358,6 +361,18 @@ SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, s
     // Without it this host served a remembered "903 anchors" over a directory
     // someone had emptied, and nothing anywhere would have said otherwise.
     A::Trust::discardStaleAnchorReport(m_core.configStore());
+    // The deposit seam is the one read-path seam that needs the registry: a
+    // renegotiated read hands the chosen passport MRZ to the candidate plugins,
+    // and only the registry holds mutable handles to them. Bound once, here, so
+    // no request site can quietly fall back to the no-op on a host that has a
+    // registry -- which is what this host did for two months, every identity
+    // and photo read carrying a no-op of its own regardless of the registry
+    // main.cpp had built.
+    if (m_plugins != nullptr) {
+        m_depositor = std::make_unique<A::Operations::LmCredentialDepositor>(*m_plugins);
+    } else {
+        m_depositor = std::make_unique<A::Operations::NullCredentialDepositor>();
+    }
     m_confirmQueue = dispatch_queue_create("rs.librescrs.agent.confirm", DISPATCH_QUEUE_CONCURRENT);
     // Refuse by default. Nothing here knows how to ask a human until main.cpp
     // injects the prompter client, and a build that forgot to inject one must
@@ -365,6 +380,11 @@ SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, s
     m_confirm = [](const wire::ConfirmAction&) {
         return wire::ConfirmReply{wire::PromptReplyStatus::Error, "no confirmation mechanism"};
     };
+}
+
+A::Operations::CredentialDepositor& SocketFrontend::credentialDepositor() noexcept
+{
+    return *m_depositor;
 }
 
 SocketFrontend::~SocketFrontend()
@@ -576,6 +596,7 @@ void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const A::W
                 Ops::ReadIdentityOperation::Deps deps{
                     .holder = holder,
                     .reader = *reader,
+                    .depositor = credentialDepositor(),
                     .prompter = *core.sharedCryptoContext()->prompter,
                     .serializer = *core.sharedCryptoContext()->serializer,
                     .credentials = core.credentialCache(),
@@ -638,6 +659,7 @@ void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const A::Wire:
                 Ops::GetPhotoOperation::Deps deps{
                     .holder = holder,
                     .reader = *reader,
+                    .depositor = credentialDepositor(),
                     .prompter = *core.sharedCryptoContext()->prompter,
                     .serializer = *core.sharedCryptoContext()->serializer,
                     .credentials = core.credentialCache(),

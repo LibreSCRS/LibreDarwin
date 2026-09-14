@@ -189,7 +189,10 @@ int main()
 
     // [4] The inbound frontend (borrows the core; built after it). std::optional so
     // teardown can release it explicitly before the core it borrows.
-    auto frontend = std::make_optional<LibreSCRS::Darwin::SocketFrontend>(*transport, core, LIBREDARWIN_VERSION_STR);
+    // The registry rides along so identity and photo reads get the LM-backed
+    // credential depositor (see the frontend's constructor).
+    auto frontend =
+        std::make_optional<LibreSCRS::Darwin::SocketFrontend>(*transport, core, LIBREDARWIN_VERSION_STR, pluginService);
     // The human gate for trust-tier writes. The same prompter that collects
     // card secrets asks this one, over the same private socket — but through
     // the confirmation path, which carries no secret and cannot.

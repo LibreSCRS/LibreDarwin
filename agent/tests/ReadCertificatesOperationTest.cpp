@@ -7,7 +7,7 @@
 #include <LibreSCRS/Agent/cache/CardReadCache.h>
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h>
 #include <LibreSCRS/Agent/operations/PromptSerializer.h>
-#include "operations/ReadCertificatesOperation.h"
+#include <LibreSCRS/Agent/operations/ReadCertificatesOperation.h>
 
 #include <LibreSCRS/SmartCard/CardMap.h>
 #include <LibreSCRS/SmartCard/CardSession.h>

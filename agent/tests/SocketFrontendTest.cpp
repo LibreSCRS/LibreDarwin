@@ -29,10 +29,13 @@
 #include <LibreSCRS/Agent/operations/BatchSignFlow.h>     // isValidBatchDocumentCount, kMin/kMaxBatchDocuments
 #include <LibreSCRS/Agent/operations/CardSessionHolder.h> // SessionFactory
 #include <LibreSCRS/Agent/operations/OperationManager.h>  // setSessionFactoryForTest
+#include <LibreSCRS/Agent/operations/LmSeams.h>           // LmCredentialDepositor
 #include <LibreSCRS/Agent/operations/RateLimiter.h>       // kMaxPerWindow
+#include <LibreSCRS/Agent/operations/Seams.h>             // NullCredentialDepositor
 #include <LibreSCRS/Agent/presence/CapabilityResolver.h>
 #include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialSnapshot
 #include <LibreSCRS/Agent/value/ErrorTaxonomy.h>    // ErrorCode
+#include <LibreSCRS/Plugin/CardPluginService.h>     // the registry a depositor is bound over
 #include <LibreSCRS/SmartCard/CardSession.h>        // detail::makeDetachedCardSession (LIBRESCRS_INTERNAL_BUILD)
 #include <LibreSCRS/Secure/String.h>                // the BlockingPrompter's dummy Ok secrets
 
@@ -1526,4 +1529,39 @@ TEST(SocketFrontend, ARefusedCallerForgetsNothing)
     // these apart and the store is the only place the difference shows.
     EXPECT_TRUE(rig.core->configStore().cscaAnchorState().has_value())
         << "a caller the policy refused still cleared the report";
+}
+
+// --- which depositor an identity read is handed ------------------------------
+//
+// The identity and photo flows hand a renegotiated passport MRZ to the
+// candidate plugins through a CredentialDepositor, and only the plugin registry
+// can resolve those targets. The shared core offers a no-op for a wiring site
+// that has no registry; this host HAS one, and for two months handed the flows
+// a no-op of its own regardless, so a CAN prompt renegotiated into an MRZ read
+// deposited nothing and the re-run failed auth. Which seam this host binds is a
+// decision, and it gets a test of its own: nothing here can drive a
+// renegotiation without a passport in a reader.
+
+TEST(SocketFrontend, BindsTheRegistryBackedDepositorWhenComposedWithARegistry)
+{
+    // An empty plugin directory: a registry that resolves nothing, but a
+    // registry -- which is all the binding decision looks at.
+    const auto dir = std::filesystem::temp_directory_path() /
+                     ("ld-fe-plugins-" + std::to_string(::getpid()) + "-" + std::to_string(std::rand()));
+    std::filesystem::create_directories(dir);
+    auto plugins = std::make_shared<LibreSCRS::Plugin::CardPluginService>(dir);
+
+    Rig rig(nullptr, nullptr, {}, plugins);
+    EXPECT_NE(dynamic_cast<Agent::Operations::LmCredentialDepositor*>(&rig.frontend->credentialDepositor()), nullptr)
+        << "a host composed with a plugin registry bound the no-op depositor";
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST(SocketFrontend, FallsBackToTheNoOpDepositorWithoutARegistry)
+{
+    Rig rig; // no registry
+    EXPECT_NE(dynamic_cast<Agent::Operations::NullCredentialDepositor*>(&rig.frontend->credentialDepositor()), nullptr)
+        << "a host with no registry must hand the flows the shared no-op, not nothing";
 }

@@ -45,6 +45,10 @@
 #include <string_view>
 #include <utility>
 
+namespace LibreSCRS::Plugin {
+class CardPluginService;
+}
+
 namespace LibreSCRS::Darwin::TestSupport {
 
 namespace Agent = ::LibreSCRS::Agent;
@@ -116,9 +120,12 @@ struct Rig
     // tmpOverride lets a test build a SECOND rig over the FIRST one's state
     // directory -- the only way to observe what construction does to a report
     // that was already on disk, which is a restart in everything but name.
+    // plugins is the card-plugin registry the frontend is composed with; the
+    // default, none, is what every hermetic case wants.
     explicit Rig(Agent::Authorizer* authorizerOverride = nullptr,
                  std::shared_ptr<Agent::Operations::PrompterClientBase> prompterOverride = nullptr,
-                 std::filesystem::path tmpOverride = {})
+                 std::filesystem::path tmpOverride = {},
+                 std::shared_ptr<LibreSCRS::Plugin::CardPluginService> plugins = nullptr)
     {
         if (!tmpOverride.empty()) {
             tmp = std::move(tmpOverride);
@@ -132,7 +139,7 @@ struct Rig
             tmp / "config.json", tmp / "cache",
             [](const std::string&) -> std::optional<Agent::ReaderCard> { return std::nullopt; },
             [](const std::string&) -> std::optional<Agent::ObjectId> { return std::nullopt; });
-        frontend.emplace(*transport, *core, "0.1-test");
+        frontend.emplace(*transport, *core, "0.1-test", std::move(plugins));
         frontend->start();
     }
 
