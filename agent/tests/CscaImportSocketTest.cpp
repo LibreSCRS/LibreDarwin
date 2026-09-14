@@ -376,6 +376,8 @@ TEST(CscaImportSocket, AnImportTheHumanDeclinesChangesNothing)
     EXPECT_EQ(seen.description, "Install the country signing certificates from the offered file, replacing the ones "
                                 "this computer checks passports against.")
         << "the person approving a master-list import read some other sentence";
+    EXPECT_EQ(seen.descriptionKey, "prompter_trust_import")
+        << "the sentence reached the prompter unnamed, so only an English reader could have read it";
 
     // The person said no before the agent touched what was handed over: the
     // offset the sender still shares with the agent has not moved.

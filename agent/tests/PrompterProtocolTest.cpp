@@ -620,6 +620,7 @@ TEST(PrompterProtocol, ConfirmActionRoundTrips)
     in.kind = "configure_trust";
     in.title = "Confirm trust change";
     in.description = "Add a trusted list";
+    in.descriptionKey = "prompter_trust_tsl";
     in.requester = "org.librescrs.LibreMac";
     in.artifact = "TslSources";
 
@@ -629,6 +630,10 @@ TEST(PrompterProtocol, ConfirmActionRoundTrips)
     const auto* got = std::get_if<ConfirmAction>(&*parsed);
     ASSERT_NE(got, nullptr);
     EXPECT_EQ(*got, in);
+    // Named separately from the equality above: the sentence alone survives a
+    // codec that drops the key, and it is the key that decides which language
+    // the person reads the sentence in.
+    EXPECT_EQ(got->descriptionKey, "prompter_trust_tsl");
 }
 
 TEST(PrompterProtocol, ConfirmActionWithoutKindIsRejected)

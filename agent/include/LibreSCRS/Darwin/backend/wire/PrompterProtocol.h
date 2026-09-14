@@ -161,6 +161,13 @@ struct ConfirmAction
     std::string kind; // "configure_trust"
     std::string title;
     std::string description;
+    // The catalogue id of `description`, travelling BESIDE the sentence rather
+    // than instead of it: the agent has no catalogue of its own, so it writes
+    // the English sentence it always wrote and names it, and the prompter --
+    // which runs inside the host application's bundle -- looks the name up in
+    // that bundle's catalogue and falls back to the sentence when it is not
+    // there. Empty means "no key": render `description` as it arrived.
+    std::string descriptionKey;
     std::string requester;
     std::string artifact; // the change being asked for
     bool operator==(const ConfirmAction&) const = default;

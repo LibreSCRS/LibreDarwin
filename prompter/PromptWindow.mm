@@ -29,6 +29,12 @@
 #include <utility>
 #include <vector>
 
+// Declared in PromptWindow.h and defined below, in LibreSCRS::Darwin. Named
+// here at file scope because both halves of this file reach it: the C++
+// helpers in the anonymous namespace and the panel's own Objective-C methods,
+// which are at global scope and cannot see into a namespace.
+using LibreSCRS::Darwin::localized;
+
 namespace {
 
 namespace wire = LibreSCRS::Darwin::wire;
@@ -78,10 +84,18 @@ NSString* retryErrorLine(std::uint32_t attempt, const std::string& lastError)
     if (attempt == 0) {
         return nil;
     }
-    if (lastError.empty() || lastError == kErrorPreReadAuthFailed) {
-        return @"The value you entered was not accepted. Please try again.";
+    // The wire key IS a catalogue key, so it is looked up as one: an agent
+    // error the host application already translates is shown in the holder's
+    // own words. A key the catalogue does not carry resolves to the sentence
+    // beside it and never to the key itself, which is what keeps the raw wire
+    // vocabulary off the screen.
+    if (lastError.empty()) {
+        return localized("prompter_retry_generic", "The value you entered was not accepted. Please try again.");
     }
-    return @"Your previous entry was not accepted. Please try again.";
+    if (lastError == kErrorPreReadAuthFailed) {
+        return localized(kErrorPreReadAuthFailed, "The value you entered was not accepted. Please try again.");
+    }
+    return localized("prompter_retry_rejected", "Your previous entry was not accepted. Please try again.");
 }
 
 // Shared informative-text chrome (retry error / description / requester /
@@ -101,7 +115,8 @@ NSString* informativeText(const std::string& description, const std::string& req
         [info appendFormat:@"%@%@", info.length ? @"\n" : @"", nsstr(description)];
     }
     if (!requester.empty()) {
-        [info appendFormat:@"%@Requested by: %@", info.length ? @"\n" : @"", nsstr(requester)];
+        [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_requested_by", "Requested by:"),
+                           nsstr(requester)];
     }
     // A batch sign carries the UNTRUSTED per-document names in `artifacts`: list
     // them plainly BELOW the trusted requester line (the formatter neutralizes
@@ -114,7 +129,8 @@ NSString* informativeText(const std::string& description, const std::string& req
             [info appendFormat:@"%@%@", info.length ? @"\n" : @"", nsstr(block)];
         }
     } else if (!artifact.empty()) {
-        [info appendFormat:@"%@Document: %@", info.length ? @"\n" : @"", nsstr(artifact)];
+        [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_document", "Document:"),
+                           nsstr(artifact)];
     }
     return info;
 }
@@ -161,9 +177,9 @@ double monotonicSeconds()
 }
 
 // The remaining entry time as M:SS behind a stopwatch glyph — language-neutral
-// by design and rendered exactly as the Linux dialog renders it: LibreDarwin has
-// no localisation at all, so a worded countdown would read identically on only
-// one of the two platforms.
+// by design and rendered exactly as the Linux dialog renders it. It is the one
+// thing on the panel with no catalogue key: digits and a glyph read the same in
+// every language, so there is nothing here to translate.
 NSString* formatRemaining(double remaining)
 {
     const long total = remaining > 0 ? static_cast<long>(remaining) : 0;
@@ -176,13 +192,13 @@ NSString* windowTitleForKind(wire::PromptKind kind)
 {
     switch (kind) {
     case wire::PromptKind::Can:
-        return @"Card Access Number";
+        return localized("prompter_title_can", "Card Access Number");
     case wire::PromptKind::Mrz:
-        return @"Machine-Readable Zone";
+        return localized("prompter_title_mrz", "Machine-Readable Zone");
     case wire::PromptKind::Pin:
         break;
     }
-    return @"PIN";
+    return localized("prompter_title_pin", "PIN");
 }
 
 NSString* promptHeading(const wire::PromptRequest& req)
@@ -192,13 +208,13 @@ NSString* promptHeading(const wire::PromptRequest& req)
     }
     switch (req.kind) {
     case wire::PromptKind::Can:
-        return @"Enter your Card Access Number (CAN)";
+        return localized("prompter_heading_can", "Enter your Card Access Number (CAN)");
     case wire::PromptKind::Mrz:
-        return @"Enter your Machine-Readable Zone (MRZ)";
+        return localized("prompter_heading_mrz", "Enter your Machine-Readable Zone (MRZ)");
     case wire::PromptKind::Pin:
         break;
     }
-    return @"Enter your PIN";
+    return localized("prompter_heading_pin", "Enter your PIN");
 }
 
 } // namespace
@@ -303,9 +319,15 @@ NSString* promptHeading(const wire::PromptRequest& req)
     }
 
     if (changeFlow) {
-        primaryField = [self addSecureRowWithCaption:@"Current PIN" toStack:stack width:contentWidth];
-        newField = [self addSecureRowWithCaption:@"New PIN" toStack:stack width:contentWidth];
-        confirmField = [self addSecureRowWithCaption:@"Confirm new PIN" toStack:stack width:contentWidth];
+        primaryField = [self addSecureRowWithCaption:localized("prompter_label_current_pin", "Current PIN")
+                                             toStack:stack
+                                               width:contentWidth];
+        newField = [self addSecureRowWithCaption:localized("prompter_label_new_pin", "New PIN")
+                                         toStack:stack
+                                           width:contentWidth];
+        confirmField = [self addSecureRowWithCaption:localized("prompter_label_confirm_pin", "Confirm new PIN")
+                                             toStack:stack
+                                               width:contentWidth];
         primaryField.nextKeyView = newField;
         newField.nextKeyView = confirmField;
         confirmField.nextKeyView = primaryField;
@@ -321,9 +343,13 @@ NSString* promptHeading(const wire::PromptRequest& req)
     countdownLabel.hidden = YES;
     [stack addArrangedSubview:countdownLabel];
 
-    NSButton* cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancelPressed:)];
+    NSButton* cancelButton = [NSButton buttonWithTitle:localized("prompter_button_cancel", "Cancel")
+                                                target:self
+                                                action:@selector(cancelPressed:)];
     cancelButton.keyEquivalent = @"\033"; // Escape cancels, as the modal's did
-    okButton = [NSButton buttonWithTitle:@"OK" target:self action:@selector(okPressed:)];
+    okButton = [NSButton buttonWithTitle:localized("prompter_button_ok", "OK")
+                                  target:self
+                                  action:@selector(okPressed:)];
     okButton.keyEquivalent = @"\r"; // the default button: Return in a field answers
     NSStackView* buttonRow = [[[NSStackView alloc] initWithFrame:NSZeroRect] autorelease];
     buttonRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -545,6 +571,20 @@ NSString* promptHeading(const wire::PromptRequest& req)
 
 namespace LibreSCRS::Darwin {
 
+// The whole of this repository's localisation: one lookup in the catalogue of
+// the bundle the prompter is running out of. Inside LibreMac.app that bundle
+// IS the host application (the helper sits in Contents/MacOS), so the words
+// below come from the same Localizable.xcstrings the rest of the app reads,
+// keyed by the ids the .ts pair carries. Outside a bundle -- a development or
+// build-directory prompter -- nothing resolves and the English fallback shows,
+// which is the text this file carried before there were keys.
+NSString* localized(const char* key, const std::string& fallback)
+{
+    NSString* k = [NSString stringWithUTF8String:key];
+    NSString* s = [[NSBundle mainBundle] localizedStringForKey:k value:nsstr(fallback) table:nil];
+    return s.length ? s : nsstr(fallback);
+}
+
 namespace {
 
 // The panels standing right now, keyed by the id their prompt was addressed
@@ -724,8 +764,9 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
     dispatch_sync(dispatch_get_main_queue(), ^{
       @autoreleasepool {
           panel = [[LibreSCRSPromptPanel alloc]
-              initWithWindowTitle:@"Change PIN"
-                          heading:req.title.empty() ? @"Change your PIN" : nsstr(req.title)
+              initWithWindowTitle:localized("prompter_title_change_pin", "Change PIN")
+                          heading:req.title.empty() ? localized("prompter_heading_change_pin", "Change your PIN")
+                                                    : nsstr(req.title)
                              // RequestSecrets carries no retry context (change_pin is never a
                              // CAN/MRZ retry) and no per-document artifacts list.
                              info:informativeText(req.description, req.requester, req.artifact, {}, nil)

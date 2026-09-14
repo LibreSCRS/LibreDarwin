@@ -7,7 +7,24 @@
 #include <string>
 #include <vector>
 
+#ifdef __OBJC__
+@class NSString;
+#endif
+
 namespace LibreSCRS::Darwin {
+
+#ifdef __OBJC__
+// Every word the prompter's dialogs show goes through here. The prompter runs
+// from Contents/MacOS of the host application's bundle, so `[NSBundle
+// mainBundle]` IS that application and its catalogue is the one the holder
+// already reads the rest of the app in; @p key is looked up there and @p
+// fallback -- today's English, byte for byte -- is what shows when the lookup
+// finds nothing, which is what happens outside a bundle (a development or
+// build-directory prompter). Declared here, beside the dialogs, because the
+// device-owner confirmation in ConfirmAuthorizer.mm is the second dialog and
+// must resolve its sentence the same way.
+NSString* localized(const char* key, const std::string& fallback);
+#endif
 
 // The AppKit secure-credential surface: ONE non-modal floating panel per
 // prompt, held in a registry keyed by the prompt id. Several prompts stand at

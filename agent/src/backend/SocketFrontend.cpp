@@ -1882,7 +1882,9 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
     wire::ConfirmAction ask;
     ask.kind = "configure_trust";
     ask.title = "Confirm trust change";
-    ask.description = describeTrustChange(key, what);
+    const TrustChangeCopy copy = describeTrustChange(key, what);
+    ask.description = std::string(copy.text);
+    ask.descriptionKey = std::string(copy.key);
     // The CLAIMED caller identity. The public SecTask path cannot verify it,
     // so nothing here may word it as verified -- the human is deciding, and a
     // name presented as proven would be doing the deciding for them.
@@ -1946,25 +1948,34 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
     });
 }
 
-std::string SocketFrontend::describeTrustChange(const std::string& key, TrustChange what)
+// The key and the English travel together, and the English is unchanged: a
+// prompter that resolves the key shows the holder's language, one that cannot
+// shows exactly what it showed before there were keys. The two trust-source
+// sentences keep two keys -- one key covering both would merge "which
+// timestamping authority" with "which trusted list" into a single translatable
+// sentence that can only be right about one of them.
+SocketFrontend::TrustChangeCopy SocketFrontend::describeTrustChange(const std::string& key, TrustChange what)
 {
     switch (what) {
     case TrustChange::ImportAnchors:
-        return "Install the country signing certificates from the offered file, replacing the ones this "
-               "computer checks passports against.";
+        return {.key = "prompter_trust_import",
+                .text = "Install the country signing certificates from the offered file, replacing the ones this "
+                        "computer checks passports against."};
     case TrustChange::ForgetAnchors:
-        return "Remove every country signing certificate this computer holds.";
+        return {.key = "prompter_trust_forget",
+                .text = "Remove every country signing certificate this computer holds."};
     case TrustChange::SetValue:
     case TrustChange::Reset:
         break;
     }
     if (key == "TsaUrls") {
-        return "Change the timestamping authorities this computer will use.";
+        return {.key = "prompter_trust_tsa", .text = "Change the timestamping authorities this computer will use."};
     }
     if (key == "TslSources") {
-        return "Change the trusted lists this computer accepts signatures against.";
+        return {.key = "prompter_trust_tsl",
+                .text = "Change the trusted lists this computer accepts signatures against."};
     }
-    return "Change a trust setting on this computer.";
+    return {.key = "prompter_trust_generic", .text = "Change a trust setting on this computer."};
 }
 
 // --- pkcs11 / cert-der (async broker handoff) --------------------------------

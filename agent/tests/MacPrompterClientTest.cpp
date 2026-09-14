@@ -679,6 +679,7 @@ TEST(MacPrompterClient, ConfirmationCrossesTheWireAndTheVerdictComesBack)
     action.kind = "configure_trust";
     action.title = "Confirm trust change";
     action.description = "Add a trusted list";
+    action.descriptionKey = "prompter_trust_tsl";
     action.requester = "org.librescrs.LibreMac";
     action.artifact = "TslSources";
 
@@ -689,6 +690,8 @@ TEST(MacPrompterClient, ConfirmationCrossesTheWireAndTheVerdictComesBack)
     EXPECT_EQ(reply.userMessage, "approved");
     ASSERT_TRUE(server.capturedAction().has_value());
     EXPECT_EQ(*server.capturedAction(), action) << "the prompter must be asked about exactly this change";
+    EXPECT_EQ(server.capturedAction()->descriptionKey, "prompter_trust_tsl")
+        << "the prompter cannot look a sentence up under a key that never left the agent";
 }
 
 TEST(MacPrompterClient, DeclinedConfirmationComesBackAsCancelled)
@@ -711,7 +714,7 @@ TEST(MacPrompterClient, MissingPrompterRefusesTheConfirmation)
 {
     MacPrompterClient client("/tmp/ld-nonexistent-" + std::to_string(std::rand()) + ".sock");
 
-    const auto reply = client.requestConfirmation(wire::ConfirmAction{"configure_trust", {}, {}, {}, {}});
+    const auto reply = client.requestConfirmation(wire::ConfirmAction{.kind = "configure_trust"});
 
     EXPECT_EQ(reply.status, wire::PromptReplyStatus::Error);
     EXPECT_NE(reply.status, wire::PromptReplyStatus::Ok);
@@ -987,7 +990,7 @@ TEST(MacPrompterClient, AConfirmationFromAHelperWithoutAVersionIsRefused)
     // added to this path -- and the version guard would lose its only coverage
     // without anything going red.
     MacPrompterClient client(path, trustAnyPeerForTest());
-    const auto reply = client.requestConfirmation(wire::ConfirmAction{"configure_trust", {}, {}, {}, {}});
+    const auto reply = client.requestConfirmation(wire::ConfirmAction{.kind = "configure_trust"});
 
     EXPECT_NE(reply.status, wire::PromptReplyStatus::Ok);
     EXPECT_EQ(reply.status, wire::PromptReplyStatus::Error);

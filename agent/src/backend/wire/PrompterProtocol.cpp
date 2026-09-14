@@ -376,6 +376,12 @@ CborValue toCbor(const ConfirmAction& r)
     if (!r.description.empty()) {
         m.emplace("description", CborValue(r.description));
     }
+    // Omitted when empty, like every other optional display field: a prompter
+    // that speaks this key looks nothing up and shows the sentence, which is
+    // exactly what a prompter that does not speak it does.
+    if (!r.descriptionKey.empty()) {
+        m.emplace("descriptionKey", CborValue(r.descriptionKey));
+    }
     if (!r.requester.empty()) {
         m.emplace("requester", CborValue(r.requester));
     }
@@ -524,11 +530,13 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
         ConfirmAction r;
         r.kind = *kindIt->second.asText();
         auto display = optDisplayFields(m);
-        if (!display) {
+        auto descriptionKey = optText(m, "descriptionKey");
+        if (!display || !descriptionKey) {
             return std::unexpected(PrompterParseError::WrongType);
         }
         r.title = std::move(display->title);
         r.description = std::move(display->description);
+        r.descriptionKey = std::move(*descriptionKey);
         r.requester = std::move(display->requester);
         r.artifact = std::move(display->artifact);
         return PrompterRequest{std::move(r)};

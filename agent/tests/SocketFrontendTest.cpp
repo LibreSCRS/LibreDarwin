@@ -1071,6 +1071,51 @@ TEST(SocketFrontend, TheConfirmationNamesTheKeyItIsAbout)
     EXPECT_EQ(seen.kind, "configure_trust");
     EXPECT_EQ(seen.artifact, "TslSources");
     EXPECT_FALSE(seen.description.empty()) << "a dialog that cannot say what it changes must not be shown";
+    EXPECT_EQ(seen.descriptionKey, "prompter_trust_tsl")
+        << "the sentence must be named, or only an English reader is being told what changes";
+}
+
+// The other named trust source. Two keys, not one: a single key covering both
+// would merge "which timestamping authority" with "which trusted list" into one
+// translatable sentence that can only be right about one of them -- and the two
+// are indistinguishable to every other assertion here, because the kind, the
+// artifact and the refusal are the same on both paths.
+TEST(SocketFrontend, TheConfirmationForATimestampingAuthorityNamesItsOwnSentence)
+{
+    Rig rig;
+    wire::ConfirmAction seen;
+    rig.frontend->setConfirmProvider([&seen](const wire::ConfirmAction& a) {
+        seen = a;
+        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
+    });
+
+    static_cast<void>(rig.roundTrip(73, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({})}));
+
+    EXPECT_EQ(seen.kind, "configure_trust");
+    EXPECT_EQ(seen.artifact, "TsaUrls");
+    EXPECT_EQ(seen.description, "Change the timestamping authorities this computer will use.");
+    EXPECT_EQ(seen.descriptionKey, "prompter_trust_tsa");
+}
+
+// A trust key with no sentence written for it: CscaSources is gated exactly
+// like the two above and has no wording of its own, so it must arrive carrying
+// the generic sentence AND the generic key. An unnamed fallback is the one that
+// would go untranslated without anything failing.
+TEST(SocketFrontend, ATrustKeyWithNoSentenceOfItsOwnFallsBackToTheGenericOne)
+{
+    Rig rig;
+    wire::ConfirmAction seen;
+    rig.frontend->setConfirmProvider([&seen](const wire::ConfirmAction& a) {
+        seen = a;
+        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
+    });
+
+    static_cast<void>(rig.roundTrip(74, Agent::Wire::SetConfig{"CscaSources", cborArrayOfStrings({})}));
+
+    EXPECT_EQ(seen.kind, "configure_trust");
+    EXPECT_EQ(seen.artifact, "CscaSources");
+    EXPECT_EQ(seen.description, "Change a trust setting on this computer.");
+    EXPECT_EQ(seen.descriptionKey, "prompter_trust_generic");
 }
 
 // An ordinary key must not acquire a prompt, or the latency of one.
@@ -1528,6 +1573,7 @@ TEST(SocketFrontend, TheConfirmationForForgettingNamesWhatWillBeRemoved)
     EXPECT_EQ(seen.kind, "configure_trust");
     EXPECT_EQ(seen.artifact, "CscaAnchorState");
     EXPECT_EQ(seen.description, "Remove every country signing certificate this computer holds.");
+    EXPECT_EQ(seen.descriptionKey, "prompter_trust_forget");
 }
 
 TEST(SocketFrontend, ARefusedCallerForgetsNothing)

@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 
 namespace LibreSCRS::Agent {
 class AgentCore;
@@ -268,7 +269,17 @@ private:
     // gate.
     void confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
                           const Agent::CallerToken& caller, TrustChange what, std::function<void()> apply);
-    static std::string describeTrustChange(const std::string& key, TrustChange what);
+    // The sentence the person reads, and the catalogue id that names it. Two
+    // fields rather than one, because the agent owns no catalogue: it writes
+    // the English it always wrote and hands the prompter the name to look up
+    // instead, so a prompter that cannot resolve the name still shows the
+    // sentence rather than nothing.
+    struct TrustChangeCopy
+    {
+        std::string_view key;
+        std::string_view text;
+    };
+    static TrustChangeCopy describeTrustChange(const std::string& key, TrustChange what);
     // The per-key write cascades, shared by the immediate and the confirmed
     // path so both run identical code.
     void applyConfigWrite(std::uint64_t connId, std::uint64_t req, const Agent::Wire::SetConfig& msg);

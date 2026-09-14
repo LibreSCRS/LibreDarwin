@@ -6,6 +6,8 @@
 // change to what the agent trusts is answered by the device owner instead.
 #include "ConfirmAuthorizer.h"
 
+#include "PromptWindow.h" // localized(): the same catalogue lookup the credential panels use
+
 #import <Foundation/Foundation.h>
 #import <LocalAuthentication/LocalAuthentication.h>
 
@@ -44,8 +46,21 @@ wire::ConfirmReply confirmWithDeviceOwner(const wire::ConfirmAction& req)
         // Claimed, never verified: the public SecTask path cannot prove it,
         // and the human is the one deciding -- so the wording must not lend
         // the name an authority it does not have.
-        NSString* reason =
-            [NSString stringWithFormat:@"%s (requested by “%s”)", req.description.c_str(), req.requester.c_str()];
+        //
+        // The agent carries no catalogue, so it sends the sentence AND the id
+        // that names it; the id is resolved in the host application's
+        // catalogue here, where there is one, and the sentence the agent sent
+        // is what shows when there is not.
+        NSString* sentence = localized(req.descriptionKey.c_str(), req.description);
+        // The attribution is a sentence of its own, so it is keyed like one: a
+        // Serbian description wrapped in an English parenthetical is still a
+        // dialog the holder only half-reads. The claimed name is substituted
+        // INTO the catalogue's format rather than concatenated around it, so a
+        // language that places the name differently can say so.
+        NSString* who = [NSString stringWithUTF8String:req.requester.c_str()];
+        NSString* attribution = [NSString
+            stringWithFormat:localized("prompter_confirm_requested_by", "(requested by “%@”)"), who != nil ? who : @""];
+        NSString* reason = [NSString stringWithFormat:@"%@ %@", sentence, attribution];
 
         __block wire::PromptReplyStatus status = wire::PromptReplyStatus::Error;
         __block std::string message;
