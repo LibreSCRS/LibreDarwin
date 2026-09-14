@@ -57,6 +57,7 @@
 #include <cstdint>
 #include <expected>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <utility>
 #include <variant>
@@ -389,6 +390,14 @@ A::Operations::CredentialDepositor& SocketFrontend::credentialDepositor() noexce
 
 SocketFrontend::~SocketFrontend()
 {
+    // Mark the guard dead, and do NOT wait: a confirmation the person has not
+    // answered yet would hold this destructor for as long as they leave the
+    // dialog standing. The block wakes into a guard that says the frontend is
+    // gone and drops the answer on the floor.
+    {
+        const std::lock_guard lock(m_confirmGuard->mutex);
+        m_confirmGuard->alive = false;
+    }
     if (m_confirmQueue != nullptr) {
         dispatch_release(m_confirmQueue);
         m_confirmQueue = nullptr;
@@ -1882,9 +1891,40 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
 
     auto* transport = &m_transport;
     const ConfirmFn confirm = m_confirm;
+    // The guard, not the frontend, is what survives this call: the block below
+    // holds the person's attention for as long as they want it, and both the
+    // frontend and the transport it captures by raw pointer may be released
+    // meanwhile.
+    //
+    // The lock is held ACROSS transport->post, and that is what makes a
+    // FRONTEND-liveness guard safe to gate a TRANSPORT dereference with:
+    // ~SocketFrontend blocks on this same mutex, so either the guard is already
+    // dead and nothing is posted, or the wrapper block is enqueued on the
+    // serial loop queue before the destructor can proceed. Both hosts destroy
+    // the frontend BEFORE the transport, so that enqueue precedes
+    // ~SocketTransport's own dispatch_sync and the block runs before the queue
+    // is released. Narrowing the lock to the check alone, or reordering a host
+    // to drop the transport first, reopens the crash this guards against.
+    const auto guard = m_confirmGuard;
     dispatch_async(m_confirmQueue, ^{
       const wire::ConfirmReply verdict = confirm(ask);
-      transport->post([this, connId, req, verdict, apply] {
+      const std::lock_guard lock(guard->mutex);
+      if (!guard->alive) {
+          // A literal, not a formatted line, and swallowed: the facade formats
+          // and calls a std::function sink, so it can throw, and a throw out of
+          // a dispatch block terminates the process on the teardown path.
+          try {
+              A::log::warn("trust confirmation answered after the frontend was gone; discarded");
+          } catch (...) {
+              // Nothing left to say it with.
+          }
+          return;
+      }
+      transport->post([this, guard, connId, req, verdict, apply] {
+          const std::lock_guard continuationLock(guard->mutex);
+          if (!guard->alive) {
+              return;
+          }
           if (verdict.status != wire::PromptReplyStatus::Ok) {
               // Anything that is not an explicit approval leaves the stored
               // value exactly where it was.

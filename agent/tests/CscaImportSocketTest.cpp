@@ -31,6 +31,7 @@
 #include "SocketRig.h"
 #include "SyntheticMasterList.h" // LibreAgent::TestSupport
 
+#include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/config/ConfigStore.h>
 #include <LibreSCRS/Agent/operations/RateLimiter.h>
 #include <LibreSCRS/Agent/trust/CscaAnchorImport.h>
@@ -41,14 +42,19 @@
 #include <unistd.h>
 
 #include <array>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 using namespace LibreSCRS::Darwin;
@@ -166,6 +172,90 @@ void exhaustFirstConnection(Rig& rig)
     }
 }
 
+// A one-shot gate between the test thread and the confirmation worker: the
+// worker parks inside the provider until the test opens it, and the test parks
+// until the worker has arrived. The flag beside the condition variable is what
+// keeps an open that happens before the wait from being lost.
+class Latch
+{
+public:
+    void open()
+    {
+        {
+            const std::lock_guard lock(m_mutex);
+            m_open = true;
+        }
+        m_cv.notify_all();
+    }
+
+    [[nodiscard]] bool wait(std::chrono::milliseconds budget)
+    {
+        std::unique_lock lock(m_mutex);
+        return m_cv.wait_for(lock, budget, [this] { return m_open; });
+    }
+
+private:
+    std::mutex m_mutex;
+    std::condition_variable m_cv;
+    bool m_open{false};
+};
+
+// The agent's log facade, captured for the length of one case. The line this
+// file cares about is emitted on the confirmation worker, so the lines are held
+// under a mutex; resetForTest() runs from the destructor so a failing assertion
+// cannot leave the facade writing into a vector that has gone.
+class CapturedLog
+{
+public:
+    CapturedLog()
+    {
+        Agent::log::init([this](Agent::log::Level, std::string_view line) {
+            const std::lock_guard lock(m_mutex);
+            m_lines.emplace_back(line);
+        });
+    }
+
+    ~CapturedLog()
+    {
+        Agent::log::resetForTest();
+    }
+
+    CapturedLog(const CapturedLog&) = delete;
+    CapturedLog& operator=(const CapturedLog&) = delete;
+
+    // Polled rather than waited on: the facade calls the sink under a lock of
+    // its own, and there is no notification here to hang a condition variable
+    // off without reaching into it.
+    [[nodiscard]] bool waitForLine(std::string_view needle, std::chrono::milliseconds budget)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + budget;
+        for (;;) {
+            if (joined().find(needle) != std::string::npos) {
+                return true;
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+
+    [[nodiscard]] std::string joined() const
+    {
+        const std::lock_guard lock(m_mutex);
+        std::string all;
+        for (const auto& line : m_lines) {
+            all += line;
+            all += '\n';
+        }
+        return all;
+    }
+
+private:
+    mutable std::mutex m_mutex;
+    std::vector<std::string> m_lines;
+};
+
 } // namespace
 
 // --- order: authorise, rate-limit, THEN read -------------------------------
@@ -271,6 +361,77 @@ TEST(CscaImportSocket, AnImportTheHumanDeclinesChangesNothing)
     EXPECT_FALSE(rig.core->configStore().cscaAnchorState().has_value()) << "a declined import was recorded";
     EXPECT_FALSE(Agent::Trust::AnchorCache{fs::path{rig.core->configStore().cscaCacheDir()}}.holdsAnchor())
         << "a declined import installed anchors";
+}
+
+// --- an answer that arrives after everything that asked for it is gone -------
+//
+// The block that waits for the person outlives whatever asked it: the person
+// answers in their own time, and a teardown that waited for them would hang on
+// a dialog nobody is looking at. What comes back after that must touch neither
+// the frontend nor its transport nor anything the agent keeps on disk -- and
+// must not be silent about having been dropped, because a discarded trust
+// change and an applied one are otherwise indistinguishable from outside.
+
+TEST(CscaImportSocket, AnAnswerThatArrivesAfterTheFrontendIsGoneIsDiscarded)
+{
+    // This case performs the hosts' teardown BY HAND below, which is what the
+    // rig's own destructor does -- and the destructor tolerates that: it
+    // quiesces only while it still holds a transport, and its removals run
+    // either way. So the rig is an ordinary local, destroyed after the
+    // assertions below, and it takes the socket and the state directory with
+    // it.
+    Rig rig;
+    confirmEverything(rig);
+    ASSERT_EQ(errName(importBytes(rig, 1, aValidMasterList())), "") << "a valid list was refused";
+
+    const fs::path cacheDir{rig.core->configStore().cscaCacheDir()};
+    ASSERT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor()) << "the import installed no anchor to protect";
+
+    CapturedLog log;
+
+    // Shared rather than captured by reference: the provider lives on in the
+    // dispatch block's copy of the confirmation function, and on a failing path
+    // this frame unwinds while a worker may still be parked on them.
+    const auto entered = std::make_shared<Latch>();
+    const auto released = std::make_shared<Latch>();
+    rig.frontend->setConfirmProvider([entered, released](const LibreSCRS::Darwin::wire::ConfirmAction&) {
+        entered->open();
+        // Bounded, so a case that never opens this fails rather than parking a
+        // worker thread for the life of the binary.
+        EXPECT_TRUE(released->wait(std::chrono::seconds(30))) << "the confirmation was never let go";
+        return LibreSCRS::Darwin::wire::ConfirmReply{LibreSCRS::Darwin::wire::PromptReplyStatus::Ok, ""};
+    });
+
+    // Sent and deliberately never read: what this client is for is getting a
+    // question in front of a person, not hearing the answer.
+    Client client(rig.path);
+    client.send(1, Agent::Wire::ForgetCscaAnchors{});
+    if (!entered->wait(std::chrono::seconds(5))) {
+        // Let the worker go before failing, so a parked block finishes rather
+        // than sitting on the latch for the length of the binary.
+        released->open();
+        FAIL() << "the forget request never reached the confirmation";
+    }
+
+    // The hosts' order, by hand, with the person still holding the dialog open:
+    // quiesce the loop, drain it, then release the frontend, the core and the
+    // transport.
+    rig.transport->quiesceLoop();
+    dispatch_sync(rig.transport->loopQueue(), ^{
+                  });
+    rig.frontend.reset();
+    rig.core.reset();
+    rig.transport.reset();
+
+    released->open();
+
+    ASSERT_TRUE(log.waitForLine("answered after the frontend was gone", std::chrono::seconds(2)))
+        << "a late answer was dropped without a word:\n"
+        << log.joined();
+
+    // The core is gone, so the disk is the only witness left -- and it still
+    // holds what the import put there.
+    EXPECT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor()) << "a late answer forgot the anchors";
 }
 
 // The Linux suite spends the budget over the wire, one refused import at a

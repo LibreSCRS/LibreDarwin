@@ -153,9 +153,18 @@ struct Rig
         // main.cpp and SignHwSmokeTest's teardown use; the bare drain alone raced
         // an in-flight worker's post, running it against a freed frontend
         // (use-after-free).
-        transport->quiesceLoop();
-        dispatch_sync(transport->loopQueue(), ^{
-                      });
+        //
+        // Guarded on the transport, so a case that has already performed this
+        // teardown BY HAND -- the one that has to answer a confirmation after
+        // every piece is gone -- is destroyed without dereferencing the
+        // transport it released. The resets below are already no-ops on an
+        // empty optional / unique_ptr, and the two removals below still run, so
+        // a hand-torn-down rig still cleans up after itself.
+        if (transport != nullptr) {
+            transport->quiesceLoop();
+            dispatch_sync(transport->loopQueue(), ^{
+                          });
+        }
         frontend.reset();
         core.reset();
         transport.reset();

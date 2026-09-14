@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 namespace LibreSCRS::Agent {
@@ -245,6 +246,18 @@ private:
     // serves every connection's reads and must never wait on a person.
     ConfirmFn m_confirm;
     dispatch_queue_t m_confirmQueue{nullptr};
+
+    // The block that waits for the person outlives whatever asked it: the
+    // person answers in their own time and the frontend may be gone by then.
+    // The guard is what the block and the continuation consult before touching
+    // the frontend or its transport; the destructor marks it dead and does not
+    // wait.
+    struct ConfirmGuard
+    {
+        std::mutex mutex;
+        bool alive{true};
+    };
+    std::shared_ptr<ConfirmGuard> m_confirmGuard{std::make_shared<ConfirmGuard>()};
 
     // What a trust-tier verb is about to do, for the sentence the person reads.
     // The config key alone cannot say it: import and forget share a key.
