@@ -8,3 +8,6 @@ build-asan/
 build-release/
 build-cc/
 build-*/
+
+# The editor's clangd index, written next to the sources it indexes.
+.cache/
