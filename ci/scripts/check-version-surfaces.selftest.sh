@@ -214,6 +214,14 @@ printf '# <kind> <path>\ncmake-project        .\nplist-short-version  app/Info.p
     > "$d/ci/version-surfaces.txt"
 run "case_20 the placeholder in a plain plist is still a mismatch" 1 "$d"
 
+# case_21 -- a template states no number of its own; "all N agree" must not
+# quietly fold those N in as if each one had stated the version itself.
+d=$work/case_21; fixture "$d" 5.0.0 5.0.0 5.0.0 5.0.0
+sed 's/"Version": "5.0.0"/"Version": "@PROJECT_VERSION@"/' "$d/pkg/metadata.json" > "$d/pkg/metadata.json.in"
+rm "$d/pkg/metadata.json"
+run "case_21 summary counts the templated surface" 0 "$d"
+says "case_21 summary names how many were read from a template" '1 read the number'
+
 if [ "$fails" -eq 0 ]; then
     echo "check-version-surfaces selftest: all cases passed"
     exit 0

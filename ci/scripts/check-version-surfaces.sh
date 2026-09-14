@@ -14,6 +14,21 @@
 # The surfaces are listed in ci/version-surfaces.txt so this script stays
 # byte-identical across repos, the way check-release-lockstep.sh is.
 #
+# Two surface kinds accept a configure_file() template in place of a literal,
+# and they differ in how strict that acceptance is. plasma-metadata is listed
+# as the plain metadata.json; when that file is absent the script reads
+# metadata.json.in instead and requires it to take "Version" from
+# @PROJECT_VERSION@, with no further condition -- the plasmoid package is
+# installed from the configured copy, so the template is the source of truth
+# for that kind. plist-short-version is listed as the .plist.in itself, and
+# is accepted as a template only when the list also carries a cmake-project
+# row: a plist has no installer step that vouches for a configured copy
+# standing in for it, so a template with nothing else in the list measuring
+# the stamped number would state no number at all. The two shapes are
+# deliberately different in strictness for that reason, and a plain
+# (non-.in) plist holding the placeholder is still a mismatch, not a
+# template.
+#
 # Exit: 0 all surfaces agree, 1 one does not, 2 could not be measured.
 set -u
 
@@ -37,6 +52,7 @@ trap 'rm -rf "$WORK"' EXIT
 
 FAIL=0
 CHECKED=0
+TEMPLATED=0
 
 report() {   # report <surface> <found>
     if [ "$2" = "$WANT" ]; then
@@ -110,6 +126,7 @@ check_plasma_metadata() {
         fi
     elif [ -f "$f.in" ]; then
         if grep -q '"Version"[[:space:]]*:[[:space:]]*"@PROJECT_VERSION@"' "$f.in"; then
+            TEMPLATED=$((TEMPLATED + 1))
             echo "  -> $f.in takes Version from @PROJECT_VERSION@"
         else
             echo "::error::$f.in does not take \"Version\" from @PROJECT_VERSION@."
@@ -151,6 +168,7 @@ check_plist_short_version() {
         FAIL=1
     elif [ "$is_template" -eq 1 ] && [ "$got" = '@PROJECT_VERSION@' ]; then
         [ "$HAS_CMAKE_PROJECT" -eq 1 ] || undecidable "$f takes CFBundleShortVersionString from @PROJECT_VERSION@, but $SURFACE_LIST names no cmake-project surface -- nothing measures the number the build would fill in here."
+        TEMPLATED=$((TEMPLATED + 1))
         echo "  -> $f takes CFBundleShortVersionString from @PROJECT_VERSION@"
     else
         report "$f (CFBundleShortVersionString)" "$got"
@@ -203,5 +221,11 @@ done < "$SURFACE_LIST"
 # named. A gate that cannot fail is not a gate.
 [ "$CHECKED" -gt 0 ] || undecidable "$SURFACE_LIST names no surfaces"
 
-[ "$FAIL" -eq 0 ] && echo "  -> all $CHECKED version surface(s) state $WANT"
+if [ "$FAIL" -eq 0 ]; then
+    if [ "$TEMPLATED" -gt 0 ]; then
+        echo "  -> all $CHECKED version surface(s) agree with VERSION ($TEMPLATED read the number from a configure_file template)"
+    else
+        echo "  -> all $CHECKED version surface(s) state $WANT"
+    fi
+fi
 exit "$FAIL"
