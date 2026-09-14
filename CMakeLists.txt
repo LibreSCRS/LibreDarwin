@@ -60,6 +60,28 @@ find_package(LibreMiddleware 5.0 REQUIRED CONFIG)
 # with its D-Bus backend.
 include(cmake/FindOrUseLibreAgent.cmake)
 
+# Diagnostics for THIS project's own targets. Until now no translation unit
+# under agent/, prompter/ or pkcs11-module/ was compiled with any -W flag at
+# all, so an unused constant or a sign mismatch in the daemon or its tests
+# was seen by nobody; the fetched agent had been building its own sources with
+# these three flags the whole time. Placed AFTER the LibreAgent include on
+# purpose: add_compile_options reaches only targets defined after it, so the
+# fetched subproject keeps the flags it sets for itself and its own -Werror
+# switch, and nothing here can turn a foreign diagnostic into this build's
+# failure. Not -Werror, for the reason LibreMiddleware gives next to the same
+# line: a compiler upgrade must not break this build through a diagnostic
+# nobody has seen yet.
+add_compile_options(-Wall -Wextra -Wpedantic)
+# CI turns this on, as the Linux host and the agent do for theirs, so a new
+# diagnostic in this project's own sources fails the job instead of scrolling
+# past in a log nobody reads. It sits below the same include for the same
+# reason as the line above: the fetched agent is never compiled with this
+# project's -Werror.
+option(LIBREDARWIN_WERROR "Treat compiler warnings in this project's own targets as errors" OFF)
+if(LIBREDARWIN_WERROR)
+    add_compile_options(-Werror)
+endif()
+
 # Bound every test. ctest's built-in default is 1500 seconds and nothing in this
 # tree overrode it, so a single wedged test could hold a hosted runner for
 # twenty-five minutes without ever being named; a handful of them consume the

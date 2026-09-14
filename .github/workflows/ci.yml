@@ -390,6 +390,7 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_PREFIX_PATH="$LM_PREFIX" \
+            -DLIBREDARWIN_WERROR=ON \
             -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT="$GITHUB_WORKSPACE/LibreAgent"
 
       - name: Check -fexperimental-library is uniform

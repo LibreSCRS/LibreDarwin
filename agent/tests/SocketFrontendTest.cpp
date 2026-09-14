@@ -300,8 +300,9 @@ TEST(SocketFrontend, SignOnNonPkiCardIsUnsupported)
 {
     Rig rig;
     const std::string card = rig.injectCard(kIdentityCap); // no PKI bit
-    const auto reply =
-        rig.roundTrip(4, Agent::Wire::Sign{card, "cert-id", 0, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
+    const auto reply = rig.roundTrip(
+        4, Agent::Wire::Sign{card, "cert-id", 0,
+                             Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
 }
 
@@ -309,8 +310,9 @@ TEST(SocketFrontend, SignWithEmptyCertIsRejected)
 {
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
-    const auto reply =
-        rig.roundTrip(5, Agent::Wire::Sign{card, "", 0, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
+    const auto reply = rig.roundTrip(
+        5, Agent::Wire::Sign{card, "", 0,
+                             Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
 }
 
@@ -322,7 +324,7 @@ TEST(SocketFrontend, SignRejectsANonHttpsTsaUrl)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "b-t", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-t", .packaging = "enveloped"};
     opts.tsaUrl = std::string{"http://tsa.example.com"};
     const auto reply = rig.roundTrip(50, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -335,7 +337,7 @@ TEST(SocketFrontend, SignRejectsTsaUrlPairedWithTheBaselineLevel)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
     opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
     const auto reply = rig.roundTrip(51, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -348,7 +350,7 @@ TEST(SocketFrontend, SignAcceptsTsaUrlOverrideAtTheTimestampedLevel)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "b-t", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-t", .packaging = "enveloped"};
     opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
     // The method-entry gate passes -- an Operation is minted (no "err" key).
     // SignParams.tsaUrl's exact threading into the LM signing request is
@@ -369,7 +371,7 @@ TEST(SocketFrontend, SignAcceptsTheAgentDecidesSentinelForLevel)
     for (const char* sentinel : {"auto", ""}) {
         const int fd = makeInputFile("%PDF-1.7");
         ASSERT_GE(fd, 0);
-        const Agent::Wire::SignOpts opts{"pades", sentinel, "enveloped"};
+        const Agent::Wire::SignOpts opts{.format = "pades", .level = sentinel, .packaging = "enveloped"};
         const auto reply = rig.roundTrip(90, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
         ::close(fd);
         EXPECT_EQ(errName(reply), "") << "sentinel: " << sentinel;
@@ -393,7 +395,7 @@ TEST(SocketFrontend, SignAcceptsATsaUrlAlongsideTheAgentDecidesSentinel)
     EXPECT_TRUE(setConfigReply.find("ok")->asBool().value_or(false));
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "auto", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "auto", .packaging = "enveloped"};
     opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
     const auto reply = rig.roundTrip(92, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -406,7 +408,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureOnANonPadesFormat)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"cades", "b-b", "detached"};
+    Agent::Wire::SignOpts opts{.format = "cades", .level = "b-b", .packaging = "detached"};
     opts.visualSignature = Agent::Wire::VisualSignatureOpts{0, 0.0, 0.0, 100.0, 50.0, "x"};
     const auto reply = rig.roundTrip(53, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -419,7 +421,7 @@ TEST(SocketFrontend, SignAcceptsVisualSignatureOnPades)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
     opts.visualSignature = Agent::Wire::VisualSignatureOpts{1, 10.5, 20.25, 150.0, 60.0, "Signed by {cn}"};
     // The method-entry gate passes -- an Operation is minted (no "err" key).
     // The exact field-for-field mapping into LM's VisualSignatureParams is
@@ -447,7 +449,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureWithNonFiniteWidth)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
     opts.visualSignature =
         Agent::Wire::VisualSignatureOpts{0, 0.0, 0.0, std::numeric_limits<double>::infinity(), 50.0, "x"};
     const auto reply = rig.roundTrip(55, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
@@ -461,7 +463,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureWithNaNX)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
     opts.visualSignature =
         Agent::Wire::VisualSignatureOpts{0, std::numeric_limits<double>::quiet_NaN(), 0.0, 100.0, 50.0, "x"};
     const auto reply = rig.roundTrip(56, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
@@ -475,7 +477,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureWithNegativeInfinityY)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{"pades", "b-b", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
     opts.visualSignature =
         Agent::Wire::VisualSignatureOpts{0, 0.0, -std::numeric_limits<double>::infinity(), 100.0, 50.0, "x"};
     const auto reply = rig.roundTrip(57, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
@@ -493,7 +495,10 @@ TEST(SocketFrontend, SignBatchOnNonPkiCardIsUnsupported)
     const std::string card = rig.injectCard(kIdentityCap); // no PKI bit
     auto [docs, fds] = makeBatchDocuments(1);
     const auto reply = rig.roundTrip(
-        58, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+        58,
+        Agent::Wire::SignBatch{card, "cert-id", docs,
+                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
+        fds);
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
     for (const int fd : fds) {
         ::close(fd);
@@ -506,7 +511,10 @@ TEST(SocketFrontend, SignBatchWithEmptyCertIsRejected)
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(1);
     const auto reply = rig.roundTrip(
-        59, Agent::Wire::SignBatch{card, "", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+        59,
+        Agent::Wire::SignBatch{card, "", docs,
+                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
+        fds);
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
     for (const int fd : fds) {
         ::close(fd);
@@ -518,7 +526,9 @@ TEST(SocketFrontend, SignBatchRejectsZeroDocuments)
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
     const auto reply = rig.roundTrip(
-        60, Agent::Wire::SignBatch{card, "cert-id", {}, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
+        60,
+        Agent::Wire::SignBatch{
+            card, "cert-id", {}, Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
     EXPECT_EQ(errName(reply), "InvalidRequest");
 }
 
@@ -541,7 +551,10 @@ TEST(SocketFrontend, SignBatchAcceptsOneDocumentAndMintsOp)
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(1);
     const auto reply = rig.roundTrip(
-        61, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+        61,
+        Agent::Wire::SignBatch{card, "cert-id", docs,
+                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
+        fds);
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("op"), nullptr);
     for (const int fd : fds) {
@@ -560,7 +573,10 @@ TEST(SocketFrontend, SignBatchAcceptsATwelveDocumentBatchAndMintsOp)
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(Agent::Operations::kMaxBatchDocuments);
     const auto reply = rig.roundTrip(
-        62, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+        62,
+        Agent::Wire::SignBatch{card, "cert-id", docs,
+                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
+        fds);
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("op"), nullptr);
     for (const int fd : fds) {
@@ -574,7 +590,10 @@ TEST(SocketFrontend, SignBatchRejectsThirteenDocuments)
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(Agent::Operations::kMaxBatchDocuments + 1);
     const auto reply = rig.roundTrip(
-        63, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+        63,
+        Agent::Wire::SignBatch{card, "cert-id", docs,
+                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
+        fds);
     EXPECT_EQ(errName(reply), "InvalidRequest");
     for (const int fd : fds) {
         ::close(fd);
@@ -589,7 +608,7 @@ TEST(SocketFrontend, SignBatchRejectsANonHttpsTsaUrlViaTheSharedOptionsResolver)
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(2);
-    Agent::Wire::SignOpts opts{"pades", "b-t", "enveloped"};
+    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-t", .packaging = "enveloped"};
     opts.tsaUrl = std::string{"http://tsa.example.com"};
     const auto reply = rig.roundTrip(64, Agent::Wire::SignBatch{card, "cert-id", docs, opts}, fds);
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
@@ -612,7 +631,10 @@ TEST(SocketFrontend, SignBatchOverCapCallerIsRateLimited)
     }
     auto [docs, fds] = makeBatchDocuments(1);
     const auto reply = rig.roundTrip(
-        65, Agent::Wire::SignBatch{card, "cert-id", docs, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, fds);
+        65,
+        Agent::Wire::SignBatch{card, "cert-id", docs,
+                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
+        fds);
     EXPECT_EQ(errName(reply), "RateLimited");
     for (const int fd : fds) {
         ::close(fd);
@@ -633,7 +655,9 @@ TEST(SocketFrontend, SignBatchRateLimitFiresBeforeTheDocumentCountGate)
         ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
     }
     const auto reply = rig.roundTrip(
-        66, Agent::Wire::SignBatch{card, "cert-id", {}, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}});
+        66,
+        Agent::Wire::SignBatch{
+            card, "cert-id", {}, Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
     EXPECT_EQ(errName(reply), "RateLimited");
 }
 

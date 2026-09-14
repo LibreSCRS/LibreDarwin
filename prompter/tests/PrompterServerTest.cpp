@@ -86,14 +86,28 @@ wire::MultiPromptReply okMultiReply(std::vector<std::uint8_t> primary, std::vect
 }
 
 const auto kPinRequestBytes = [] {
-    return wire::toCbor(wire::PromptRequest{wire::PromptKind::Pin, {}, {}, {}, {}, 0, 0}).encode();
+    return wire::toCbor(wire::PromptRequest{.kind = wire::PromptKind::Pin,
+                                            .title = {},
+                                            .description = {},
+                                            .requester = {},
+                                            .artifact = {},
+                                            .minLength = 0,
+                                            .maxLength = 0})
+        .encode();
 };
 
 // Distinct per-role bounds (4-8 current, 6-10 new) pin the primary*/new* field
 // mapping through the codec and the dispatch.
 const auto kChangeRequest = [] {
-    return wire::RequestSecrets{
-        "change_pin", "Change your PIN", "signature PIN", "LibreMac", "identity card", 4, 8, 6, 10};
+    return wire::RequestSecrets{.kind = "change_pin",
+                                .title = "Change your PIN",
+                                .description = "signature PIN",
+                                .requester = "LibreMac",
+                                .artifact = "identity card",
+                                .primaryMinLength = 4,
+                                .primaryMaxLength = 8,
+                                .newMinLength = 6,
+                                .newMaxLength = 10};
 };
 
 // Providers for the paths a test must NOT route into: the variant dispatch has

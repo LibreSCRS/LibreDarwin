@@ -34,10 +34,38 @@ PromptRequest roundTripRequest(const PromptRequest& r)
 
 TEST(PrompterProtocol, RequestRoundTrips)
 {
-    EXPECT_EQ(roundTripRequest(PromptRequest{PromptKind::Pin, "Title", "Desc", "LibreMac", "doc.pdf", 4, 12}),
-              (PromptRequest{PromptKind::Pin, "Title", "Desc", "LibreMac", "doc.pdf", 4, 12}));
-    EXPECT_EQ(roundTripRequest(PromptRequest{PromptKind::Can, {}, {}, {}, {}, 6, 6}).kind, PromptKind::Can);
-    EXPECT_EQ(roundTripRequest(PromptRequest{PromptKind::Mrz, {}, {}, {}, {}, 0, 0}).kind, PromptKind::Mrz);
+    EXPECT_EQ(roundTripRequest(PromptRequest{.kind = PromptKind::Pin,
+                                             .title = "Title",
+                                             .description = "Desc",
+                                             .requester = "LibreMac",
+                                             .artifact = "doc.pdf",
+                                             .minLength = 4,
+                                             .maxLength = 12}),
+              (PromptRequest{.kind = PromptKind::Pin,
+                             .title = "Title",
+                             .description = "Desc",
+                             .requester = "LibreMac",
+                             .artifact = "doc.pdf",
+                             .minLength = 4,
+                             .maxLength = 12}));
+    EXPECT_EQ(roundTripRequest(PromptRequest{.kind = PromptKind::Can,
+                                             .title = {},
+                                             .description = {},
+                                             .requester = {},
+                                             .artifact = {},
+                                             .minLength = 6,
+                                             .maxLength = 6})
+                  .kind,
+              PromptKind::Can);
+    EXPECT_EQ(roundTripRequest(PromptRequest{.kind = PromptKind::Mrz,
+                                             .title = {},
+                                             .description = {},
+                                             .requester = {},
+                                             .artifact = {},
+                                             .minLength = 0,
+                                             .maxLength = 0})
+                  .kind,
+              PromptKind::Mrz);
 }
 
 // The UNTRUSTED artifacts list (batch-sign consent only) round-trips
@@ -47,7 +75,13 @@ TEST(PrompterProtocol, RequestRoundTrips)
 // round-trip, so a regression that always emits an empty array is caught).
 TEST(PrompterProtocol, RequestRoundTripsArtifactsList)
 {
-    PromptRequest sent{PromptKind::Pin, "Title", "Desc", "LibreMac", "signature-batch", 4, 12};
+    PromptRequest sent{.kind = PromptKind::Pin,
+                       .title = "Title",
+                       .description = "Desc",
+                       .requester = "LibreMac",
+                       .artifact = "signature-batch",
+                       .minLength = 4,
+                       .maxLength = 12};
     sent.artifacts = {"a.pdf", "b.pdf", "c.pdf"};
     const auto parsed = roundTripRequest(sent);
     EXPECT_EQ(parsed, sent);
@@ -56,7 +90,13 @@ TEST(PrompterProtocol, RequestRoundTripsArtifactsList)
 
 TEST(PrompterProtocol, RequestOmitsArtifactsKeyWhenEmpty)
 {
-    const PromptRequest bare{PromptKind::Pin, "Title", "Desc", "LibreMac", "signature", 4, 12};
+    const PromptRequest bare{.kind = PromptKind::Pin,
+                             .title = "Title",
+                             .description = "Desc",
+                             .requester = "LibreMac",
+                             .artifact = "signature",
+                             .minLength = 4,
+                             .maxLength = 12};
     ASSERT_TRUE(bare.artifacts.empty());
     const auto tree = decode(toCbor(bare).encode());
     ASSERT_TRUE(tree.has_value());
@@ -160,7 +200,13 @@ TEST(PrompterProtocol, RequestRejectsAMistypedArtifactsList)
 // entirely absent from the encoded map on the default (first-ever prompt).
 TEST(PrompterProtocol, RequestRoundTripsRetryContext)
 {
-    PromptRequest sent{PromptKind::Can, "Title", "Desc", "LibreMac", "identity", 6, 6};
+    PromptRequest sent{.kind = PromptKind::Can,
+                       .title = "Title",
+                       .description = "Desc",
+                       .requester = "LibreMac",
+                       .artifact = "identity",
+                       .minLength = 6,
+                       .maxLength = 6};
     sent.attempt = 2;
     sent.lastError = "librescrs.error.preRead.authFailed";
     const auto parsed = roundTripRequest(sent);
@@ -171,7 +217,13 @@ TEST(PrompterProtocol, RequestRoundTripsRetryContext)
 
 TEST(PrompterProtocol, RequestOmitsRetryContextKeysOnFirstPrompt)
 {
-    const PromptRequest bare{PromptKind::Can, "Title", "Desc", "LibreMac", "identity", 6, 6};
+    const PromptRequest bare{.kind = PromptKind::Can,
+                             .title = "Title",
+                             .description = "Desc",
+                             .requester = "LibreMac",
+                             .artifact = "identity",
+                             .minLength = 6,
+                             .maxLength = 6};
     ASSERT_EQ(bare.attempt, 0u);
     ASSERT_TRUE(bare.lastError.empty());
     const auto tree = decode(toCbor(bare).encode());
@@ -382,7 +434,15 @@ TEST(PrompterProtocol, RequestSecretsRoundTripsAllFields)
 {
     // The four per-role bounds are pairwise distinct so a key mix-up between
     // primary*/new* (or min/max) cannot round-trip cleanly.
-    const RequestSecrets sent{"change_pin", "Change PIN", "Desc", "LibreMac", "ID card", 4, 8, 6, 12};
+    const RequestSecrets sent{.kind = "change_pin",
+                              .title = "Change PIN",
+                              .description = "Desc",
+                              .requester = "LibreMac",
+                              .artifact = "ID card",
+                              .primaryMinLength = 4,
+                              .primaryMaxLength = 8,
+                              .newMinLength = 6,
+                              .newMaxLength = 12};
     auto parsed = parsePrompterRequest(toCbor(sent).encode());
     ASSERT_TRUE(parsed.has_value());
     ASSERT_TRUE(std::holds_alternative<RequestSecrets>(*parsed));
@@ -391,7 +451,15 @@ TEST(PrompterProtocol, RequestSecretsRoundTripsAllFields)
 
 TEST(PrompterProtocol, RequestSecretsOmitsZeroBoundsLikePromptRequest)
 {
-    const RequestSecrets bare{"change_pin", {}, {}, {}, {}, 0, 0, 0, 0};
+    const RequestSecrets bare{.kind = "change_pin",
+                              .title = {},
+                              .description = {},
+                              .requester = {},
+                              .artifact = {},
+                              .primaryMinLength = 0,
+                              .primaryMaxLength = 0,
+                              .newMinLength = 0,
+                              .newMaxLength = 0};
     const auto bytes = toCbor(bare).encode();
     const auto tree = decode(bytes);
     ASSERT_TRUE(tree.has_value());

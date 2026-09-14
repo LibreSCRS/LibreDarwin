@@ -380,8 +380,11 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     const int docFd = ::open(docPath.c_str(), O_RDONLY);
     ASSERT_GE(docFd, 0);
 
-    const auto signReply = sendReq(
-        client, 3, Agent::Wire::Sign{*card, certId, 0, Agent::Wire::SignOpts{"pades", "b-b", "enveloped"}}, {docFd});
+    const auto signReply =
+        sendReq(client, 3,
+                Agent::Wire::Sign{*card, certId, 0,
+                                  Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
+                {docFd});
     ::close(docFd);
     ASSERT_EQ(signReply.find("err"), nullptr)
         << "Sign method-entry rejected: " << (signReply.find("err") ? "see err" : "");

@@ -147,7 +147,7 @@ public:
     explicit OkCertReader(std::vector<CertSnapshot> certs) : m_certs(std::move(certs)) {}
     CertReadOutcome read(LibreSCRS::SmartCard::CardSession&, const CandidateList&, LibreSCRS::CancelToken) override
     {
-        return CertReadOutcome{CertReadOutcome::Status::Ok, m_certs, {}};
+        return CertReadOutcome{.status = CertReadOutcome::Status::Ok, .certs = m_certs};
     }
 
 private:
