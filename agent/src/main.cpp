@@ -27,6 +27,7 @@
 #include <LibreSCRS/Agent/presence/MonitorBridge.h>
 #include <LibreSCRS/Agent/presence/PluginCapabilityResolver.h>
 #include <LibreSCRS/Plugin/CardPluginService.h>
+#include <LibreSCRS/Trust/TrustStoreService.h>
 
 #include <LibreSCRS/Agent/wire/Messages.h> // wire::QuiesceReason
 
@@ -135,7 +136,18 @@ int main()
     }
     auto transport = std::move(*created);
 
-    auto pluginService = std::make_shared<LibreSCRS::Plugin::CardPluginService>(pluginDir.dir);
+    // Anchors the card plugins verify certificates against. Without a store the
+    // eID plugin skips addTrustedCertificate and reports every verification as
+    // unknown -- which is what this host did, and what the Linux host never did.
+    // A failed create degrades to exactly that, but says so.
+    std::shared_ptr<LibreSCRS::Trust::TrustStoreService> cardTrust;
+    if (auto trustResult = LibreSCRS::Trust::TrustStoreService::create({}); trustResult) {
+        cardTrust = std::move(*trustResult);
+    } else {
+        Agent::log::warnf("card verification anchors unavailable: {}", trustResult.error().userMessage.defaultText);
+    }
+    auto pluginService = std::make_shared<LibreSCRS::Plugin::CardPluginService>(
+        pluginDir.dir, cardTrust ? cardTrust->trustStore() : nullptr);
     // Say which directory won, why the others lost, and how many plugins came out
     // of it. Zero is a warning: with no plugins loaded every card reports as
     // unusable, which from the outside is indistinguishable from a card nothing
