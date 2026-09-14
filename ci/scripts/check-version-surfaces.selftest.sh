@@ -177,6 +177,43 @@ run "case_15 project() with no VERSION is undecidable" 2 "$d"
 d=$work/case_16; fixture "$d" 5.0.0 5.0.0 5.0.0 5.0.0; printf 'v5.0.0\n' > "$d/VERSION"
 run "case_16 a v-prefixed VERSION is the same version" 0 "$d"
 
+# case_17 -- the plist half of the same move. A .plist.in states no number of
+# its own, so what makes it measurable is the cmake-project surface standing
+# beside it in the list: that one reads the number the build really stamps,
+# which is the number configure_file() would fill in here.
+d=$work/case_17; fixture "$d" 5.0.0 5.0.0 '@PROJECT_VERSION@' 5.0.0
+mv "$d/app/Info.plist" "$d/app/Info.plist.in"
+printf '# <kind> <path>\ncmake-project        .\nplist-short-version  app/Info.plist.in\n' \
+    > "$d/ci/version-surfaces.txt"
+run "case_17 a plist template beside a measured surface is accepted" 0 "$d"
+
+# case_18 -- the .in suffix is not a licence to stop checking: a literal inside
+# a template is still a hand-typed number, and it is still compared against
+# VERSION. Without this case, "accept anything ending in .in" passes case_17.
+d=$work/case_18; fixture "$d" 5.0.0 5.0.0 4.9.9 5.0.0
+mv "$d/app/Info.plist" "$d/app/Info.plist.in"
+printf '# <kind> <path>\ncmake-project        .\nplist-short-version  app/Info.plist.in\n' \
+    > "$d/ci/version-surfaces.txt"
+run "case_18 a literal inside a plist template is still refused" 1 "$d"
+
+# case_19 -- a template with nothing measuring the build is the vacuum case
+# again: every surface would be a placeholder and the gate would compare
+# nothing to VERSION. That is "I could not judge", not a pass.
+d=$work/case_19; fixture "$d" 5.0.0 5.0.0 '@PROJECT_VERSION@' 5.0.0
+mv "$d/app/Info.plist" "$d/app/Info.plist.in"
+printf '# <kind> <path>\nplist-short-version  app/Info.plist.in\n' \
+    > "$d/ci/version-surfaces.txt"
+run "case_19 a plist template with no measured surface is undecidable" 2 "$d"
+
+# case_20 -- the branch above is bound to the .in SUFFIX, not to the placeholder:
+# a plain plist holding @PROJECT_VERSION@ is a configure_file() that never ran,
+# and it is still a mismatch. Without this case the suffix test could be dropped
+# and the placeholder would be accepted in the file that actually ships.
+d=$work/case_20; fixture "$d" 5.0.0 5.0.0 '@PROJECT_VERSION@' 5.0.0
+printf '# <kind> <path>\ncmake-project        .\nplist-short-version  app/Info.plist\n' \
+    > "$d/ci/version-surfaces.txt"
+run "case_20 the placeholder in a plain plist is still a mismatch" 1 "$d"
+
 if [ "$fails" -eq 0 ]; then
     echo "check-version-surfaces selftest: all cases passed"
     exit 0

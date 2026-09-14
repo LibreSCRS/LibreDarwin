@@ -124,9 +124,22 @@ check_plasma_metadata() {
 # CFBundleShortVersionString in an XML plist -- the embedded __info_plist of a
 # bare Mach-O, or a bundle's Info.plist. This is the number Finder, `mdls`,
 # About windows and anything reading Bundle.main.infoDictionary report.
+#
+# A listed path ending in .in is a configure_file() template, and the same two
+# shapes apply as for the plugin metadata: @PROJECT_VERSION@ is what a tree
+# that has stopped hand-typing the number looks like, while a literal inside a
+# template is still a hand-typed number and is still compared against VERSION.
+# The difference from the metadata kind is the extra condition: a template
+# states no number of its own, so it is accepted only when the list also names
+# a cmake-project surface -- that one measures what the build really stamps,
+# which is the number configure_file() fills in here. With no such surface the
+# whole list could become templates and the gate would have nothing left to
+# compare, which is a vacuum, not a pass.
 check_plist_short_version() {
     f=$1
     [ -f "$f" ] || undecidable "$f does not exist"
+    is_template=0
+    case "$f" in *.in) is_template=1 ;; esac
     got="$(awk '/<key>CFBundleShortVersionString<\/key>/ {
                     getline
                     if (match($0, /<string>[^<]*<\/string>/)) {
@@ -136,6 +149,9 @@ check_plist_short_version() {
     if [ -z "$got" ]; then
         echo "::error::$f has no CFBundleShortVersionString."
         FAIL=1
+    elif [ "$is_template" -eq 1 ] && [ "$got" = '@PROJECT_VERSION@' ]; then
+        [ "$HAS_CMAKE_PROJECT" -eq 1 ] || undecidable "$f takes CFBundleShortVersionString from @PROJECT_VERSION@, but $SURFACE_LIST names no cmake-project surface -- nothing measures the number the build would fill in here."
+        echo "  -> $f takes CFBundleShortVersionString from @PROJECT_VERSION@"
     else
         report "$f (CFBundleShortVersionString)" "$got"
     fi
@@ -156,6 +172,16 @@ check_yaml_short_version() {
         report "$f (CFBundleShortVersionString)" "$got"
     fi
 }
+
+# Pre-scan for the surface that measures what the build stamps. A template is
+# only judgeable through that one, and the list is read in file order, so a
+# cmake-project row standing AFTER the rows it vouches for would otherwise be
+# invisible to them -- the gate would then depend on how the list is sorted.
+HAS_CMAKE_PROJECT=0
+while IFS= read -r line; do
+    case "$line" in ''|'#'*) continue ;; esac
+    [ "${line%%[ 	]*}" = cmake-project ] && HAS_CMAKE_PROJECT=1
+done < "$SURFACE_LIST"
 
 while IFS= read -r line; do
     case "$line" in ''|'#'*) continue ;; esac
