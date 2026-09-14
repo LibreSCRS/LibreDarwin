@@ -1,4 +1,4 @@
 # <kind> <path>
 cmake-project        .
-plist-short-version  agent/librescrs-agent-info.plist
-plist-short-version  prompter/librescrs-prompter-info.plist
+plist-short-version  agent/librescrs-agent-info.plist.in
+plist-short-version  prompter/librescrs-prompter-info.plist.in

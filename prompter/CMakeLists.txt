@@ -33,11 +33,15 @@ set_target_properties(librescrs-prompter PROPERTIES
     INSTALL_RPATH "@executable_path;@executable_path/../Frameworks"
     BUILD_WITH_INSTALL_RPATH ON)
 # Embedded __info_plist: same secinitd container-keying requirement as the
-# agent — see prompter/librescrs-prompter-info.plist.
+# agent — see prompter/librescrs-prompter-info.plist.in. Its short version is
+# filled from PROJECT_VERSION at configure time, so the link reads the generated
+# file rather than a hand-typed one.
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/librescrs-prompter-info.plist.in
+               ${CMAKE_CURRENT_BINARY_DIR}/librescrs-prompter-info.plist @ONLY)
 target_link_options(librescrs-prompter PRIVATE
-    "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/librescrs-prompter-info.plist")
+    "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/librescrs-prompter-info.plist")
 set_property(TARGET librescrs-prompter APPEND PROPERTY LINK_DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/librescrs-prompter-info.plist)
+    ${CMAKE_CURRENT_BINARY_DIR}/librescrs-prompter-info.plist)
 
 install(TARGETS librescrs-prompter RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
 

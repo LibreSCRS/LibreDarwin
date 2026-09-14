@@ -414,6 +414,20 @@ jobs:
         working-directory: LibreDarwin
         run: cmake --build build -j4
 
+      - name: The linked executables embed the version VERSION carries
+        # The surface check reads the two plist templates and trusts the build to
+        # fill them; this reads what the linker actually embedded, so a link line
+        # pointing back at a template turns red here, where it would ship.
+        working-directory: LibreDarwin
+        run: |
+          want="$(head -n1 VERSION | tr -d '[:space:]')"
+          want=${want#v}
+          for bin in build/agent/librescrs-agent build/prompter/librescrs-prompter; do
+            got="$(launchctl plist __TEXT,__info_plist "$bin" | sed -n 's/.*"CFBundleShortVersionString" = "\([^"]*\)";.*/\1/p')"
+            [ "$got" = "$want" ] || { echo "::error::$bin embeds CFBundleShortVersionString '$got', VERSION says '$want'"; exit 1; }
+            echo "$bin embeds $got"
+          done
+
       - name: Test
         # The hardware SignHwSmokeTest auto-skips without LIBRESCRS_TEST_PIN, so
         # this is green unattended. All wire/transport/frontend/lifecycle unit

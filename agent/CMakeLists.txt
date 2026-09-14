@@ -80,11 +80,16 @@ set_target_properties(librescrs-agent PROPERTIES
     BUILD_WITH_INSTALL_RPATH ON)
 # Embedded __info_plist: a bare sandboxed main executable needs its own
 # CFBundleIdentifier for secinitd container keying, or App Sandbox init SIGTRAPs
-# in libsystem_secinit — see agent/librescrs-agent-info.plist.
+# in libsystem_secinit — see agent/librescrs-agent-info.plist.in. The short
+# version comes from the same PROJECT_VERSION that LIBREDARWIN_VERSION_STR above
+# carries, so the number the linker embeds cannot drift from the number the
+# binary reports; the link reads the generated file, not the template.
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/librescrs-agent-info.plist.in
+               ${CMAKE_CURRENT_BINARY_DIR}/librescrs-agent-info.plist @ONLY)
 target_link_options(librescrs-agent PRIVATE
-    "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_SOURCE_DIR}/librescrs-agent-info.plist")
+    "-Wl,-sectcreate,__TEXT,__info_plist,${CMAKE_CURRENT_BINARY_DIR}/librescrs-agent-info.plist")
 set_property(TARGET librescrs-agent APPEND PROPERTY LINK_DEPENDS
-    ${CMAKE_CURRENT_SOURCE_DIR}/librescrs-agent-info.plist)
+    ${CMAKE_CURRENT_BINARY_DIR}/librescrs-agent-info.plist)
 
 # Install the daemon to libexec (the dev harness path; in production it is the
 # librescrs-agent inside the LibreMac host's Contents/MacOS) and the bundled

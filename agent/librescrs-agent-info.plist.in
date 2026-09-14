@@ -4,9 +4,10 @@
 SPDX-License-Identifier: LGPL-2.1-or-later
 SPDX-FileCopyrightText: 2026 hirashix0
 
-Embedded __info_plist for librescrs-agent (linked via
--Wl,-sectcreate,__TEXT,__info_plist,<this file>). A bare sandboxed main
-executable needs its own CFBundleIdentifier for secinitd container keying —
+Template for the embedded __info_plist of librescrs-agent: configure_file()
+writes it into the build dir and the link line sectcreates THAT file, so the
+short version the binary carries is the one the build stamped. A bare sandboxed
+main executable needs its own CFBundleIdentifier for secinitd container keying —
 without one, App Sandbox init SIGTRAPs in libsystem_secinit.
 -->
 <plist version="1.0">
@@ -18,6 +19,6 @@ without one, App Sandbox init SIGTRAPs in libsystem_secinit.
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>
-    <string>5.0.0</string>
+    <string>@PROJECT_VERSION@</string>
 </dict>
 </plist>
