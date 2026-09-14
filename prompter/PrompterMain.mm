@@ -82,7 +82,7 @@ int main(int /*argc*/, char** /*argv*/)
             [](const LibreSCRS::Darwin::wire::ConfirmAction& req) {
                 return LibreSCRS::Darwin::confirmWithDeviceOwner(req);
             },
-            makePeerAuth());
+            [window]() { return window->dismissAll(); }, makePeerAuth());
 
         if (auto started = server.start(); !started) {
             NSLog(@"librescrs-prompter: %s", started.error().c_str());

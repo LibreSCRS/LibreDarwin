@@ -15,6 +15,7 @@
 #include <gtest/gtest.h>
 
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -44,6 +45,16 @@ int connectClient(const std::string& path)
     addr.sun_family = AF_UNIX;
     std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
     EXPECT_EQ(::connect(c, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+    // Bound every blocking recv on this socket -- a regression that leaves a
+    // reply unsent must fail the read it blocks on with a message, not hang
+    // the binary until ctest's own kill timeout. 20 s, not the file's usual
+    // 10 s (releaseProvider.wait(1, seconds(10))): a fake provider that falls
+    // back to answering after its OWN 10 s bound (see
+    // ResetDismissesEveryLivePromptAndAnswersHowMany) must have room to
+    // deliver that fallback reply before the client gives up on reading it,
+    // or the two timers race and the failure lands on the wrong assertion.
+    const timeval recvTimeout{.tv_sec = 20, .tv_usec = 0};
+    ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, sizeof(recvTimeout));
     return c;
 }
 
@@ -136,12 +147,20 @@ PrompterServer::ConfirmProvider rejectConfirmProvider()
     };
 }
 
+PrompterServer::ResetHandler rejectResetHandler()
+{
+    return []() -> std::uint32_t {
+        ADD_FAILURE() << "ResetHandler must not run for this test";
+        return 0;
+    };
+}
+
 TEST(PrompterServer, AuthorizedRequestGetsProviderReply)
 {
     const std::string path = uniqueSocketPath();
     PrompterServer server(
         path, [](const wire::PromptRequest&) { return okReply({'8', '8', '8', '8'}); }, // fake test value
-        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(), rejectResetHandler(),
         [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
@@ -174,7 +193,7 @@ TEST(PrompterServer, CancelOnASecondConnectionDismissesWhileModalIsUp)
             return okReply({'4', '2'});
         },
         rejectMultiProvider(), [&](const std::string&) { cancelSeen.signal(); }, rejectConfirmProvider(),
-        [](const PeerCredentials&) { return true; });
+        rejectResetHandler(), [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     const int conn1 = connectClient(path);
@@ -213,7 +232,7 @@ TEST(PrompterServer, StopReturnsPromptlyWithAModalPending)
             releaseProvider.wait(1, std::chrono::seconds(10));
             return okReply({'7'});
         },
-        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(), rejectResetHandler(),
         [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
@@ -251,7 +270,7 @@ TEST(PrompterServer, UnauthorizedPeerFailsClosedWithNoProviderCall)
             providerCalled.signal();
             return okReply({'0'});
         },
-        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+        rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(), rejectResetHandler(),
         [](const PeerCredentials&) { return false; }); // NOT the agent
     ASSERT_TRUE(server.start().has_value());
 
@@ -287,7 +306,8 @@ TEST(PrompterServer, ChangeRequestRoutesToMultiProviderAndReplyRoundTrips)
             }
             return okMultiReply({'1', '2', '3', '4'}, {'5', '6', '7', '8'}); // fake test values
         },
-        [](const std::string&) {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        [](const std::string&) {}, rejectConfirmProvider(), rejectResetHandler(),
+        [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     const int conn = connectClient(path);
@@ -329,7 +349,7 @@ TEST(PrompterServer, CancelOnASecondConnectionDismissesWhileChangeModalIsUp)
             releaseProvider.wait(1, std::chrono::seconds(10)); // the "change modal"
             return okMultiReply({'1'}, {'2'});
         },
-        [&](const std::string&) { cancelSeen.signal(); }, rejectConfirmProvider(),
+        [&](const std::string&) { cancelSeen.signal(); }, rejectConfirmProvider(), rejectResetHandler(),
         [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
@@ -382,7 +402,8 @@ TEST(PrompterServer, UnknownKindChangeRequestFailsClosedWithNoModal)
             ADD_FAILURE() << "unknown kind must be rejected before any modal dispatch";
             return okMultiReply({'0'}, {'0'});
         },
-        [](const std::string&) {}, rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        [](const std::string&) {}, rejectConfirmProvider(), rejectResetHandler(),
+        [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     auto request = kChangeRequest();
@@ -413,7 +434,7 @@ TEST(PrompterServer, UnknownConfirmKindIsRefusedWithoutAskingTheHuman)
     const std::string path = uniqueSocketPath();
     PrompterServer server(
         path, rejectSingleProvider(), rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
-        [](const PeerCredentials&) { return true; });
+        rejectResetHandler(), [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     wire::ConfirmAction request;
@@ -452,7 +473,7 @@ TEST(PrompterServer, ConfirmActionReachesTheProviderAndItsVerdictIsReturned)
             EXPECT_EQ(req.artifact, "TslSources");
             return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, "declined"};
         },
-        [](const PeerCredentials&) { return true; });
+        rejectResetHandler(), [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     wire::ConfirmAction request;
@@ -492,7 +513,7 @@ TEST(PrompterServer, UnauthorizedPeerFailsClosedForChangeRequestsToo)
             providerCalled.signal();
             return okMultiReply({'0'}, {'0'});
         },
-        [](const std::string&) {}, rejectConfirmProvider(),
+        [](const std::string&) {}, rejectConfirmProvider(), rejectResetHandler(),
         [](const PeerCredentials&) { return false; }); // NOT the agent
     ASSERT_TRUE(server.start().has_value());
 
@@ -540,7 +561,7 @@ TEST(PrompterServer, CancelDeliversTheIdItAddresses)
             }
             cancelSeen.signal();
         },
-        rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        rejectConfirmProvider(), rejectResetHandler(), [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
     wire::PromptCancel cancelMsg;
@@ -559,39 +580,135 @@ TEST(PrompterServer, CancelDeliversTheIdItAddresses)
 }
 
 // The Reset verb is answered, never merely absorbed: a caller that sends it
-// waits for ResetDone, and silence would hang it. Today's honest count is 0 --
-// this build has one modal at a time and no window roster to sweep -- so the
-// case is named for the property that does not change when the sweep lands,
-// and the count assertion is what the next step tightens.
-TEST(PrompterServer, ResetAnswersResetDoneWithTheProtocolVersion)
+// waits for ResetDone, and silence would hang it. Two prompts stand at once,
+// via fake providers standing in for two real windows -- Reset must reach
+// BOTH (each answers Cancelled, exactly what a dismissed panel delivers to
+// its blocked caller) and the reply must carry the true count, not a
+// placeholder: a Reset that answered 0 with two windows still standing would
+// be indistinguishable from a Reset that did nothing at all.
+TEST(PrompterServer, ResetDismissesEveryLivePromptAndAnswersHowMany)
 {
     const std::string path = uniqueSocketPath();
+    Latch providersEntered; // wait(2, ...): BOTH modals up before Reset fires
+    std::mutex releaseMutex;
+    std::condition_variable releaseCv;
+    bool released = false;
+    auto twoLiveModals = [&](const wire::PromptRequest&) {
+        providersEntered.signal();
+        std::unique_lock<std::mutex> lk(releaseMutex);
+        // Bounded like every other blocking wait in this file
+        // (releaseProvider.wait(1, seconds(10))): a regression that never
+        // calls the reset handler must fail THIS assertion with a message
+        // after 10 s, not hang the binary forever. Either way -- released by
+        // Reset or timed out -- the lambda still answers Cancelled below, so
+        // a timeout here does not itself strand the connection.
+        EXPECT_TRUE(releaseCv.wait_for(lk, std::chrono::seconds(10), [&] { return released; }))
+            << "the reset handler never released this modal";
+        return wire::PromptReply{.status = wire::PromptReplyStatus::Cancelled};
+    };
     PrompterServer server(
-        path, rejectSingleProvider(), rejectMultiProvider(),
+        path, twoLiveModals, rejectMultiProvider(),
         [](const std::string&) { ADD_FAILURE() << "Reset must not route into the addressed-cancel arm"; },
-        rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+        rejectConfirmProvider(),
+        [&]() -> std::uint32_t {
+            // Stands in for PromptWindow::dismissAll(): releases both blocked
+            // callers (each then answers Cancelled on its own connection, like
+            // a real dismissed panel) and reports how many it closed. The
+            // count is a value distinct from the number of live prompts (2)
+            // on purpose: a hardcoded pass-through matching that number would
+            // let a recount bug (or a literal `return 2;` with no sweep at
+            // all) go unnoticed.
+            {
+                const std::lock_guard<std::mutex> lk(releaseMutex);
+                released = true;
+            }
+            releaseCv.notify_all();
+            return 7;
+        },
+        [](const PeerCredentials&) { return true; });
     ASSERT_TRUE(server.start().has_value());
 
-    const int conn = connectClient(path);
-    ASSERT_TRUE(Agent::Wire::sendFrame(conn, wire::toCbor(wire::PromptReset{}).encode()).has_value());
+    const int conn1 = connectClient(path);
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn1, kPinRequestBytes()).has_value());
+    const int conn2 = connectClient(path);
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn2, kPinRequestBytes()).has_value());
+    ASSERT_TRUE(providersEntered.wait(2, std::chrono::seconds(2))); // both modals up and blocked
 
-    auto reply = Agent::Wire::recvFrame(conn);
-    ASSERT_TRUE(reply.has_value());
+    const int resetConn = connectClient(path);
+    ASSERT_TRUE(Agent::Wire::sendFrame(resetConn, wire::toCbor(wire::PromptReset{}).encode()).has_value());
 
-    // The raw frame is inspected before it is parsed: the agent reads the
-    // helper's protocol off the reply itself, so the key has to be ON the wire,
-    // not merely reconstructed by a parser that knows its own version.
-    const auto tree = Agent::Wire::decode(reply->body);
+    // Both blocked requests are released by Reset and answer Cancelled.
+    auto reply1 = Agent::Wire::recvFrame(conn1);
+    ASSERT_TRUE(reply1.has_value());
+    auto parsed1 = wire::parsePromptReply(reply1->body);
+    ASSERT_TRUE(parsed1.has_value());
+    EXPECT_EQ(parsed1->status, wire::PromptReplyStatus::Cancelled);
+
+    auto reply2 = Agent::Wire::recvFrame(conn2);
+    ASSERT_TRUE(reply2.has_value());
+    auto parsed2 = wire::parsePromptReply(reply2->body);
+    ASSERT_TRUE(parsed2.has_value());
+    EXPECT_EQ(parsed2->status, wire::PromptReplyStatus::Cancelled);
+
+    // The Reset caller's own reply carries the true count and the protocol
+    // version. The raw frame is inspected before it is parsed: the agent
+    // reads the helper's protocol off the reply itself, so the key has to be
+    // ON the wire, not merely reconstructed by a parser that knows its own
+    // version.
+    auto resetReply = Agent::Wire::recvFrame(resetConn);
+    ASSERT_TRUE(resetReply.has_value());
+    const auto tree = Agent::Wire::decode(resetReply->body);
     ASSERT_TRUE(tree.has_value());
     ASSERT_NE(tree->find("t"), nullptr);
     ASSERT_NE(tree->find("t")->asText(), nullptr);
     EXPECT_EQ(*tree->find("t")->asText(), "ResetDone");
     ASSERT_NE(tree->find("v"), nullptr);
     EXPECT_EQ(tree->find("v")->asUInt().value_or(0), wire::kPrompterProtocolVersion);
+    auto parsedReset = wire::parseResetDone(resetReply->body);
+    ASSERT_TRUE(parsedReset.has_value());
+    EXPECT_EQ(parsedReset->closed, 7u); // the fake handler's distinctive count, not the live-prompt count (2)
 
-    auto parsed = wire::parseResetDone(reply->body);
+    ::close(conn1);
+    ::close(conn2);
+    ::close(resetConn);
+    server.stop();
+    std::filesystem::remove(path);
+}
+
+// A request one version ahead of what this build speaks cannot even have its
+// message tag read: parsePrompterRequest checks "v" before it looks at "t",
+// on purpose, so a message this build cannot fully read is never half-
+// honoured. The server therefore cannot know which provider the message
+// would have routed to -- it is answered Error rather than left to hang the
+// caller, and every provider here is the rejecting kind, so any dispatch at
+// all fails the test.
+TEST(PrompterServer, ARequestOneVersionAheadIsRefusedWithoutAProviderCall)
+{
+    const std::string path = uniqueSocketPath();
+    PrompterServer server(
+        path, rejectSingleProvider(), rejectMultiProvider(),
+        [](const std::string&) { ADD_FAILURE() << "an unsupported-version request must not reach the cancel arm"; },
+        rejectConfirmProvider(), rejectResetHandler(), [](const PeerCredentials&) { return true; });
+    ASSERT_TRUE(server.start().has_value());
+
+    // A well-formed RequestSecret, but hand-built (not through wire::toCbor,
+    // which always stamps the server's OWN version) so "v" can be set past
+    // what this build speaks.
+    Agent::Wire::CborValue::Map raw;
+    raw.emplace("t", Agent::Wire::CborValue("RequestSecret"));
+    raw.emplace("v", Agent::Wire::CborValue::uint(wire::kPrompterProtocolVersion + 1));
+    raw.emplace("kind", Agent::Wire::CborValue("pin"));
+    const auto rawBytes = Agent::Wire::CborValue(std::move(raw)).encode();
+
+    const int conn = connectClient(path);
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn, rawBytes).has_value());
+
+    auto reply = Agent::Wire::recvFrame(conn);
+    ASSERT_TRUE(reply.has_value());
+    auto parsed = wire::parsePromptReply(reply->body);
     ASSERT_TRUE(parsed.has_value());
-    EXPECT_EQ(parsed->closed, 0u) << "this build has no window roster to sweep, and says so";
+    EXPECT_EQ(parsed->status, wire::PromptReplyStatus::Error);
+    EXPECT_FALSE(parsed->userMessage.empty());
 
     ::close(conn);
     server.stop();

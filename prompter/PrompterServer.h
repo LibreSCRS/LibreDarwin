@@ -57,11 +57,24 @@ public:
     // the human answers, so it must never run on the serial queue that serves
     // every connection.
     using ConfirmProvider = std::function<wire::ConfirmReply(const wire::ConfirmAction& req)>;
+    // Close every window still standing (Reset) and return how many. Run on
+    // the concurrent worker queue like every other request-shaped call, even
+    // though the real implementation (PromptWindow::dismissAll) is fast and
+    // documented safe from any thread: keeping every provider off the serial
+    // queue is the one invariant to hold, not "this call happens to be quick".
+    // Reset therefore shares the SAME worker queue whose threads the standing
+    // prompts already occupy -- the right tradeoff, because calling it inline
+    // on the serial queue would instead park THAT queue's accept/read
+    // processing for every other connection behind dismissAll()'s own
+    // main-queue round trip; bounded only by how many threads GCD is willing
+    // to grow the queue to for concurrently blocked work, not by anything
+    // this server imposes.
+    using ResetHandler = std::function<std::uint32_t()>;
     // Is this connecting peer the agent? (real impl: SecTask signing-id match).
     using PeerAuthorized = std::function<bool(const PeerCredentials&)>;
 
     PrompterServer(std::string socketPath, SecretProvider provider, MultiSecretProvider multiProvider,
-                   CancelHandler cancel, ConfirmProvider confirm, PeerAuthorized peerAuth);
+                   CancelHandler cancel, ConfirmProvider confirm, ResetHandler reset, PeerAuthorized peerAuth);
     ~PrompterServer();
     PrompterServer(const PrompterServer&) = delete;
     PrompterServer& operator=(const PrompterServer&) = delete;
@@ -99,6 +112,7 @@ private:
     MultiSecretProvider m_multiProvider;
     CancelHandler m_cancel;
     ConfirmProvider m_confirmProvider;
+    ResetHandler m_reset;
     PeerAuthorized m_peerAuth;
     Agent::Wire::UniqueFd m_listen;
     dispatch_queue_t m_queue{nullptr};  // serial: accept + reads + registry

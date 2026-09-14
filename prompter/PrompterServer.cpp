@@ -34,6 +34,27 @@ wire::PromptReply unauthorizedReply()
     return r;
 }
 
+// A request announcing a protocol NEWER than kPrompterProtocolVersion is
+// refused rather than half-honoured: parsePrompterRequest cannot even read
+// the message tag past that check, so the type this reply answers for is
+// unknown. It is shaped like unauthorizedReply() above for the same reason --
+// a generic PromptReply parses under every parser on this wire that reads
+// "status" (parsePromptReply, parseMultiPromptReply, parseConfirmReply all
+// look only at "status"/"userMessage" on the non-Ok path) -- so whichever of
+// those the caller picks reads it cleanly. The one caller this does NOT
+// satisfy is a Reset sent at v+1: parseResetDone requires "t" == "ResetDone",
+// and this reply carries "t" == "Secret", so that caller gets UnknownMessage
+// and logs the reply as unreadable rather than a parsed ResetDone -- still the
+// bounded, correct outcome (the caller returns instead of waiting on a
+// ResetDone that was never coming), just not this function's problem to fix.
+wire::PromptReply unsupportedVersionReply()
+{
+    wire::PromptReply r;
+    r.status = wire::PromptReplyStatus::Error;
+    r.userMessage = "prompter protocol version not supported by this helper";
+    return r;
+}
+
 void makeNonBlockingCloexec(int fd) noexcept
 {
     ::fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -65,9 +86,11 @@ inline constexpr bool always_false_v = false;
 } // namespace
 
 PrompterServer::PrompterServer(std::string socketPath, SecretProvider provider, MultiSecretProvider multiProvider,
-                               CancelHandler cancel, ConfirmProvider confirm, PeerAuthorized peerAuth)
+                               CancelHandler cancel, ConfirmProvider confirm, ResetHandler reset,
+                               PeerAuthorized peerAuth)
     : m_socketPath(std::move(socketPath)), m_provider(std::move(provider)), m_multiProvider(std::move(multiProvider)),
-      m_cancel(std::move(cancel)), m_confirmProvider(std::move(confirm)), m_peerAuth(std::move(peerAuth))
+      m_cancel(std::move(cancel)), m_confirmProvider(std::move(confirm)), m_reset(std::move(reset)),
+      m_peerAuth(std::move(peerAuth))
 {}
 
 PrompterServer::~PrompterServer()
@@ -242,7 +265,21 @@ void PrompterServer::onReadReady(std::uint64_t connId)
 
     auto parsed = wire::parsePrompterRequest(frame.body);
     if (!parsed.has_value()) {
-        return; // malformed; fail closed — the detached fd share drops here
+        if (parsed.error() == wire::PrompterParseError::UnsupportedVersion) {
+            // A message this build cannot fully read must not be silently
+            // dropped: silence would hang a caller waiting for a reply that is
+            // never coming. The version check runs BEFORE the message tag is
+            // even read, so the type it would have been is unknown; answered
+            // with the same type-agnostic Error shape as the accept-time
+            // unauthorizedReply() above. No provider of any kind runs.
+            const std::shared_ptr<int> connFd = fd;
+            dispatch_async(m_worker, ^{
+              wire::PromptReply refusal = unsupportedVersionReply();
+              clearNonBlocking(*connFd);
+              wire::sendPromptReplyScrubbed(*connFd, refusal);
+            });
+        }
+        return; // every other parse failure stays silent; fail closed — the detached fd share drops here
     }
 
     // Fail-closed dispatch totality: EVERY PrompterRequest alternative has an
@@ -314,17 +351,19 @@ void PrompterServer::onReadReady(std::uint64_t connId)
                   wire::sendConfirmReply(*connFd, reply);
                 });
             } else if constexpr (std::is_same_v<T, wire::PromptReset>) {
-                // Closing every standing window and reporting how many needs
-                // the per-prompt panel registry, which this build does not
-                // have: there is exactly one modal at a time and no roster to
-                // sweep. So the verb is answered truthfully -- nothing was
-                // closed -- rather than left unanswered, which would hang a
-                // caller waiting for ResetDone.
+                // Every window still standing is swept and the caller told
+                // how many: Reset exists precisely because the helper
+                // outlives the agent that installed it, so a fresh agent
+                // meets windows it never raised and cannot address by id.
+                // Same worker discipline as every other arm -- the reset
+                // handler runs off the serial queue, which must never block.
                 static_cast<void>(msg);
+                const ResetHandler resetHandler = m_reset;
                 const std::shared_ptr<int> connFd = fd;
                 dispatch_async(m_worker, ^{
+                  const std::uint32_t closed = resetHandler();
                   clearNonBlocking(*connFd);
-                  wire::sendResetDone(*connFd, wire::ResetDone{});
+                  wire::sendResetDone(*connFd, wire::ResetDone{.closed = closed});
                 });
             } else {
                 static_assert(always_false_v<T>, "PrompterServer::onReadReady: unhandled PrompterRequest arm");
