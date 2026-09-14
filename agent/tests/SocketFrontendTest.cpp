@@ -1452,7 +1452,9 @@ TEST(SocketFrontend, ForgetCscaAnchorsClearsTheRecordedReport)
 
     const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
     ASSERT_NE(reply.find("t"), nullptr);
-    EXPECT_EQ(*reply.find("t")->asText(), "Reply") << "forgetting answered " << errName(reply);
+    // Not the envelope tag: a refusal is tagged "Reply" as well, and a gate on
+    // the tag passed for every answer the verb could give.
+    EXPECT_EQ(errName(reply), "") << "forgetting was refused";
 
     EXPECT_FALSE(rig.core->configStore().cscaAnchorState().has_value())
         << "the report survived the verb whose whole purpose is to remove it";
@@ -1475,7 +1477,7 @@ TEST(SocketFrontend, ForgetCscaAnchorsHoldingNothingIsNotAFailure)
     // nothing to remove", and only the first is a refusal.
     const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
     ASSERT_NE(reply.find("t"), nullptr);
-    EXPECT_EQ(*reply.find("t")->asText(), "Reply") << "holding nothing was reported as " << errName(reply);
+    EXPECT_EQ(errName(reply), "") << "holding nothing was reported as a failure";
     ASSERT_NE(reply.find("hadPinnedSigner"), nullptr);
     EXPECT_FALSE(reply.find("hadPinnedSigner")->asBool().value_or(true));
 }
