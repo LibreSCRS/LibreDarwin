@@ -98,14 +98,79 @@ NSString* retryErrorLine(std::uint32_t attempt, const std::string& lastError)
     return localized("prompter_retry_rejected", "Your previous entry was not accepted. Please try again.");
 }
 
-// Shared informative-text chrome (retry error / description / requester /
-// artifact) — identical for the single-secret and change panels;
+// The reader's interface qualifier, said in the holder's language. The agent
+// sends a closed token and never prose: it has no localisation, so any English
+// it composed would arrive already written and no prompter could fix it. An
+// unrecognised or absent token renders nothing, exactly as the Linux dialog
+// treats the same vocabulary.
+NSString* readerInterfaceWord(const std::string& token)
+{
+    if (token == wire::kReaderInterfaceContact) {
+        return localized("prompter_reader_contact", "contact");
+    }
+    if (token == wire::kReaderInterfaceContactless) {
+        return localized("prompter_reader_contactless", "contactless");
+    }
+    return nil;
+}
+
+// A language-neutral mark beside the localised word, so the two platforms show
+// the same thing. The same two code points the Linux dialog uses: U+1F4B3 (card
+// in a slot) and U+1F4F6 (wireless waves), the closest widely-rendered stand-ins
+// for the chip and wave marks. The word beside them carries the meaning
+// wherever a font lacks the glyph, which is why neither ever stands alone.
+NSString* readerInterfaceGlyph(const std::string& token)
+{
+    if (token == wire::kReaderInterfaceContact) {
+        return @"\U0001F4B3";
+    }
+    if (token == wire::kReaderInterfaceContactless) {
+        return @"\U0001F4F6";
+    }
+    return nil;
+}
+
+// WHICH READER is asking -- load-bearing rather than chrome: more than one
+// credential window can stand at once, and on a dual-interface unit whose two
+// PC/SC names share a serial the qualifier is the only thing separating two
+// otherwise identical dialogs. nil when the prompt names no reader, so a
+// request whose reader could not be resolved shows no line at all rather than
+// an empty one.
+//
+// req.readerFull (the literal PC/SC name) is deliberately NOT rendered: it is
+// long enough to push the entry field off a small screen, which is why it
+// belongs behind a details affordance, and this flat panel has none to put it
+// behind. It is carried on the wire for the affordance that will.
+NSString* readerLine(const std::string& model, const std::string& iface)
+{
+    if (model.empty()) {
+        return nil;
+    }
+    NSString* named = nsstr(model);
+    // %@ is the reader's model, e.g. "OMNIKEY 5422" -- already shortened by the
+    // agent, with no interface wording composed into it.
+    NSString* text = [NSString stringWithFormat:localized("prompter_reader", "Reader: %@"), named != nil ? named : @""];
+    NSString* word = readerInterfaceWord(iface);
+    if (word.length != 0) {
+        // The mark and the localised word, in that order, as on Linux.
+        text = [NSString stringWithFormat:@"%@ %@ %@", text, readerInterfaceGlyph(iface), word];
+    }
+    return text;
+}
+
+// Shared informative-text chrome (retry error / description / reader /
+// requester / artifact) — identical for the single-secret and change panels;
 // `retryError` is nil for the change panel (RequestSecrets carries no
 // retry context -- change_pin is never a CAN/MRZ retry) and shown FIRST,
 // immediately above the rest of the informative text, mirroring the Linux
-// PromptDialog placing its retry label above the input widget.
+// PromptDialog placing its retry label above the input widget. `reader` is nil
+// for the change panel too (RequestSecrets carries no reader identity on this
+// wire) and sits between the description and the requester: it is agent-owned
+// and TRUSTED, so it goes above the client-supplied lines rather than among
+// them -- the same zone split the Linux dialog draws by putting its reader
+// label outside the "Requested by an application" group box.
 NSString* informativeText(const std::string& description, const std::string& requester, const std::string& artifact,
-                          const std::vector<std::string>& artifacts, NSString* retryError)
+                          const std::vector<std::string>& artifacts, NSString* retryError, NSString* reader)
 {
     NSMutableString* info = [NSMutableString string];
     if (retryError.length) {
@@ -113,6 +178,9 @@ NSString* informativeText(const std::string& description, const std::string& req
     }
     if (!description.empty()) {
         [info appendFormat:@"%@%@", info.length ? @"\n" : @"", nsstr(description)];
+    }
+    if (reader.length) {
+        [info appendFormat:@"%@%@", info.length ? @"\n" : @"", reader];
     }
     if (!requester.empty()) {
         [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_requested_by", "Requested by:"),
@@ -705,7 +773,8 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
               initWithWindowTitle:windowTitleForKind(req.kind)
                           heading:promptHeading(req)
                              info:informativeText(req.description, req.requester, req.artifact, req.artifacts,
-                                                  retryErrorLine(req.attempt, req.lastError))
+                                                  retryErrorLine(req.attempt, req.lastError),
+                                                  readerLine(req.readerModel, req.readerInterface))
                        changeFlow:NO];
           const BOOL soleStanding = impl->panels.empty() ? YES : NO;
           // The registry entry goes in BEFORE the window appears, so a
@@ -768,8 +837,9 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
                           heading:req.title.empty() ? localized("prompter_heading_change_pin", "Change your PIN")
                                                     : nsstr(req.title)
                              // RequestSecrets carries no retry context (change_pin is never a
-                             // CAN/MRZ retry) and no per-document artifacts list.
-                             info:informativeText(req.description, req.requester, req.artifact, {}, nil)
+                             // CAN/MRZ retry), no per-document artifacts list, and no reader
+                             // identity on this wire.
+                             info:informativeText(req.description, req.requester, req.artifact, {}, nil, nil)
                        changeFlow:YES];
           PanelState* state = panel.state;
           state->primaryMinLength = req.primaryMinLength;

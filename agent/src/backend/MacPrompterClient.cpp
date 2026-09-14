@@ -93,6 +93,24 @@ std::optional<std::chrono::microseconds> waitReadable(int fd, std::chrono::stead
     }
 }
 
+// The reader's interface qualifier as its wire token. EXHAUSTIVE switch with
+// no `default:`: an enumerator appended upstream must be a -Wswitch diagnostic
+// here, not a silent fall to "unknown" that would make a dual-interface
+// reader's two slots indistinguishable again. Same helper, same reason, as the
+// Linux host's readerInterfaceToken().
+const char* readerInterfaceToken(Agent::ReaderInterface iface)
+{
+    switch (iface) {
+    case Agent::ReaderInterface::Contact:
+        return wire::kReaderInterfaceContact;
+    case Agent::ReaderInterface::Contactless:
+        return wire::kReaderInterfaceContactless;
+    case Agent::ReaderInterface::Unknown:
+        return wire::kReaderInterfaceUnknown;
+    }
+    return wire::kReaderInterfaceUnknown;
+}
+
 wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptions& o)
 {
     wire::PromptRequest r;
@@ -124,6 +142,15 @@ wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptio
     // down the wire and must never read as an instant expiry.
     r.deadlineMs = o.deadlineMs;
     r.altDeadlineMs = o.altDeadlineMs;
+    // The reader that raised this prompt (stamped on every PromptOptions by the
+    // core's stampPrompt). The seam carries it as ONE fact and the wire as three
+    // flat keys, so the flattening happens here -- exactly where the Linux host
+    // does it. An unresolved model/full name and an undetermined interface are
+    // spelled as absence further down the wire, so a dialog names its reader or
+    // says nothing, never the wrong one.
+    r.readerModel = o.reader.model;
+    r.readerInterface = readerInterfaceToken(o.reader.iface);
+    r.readerFull = o.reader.full;
     return r;
 }
 

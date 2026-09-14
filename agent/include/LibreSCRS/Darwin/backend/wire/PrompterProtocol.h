@@ -74,6 +74,21 @@ enum class PrompterParseError : std::uint8_t {
 // rejects anything larger fail-closed.
 inline constexpr std::size_t kMaxSecretBytes = 8 * 1024;
 
+// The closed vocabulary of PromptRequest::readerInterface, mirroring
+// LibreLinux's PrompterWire kReaderInterface* tokens word for word so the two
+// hosts speak one vocabulary. A CLOSED set and never prose: LibreAgent has no
+// localisation, so any English wording it composed would arrive already
+// written and no prompter could say it in the holder's language. The agent
+// keeps the judgement (which slot is which); the prompter keeps the words.
+//
+// "unknown" never reaches the wire -- toCbor spells it as ABSENCE (below), and
+// an unrecognised token a future agent sends is read by the prompter as
+// unknown. The token exists so a host's switch over the core's ReaderInterface
+// enum can stay exhaustive with no `default:`.
+inline constexpr const char* kReaderInterfaceContact = "contact";
+inline constexpr const char* kReaderInterfaceContactless = "contactless";
+inline constexpr const char* kReaderInterfaceUnknown = "unknown";
+
 // RequestSecret (agent -> prompter): ask the user for one secret value.
 struct PromptRequest
 {
@@ -113,6 +128,32 @@ struct PromptRequest
     // must never read an absent deadline as an instant expiry.
     std::uint32_t deadlineMs{0};
     std::uint32_t altDeadlineMs{0};
+    // Which reader raised this prompt, as three flat keys. More than one
+    // credential window can stand at once, so a dialog that does not name its
+    // reader leaves the holder guessing which secret authorises which card --
+    // and on a dual-interface unit whose two PC/SC names SHARE a serial, the
+    // qualifier is the only thing separating two otherwise identical dialogs.
+    //
+    // All three are agent-owned and TRUSTED, unlike `artifacts`: the agent owns
+    // the reader roster and is the only layer that can tell a dual-interface
+    // unit's two slots apart. The prompter renders them and parses none of
+    // them. Flat here and one embedded fact on the core seam
+    // (PromptOptions::reader): flattening is the host's marshalling concern.
+    //
+    // `readerModel` is the shortened model, e.g. "OMNIKEY 5422", with no
+    // interface wording composed into it. `readerInterface` is one of the
+    // kReaderInterface* tokens above, or empty. `readerFull` is the literal
+    // PC/SC name -- long enough to push the entry field off a small screen, so
+    // it belongs behind a details affordance rather than in the chrome.
+    //
+    // Each is spelled as ABSENCE when it has nothing to say, like every other
+    // optional field here, so a prompter predating these keys reads nothing.
+    // NOT a protocol-version bump: nothing the agent DEPENDS ON changed shape
+    // -- a helper that ignores these keys shows a dialog without a reader line,
+    // which is exactly what every helper did before this.
+    std::string readerModel;
+    std::string readerInterface;
+    std::string readerFull;
     bool operator==(const PromptRequest&) const = default;
 };
 

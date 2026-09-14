@@ -721,6 +721,53 @@ TEST(PrompterProtocol, DeadlinesRoundTripAndAreAbsentWhenZero)
     EXPECT_EQ(decoded->find("altDeadlineMs"), nullptr);
 }
 
+// Which reader raised the prompt, as three flat keys rather than one composed
+// sentence: the agent owns the roster and is the only layer that can tell a
+// dual-interface unit's two slots apart, while the prompter keeps the words.
+// More than one credential window can stand at once, and on a unit whose two
+// PC/SC names SHARE a serial the qualifier is the only thing separating two
+// otherwise identical dialogs.
+//
+// Each key is spelled as ABSENCE when it has nothing to say -- an unresolved
+// model or full name, and an interface the agent could not determine -- so a
+// prompter predating these keys reads nothing at all rather than a word it
+// would have to recognise.
+TEST(PrompterProtocol, ReaderIdentityRoundTripsAndSaysNothingWhenItKnowsNothing)
+{
+    const PromptRequest named{.kind = PromptKind::Can,
+                              .minLength = 6,
+                              .maxLength = 6,
+                              .readerModel = "OMNIKEY 5422",
+                              .readerInterface = kReaderInterfaceContactless,
+                              .readerFull = "HID Global OMNIKEY 5422 Smartcard Reader "
+                                            "[OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00"};
+    EXPECT_EQ(roundTripRequest(named), named);
+    const auto namedTree = LibreSCRS::Agent::Wire::decode(toCbor(named).encode());
+    ASSERT_TRUE(namedTree.has_value());
+    ASSERT_NE(namedTree->find("readerInterface"), nullptr);
+    EXPECT_EQ(*namedTree->find("readerInterface")->asText(), std::string{kReaderInterfaceContactless});
+
+    // "unknown" is not a word on this wire: it is the absence of the key. The
+    // token exists so the client's switch over the core enum can stay
+    // exhaustive, and the codec is where it becomes silence.
+    const PromptRequest undetermined{
+        .kind = PromptKind::Pin, .readerModel = "Gemalto PC Twin Reader", .readerInterface = kReaderInterfaceUnknown};
+    const auto undeterminedTree = LibreSCRS::Agent::Wire::decode(toCbor(undetermined).encode());
+    ASSERT_TRUE(undeterminedTree.has_value());
+    EXPECT_NE(undeterminedTree->find("readerModel"), nullptr) << "the model still names the reader";
+    EXPECT_EQ(undeterminedTree->find("readerInterface"), nullptr)
+        << "an undetermined interface is spelled as absence, never as a word";
+    EXPECT_EQ(roundTripRequest(undetermined).readerInterface, std::string{});
+
+    // A prompt whose reader could not be resolved at all says nothing rather
+    // than naming the wrong one.
+    const auto bareTree = LibreSCRS::Agent::Wire::decode(toCbor(PromptRequest{.kind = PromptKind::Pin}).encode());
+    ASSERT_TRUE(bareTree.has_value());
+    EXPECT_EQ(bareTree->find("readerModel"), nullptr);
+    EXPECT_EQ(bareTree->find("readerInterface"), nullptr);
+    EXPECT_EQ(bareTree->find("readerFull"), nullptr);
+}
+
 TEST(PrompterProtocol, TimeoutIsAReplyStatusOfItsOwn)
 {
     PromptReply reply;

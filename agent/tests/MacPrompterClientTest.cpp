@@ -905,6 +905,59 @@ TEST(MacPrompterClient, RequestPinForwardsBothDeadlinesToTheWireRequest)
     EXPECT_EQ(req->altDeadlineMs, 30000u);
 }
 
+// The core stamps every PromptOptions with the reader that raised the prompt
+// (PromptContext::stampPrompt) and this client is what puts it on the wire.
+// The embedded identity is flattened into the wire's three keys here, which is
+// the host's marshalling concern -- the core keeps it as one fact so no caller
+// can set a model while leaving the qualifier unset.
+TEST(MacPrompterClient, RequestPinForwardsTheReaderIdentityToTheWireRequest)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled; // no secret needed for this assertion
+    FakePrompter server(path, reply);
+
+    Agent::PromptOptions options;
+    // The owner's own desk: one physical OMNIKEY exposes two slots that SHARE a
+    // serial, so only the qualifier separates this dialog from its twin.
+    options.reader = Agent::ReaderIdentity{.model = "OMNIKEY 5422",
+                                           .iface = Agent::ReaderInterface::Contactless,
+                                           .full = "HID Global OMNIKEY 5422 Smartcard Reader "
+                                                   "[OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00"};
+
+    MacPrompterClient client(path, trustAnyPeerForTest());
+    static_cast<void>(client.requestPin(options));
+
+    server.waitUntilServed();
+    const auto& req = server.capturedRequest();
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->readerModel, "OMNIKEY 5422");
+    EXPECT_EQ(req->readerInterface, std::string{wire::kReaderInterfaceContactless});
+    EXPECT_EQ(req->readerFull, "HID Global OMNIKEY 5422 Smartcard Reader "
+                               "[OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00");
+}
+
+// A prompt the core could not attribute to a reader carries no reader at all:
+// the default-constructed identity leaves every key off the wire rather than
+// naming the wrong slot.
+TEST(MacPrompterClient, RequestPinWithNoReaderIdentityForwardsNoReaderFields)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled;
+    FakePrompter server(path, reply);
+
+    MacPrompterClient client(path, trustAnyPeerForTest());
+    static_cast<void>(client.requestPin(Agent::PromptOptions{}));
+
+    server.waitUntilServed();
+    const auto& req = server.capturedRequest();
+    ASSERT_TRUE(req.has_value());
+    EXPECT_TRUE(req->readerModel.empty());
+    EXPECT_TRUE(req->readerInterface.empty()) << "Unknown travels as absence, so it parses back as empty";
+    EXPECT_TRUE(req->readerFull.empty());
+}
+
 // What the clock took is not what the person did. Folding the two together is
 // how a holder gets told they cancelled an entry they were still making.
 TEST(MacPrompterClient, TimeoutReplyMapsToTimeout)

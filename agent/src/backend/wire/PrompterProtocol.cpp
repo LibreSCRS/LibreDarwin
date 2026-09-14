@@ -314,6 +314,21 @@ CborValue toCbor(const PromptRequest& r)
     if (r.altDeadlineMs != 0) {
         m.emplace("altDeadlineMs", CborValue::uint(r.altDeadlineMs));
     }
+    // Which reader raised the prompt. Each key is omitted when it has nothing
+    // to say -- a prompt whose reader could not be resolved says nothing rather
+    // than naming the wrong one. An interface the agent could not determine is
+    // absence too, NOT the word "unknown": the token exists so a host's switch
+    // over the core enum can stay exhaustive, and this is where it becomes
+    // silence, so an older prompter has no vocabulary to recognise.
+    if (!r.readerModel.empty()) {
+        m.emplace("readerModel", CborValue(r.readerModel));
+    }
+    if (!r.readerInterface.empty() && r.readerInterface != kReaderInterfaceUnknown) {
+        m.emplace("readerInterface", CborValue(r.readerInterface));
+    }
+    if (!r.readerFull.empty()) {
+        m.emplace("readerFull", CborValue(r.readerFull));
+    }
     return CborValue(std::move(m));
 }
 
@@ -577,8 +592,18 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     // is exactly "no deadline set".
     const auto deadline = optUint(m, "deadlineMs");
     const auto altDeadline = optUint(m, "altDeadlineMs");
+    // Absent on every prompt whose reader could not be resolved, and on every
+    // prompt an agent predating these keys sends: optText defaults a missing
+    // key to "". A PRESENT-but-mistyped value fails the whole request closed,
+    // like every other field here. The token is NOT validated against the
+    // closed vocabulary here: the prompter treats anything it does not
+    // recognise as unknown and renders no qualifier, which is the one place
+    // that judgement belongs.
+    auto readerModel = optText(m, "readerModel");
+    auto readerInterface = optText(m, "readerInterface");
+    auto readerFull = optText(m, "readerFull");
     if (!display || !minLen || !maxLen || !artifacts || !attempt || !lastError || !promptId || !deadline ||
-        !altDeadline) {
+        !altDeadline || !readerModel || !readerInterface || !readerFull) {
         return std::unexpected(PrompterParseError::WrongType);
     }
     r.title = std::move(display->title);
@@ -593,6 +618,9 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     r.promptId = std::move(*promptId);
     r.deadlineMs = static_cast<std::uint32_t>(*deadline);
     r.altDeadlineMs = static_cast<std::uint32_t>(*altDeadline);
+    r.readerModel = std::move(*readerModel);
+    r.readerInterface = std::move(*readerInterface);
+    r.readerFull = std::move(*readerFull);
     return PrompterRequest{std::move(r)};
 }
 
