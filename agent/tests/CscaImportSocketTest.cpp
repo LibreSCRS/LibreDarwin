@@ -232,6 +232,47 @@ TEST(CscaImportSocket, RateLimitPrecedesTheDescriptorInspection)
     ::close(pipeFds[0]);
 }
 
+// --- the human's veto ---------------------------------------------------------
+//
+// Installing country signing anchors is a trust change of the same size as
+// naming a trust source or forgetting the anchors, and those two already stop
+// at a person. The refusal name is NotAuthorized either way, so -- as with the
+// authoriser -- the proof is the side effect: the descriptor untouched, the
+// cache empty, nothing recorded. The refusal is also identical whichever
+// sentence was shown, so what the person was asked is asserted here too: it is
+// the only place an import wearing the generic settings wording would show.
+
+TEST(CscaImportSocket, AnImportTheHumanDeclinesChangesNothing)
+{
+    Rig rig;
+    LibreSCRS::Darwin::wire::ConfirmAction seen;
+    rig.frontend->setConfirmProvider([&seen](const LibreSCRS::Darwin::wire::ConfirmAction& a) {
+        seen = a;
+        return LibreSCRS::Darwin::wire::ConfirmReply{LibreSCRS::Darwin::wire::PromptReplyStatus::Cancelled, ""};
+    });
+
+    const int fd = makeInputFile(asView(aValidMasterList()));
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::lseek(fd, 0, SEEK_CUR), 0);
+
+    EXPECT_EQ(errName(importFd(rig, 1, fd)), "NotAuthorized");
+
+    EXPECT_EQ(seen.kind, "configure_trust");
+    EXPECT_EQ(seen.artifact, "CscaAnchorState");
+    EXPECT_EQ(seen.description, "Install the country signing certificates from the offered file, replacing the ones "
+                                "this computer checks passports against.")
+        << "the person approving a master-list import read some other sentence";
+
+    // The person said no before the agent touched what was handed over: the
+    // offset the sender still shares with the agent has not moved.
+    EXPECT_EQ(::lseek(fd, 0, SEEK_CUR), 0) << "a declined import read the master list";
+    ::close(fd);
+
+    EXPECT_FALSE(rig.core->configStore().cscaAnchorState().has_value()) << "a declined import was recorded";
+    EXPECT_FALSE(Agent::Trust::AnchorCache{fs::path{rig.core->configStore().cscaCacheDir()}}.holdsAnchor())
+        << "a declined import installed anchors";
+}
+
 // The Linux suite spends the budget over the wire, one refused import at a
 // time, which proves that an import refused on its CONTENT still counts against
 // the caller. One connection held open carries one token for every frame, so
@@ -239,6 +280,7 @@ TEST(CscaImportSocket, RateLimitPrecedesTheDescriptorInspection)
 TEST(CscaImportSocket, RefusedImportsSpendTheBudgetToo)
 {
     Rig rig;
+    confirmEverything(rig);
     Client client(rig.path);
 
     std::uint64_t req = 1;
@@ -266,6 +308,7 @@ TEST(CscaImportSocket, RefusedImportsSpendTheBudgetToo)
 TEST(CscaImportSocket, NonRegularDescriptorIsRefused)
 {
     Rig rig;
+    confirmEverything(rig);
 
     int pipeFds[2] = {-1, -1};
     ASSERT_EQ(::pipe(pipeFds), 0);
@@ -281,6 +324,7 @@ TEST(CscaImportSocket, NonRegularDescriptorIsRefused)
 TEST(CscaImportSocket, OversizeInputIsRefused)
 {
     Rig rig;
+    confirmEverything(rig);
 
     // Sparse: resize_file allocates no blocks on disk, and the file still reads
     // as one byte past the cap.
@@ -308,6 +352,7 @@ TEST(CscaImportSocket, AnchorStateIsEmptyUntilSomethingIsImported)
 TEST(CscaImportSocket, AValidListIsImportedAndSummarised)
 {
     Rig rig;
+    confirmEverything(rig);
 
     // Three anchors from two countries, so the two counts cannot be confused.
     const auto list =
@@ -336,6 +381,7 @@ TEST(CscaImportSocket, AValidListIsImportedAndSummarised)
 TEST(CscaImportSocket, AnAcceptedImportIsRememberedInTheConfiguration)
 {
     Rig rig;
+    confirmEverything(rig);
 
     const auto list =
         fixture::signMasterListDated({fixture::makeCsca("CSCA One", "AA"), fixture::makeCsca("CSCA Two", "BB")},
@@ -384,6 +430,7 @@ TEST(CscaImportSocket, AnAcceptedImportIsRememberedInTheConfiguration)
 TEST(CscaReconciliationSocket, ARememberedReportSurvivesARestartThatFindsItsAnchors)
 {
     Rig first;
+    confirmEverything(first);
     const auto list = fixture::signMasterList({fixture::makeCsca("CSCA A", "AA"), fixture::makeCsca("CSCA B", "BB")},
                                               fixture::makeIndependentSigner());
     ASSERT_EQ(errName(importBytes(first, 1, list.der)), "");
@@ -392,6 +439,7 @@ TEST(CscaReconciliationSocket, ARememberedReportSurvivesARestartThatFindsItsAnch
     // construction that cleared the report unconditionally is green over every
     // empty cache and fails only here, where the anchors are real.
     Rig second(nullptr, nullptr, first.tmp);
+    confirmEverything(second);
     const auto state = anchorState(second, 1);
     ASSERT_FALSE(nothingInstalled(state)) << "a restart discarded a report whose anchors are still on disk";
     EXPECT_EQ(uintOf(state, "anchors"), 2u);
@@ -401,6 +449,7 @@ TEST(CscaReconciliationSocket, ARememberedReportSurvivesARestartThatFindsItsAnch
 TEST(CscaReconciliationSocket, AReportWhoseAnchorCacheWasWipedIsNotServedAsCurrent)
 {
     Rig first;
+    confirmEverything(first);
     const auto list = fixture::signMasterList({fixture::makeCsca("CSCA A", "AA"), fixture::makeCsca("CSCA B", "BB")},
                                               fixture::makeIndependentSigner());
     ASSERT_EQ(errName(importBytes(first, 1, list.der)), "");
@@ -413,6 +462,7 @@ TEST(CscaReconciliationSocket, AReportWhoseAnchorCacheWasWipedIsNotServedAsCurre
     ASSERT_FALSE(ec);
 
     Rig second(nullptr, nullptr, first.tmp);
+    confirmEverything(second);
     EXPECT_TRUE(nothingInstalled(anchorState(second, 1))) << "the agent served counts for anchors it no longer holds";
     EXPECT_FALSE(second.core->configStore().cscaAnchorState().has_value())
         << "the stale report is still in the configuration";
@@ -430,6 +480,7 @@ TEST(CscaReconciliationSocket, AReportWhoseAnchorCacheWasWipedIsNotServedAsCurre
 TEST(CscaReconciliationSocket, AReportWhosePinnedSignerIsGoneIsNotServedAsCurrent)
 {
     Rig first;
+    confirmEverything(first);
     const auto list = fixture::signMasterList({fixture::makeCsca("CSCA A", "AA"), fixture::makeCsca("CSCA B", "BB")},
                                               fixture::makeIndependentSigner());
     ASSERT_EQ(errName(importBytes(first, 1, list.der)), "");
@@ -450,6 +501,7 @@ TEST(CscaReconciliationSocket, AReportWhosePinnedSignerIsGoneIsNotServedAsCurren
     ASSERT_TRUE(fs::exists(cache.anchorsDirectory(), ec)) << "the fixture removed more than the state file";
 
     Rig second(nullptr, nullptr, first.tmp);
+    confirmEverything(second);
     EXPECT_TRUE(nothingInstalled(anchorState(second, 1))) << "the agent named a publisher it no longer follows";
     EXPECT_FALSE(second.core->configStore().cscaAnchorState().has_value())
         << "the stale report is still in the configuration";
@@ -472,6 +524,7 @@ TEST(CscaReconciliationSocket, AReportWhosePinnedSignerIsGoneIsNotServedAsCurren
 TEST(CscaReconciliationSocket, DiscardingAStaleReportLeavesTheSignerPinStanding)
 {
     Rig first;
+    confirmEverything(first);
     const auto publisher = fixture::makeIndependentSigner();
     const auto anchorA = fixture::makeCsca("CSCA A", "AA");
     const auto firstList = fixture::signMasterList({anchorA}, publisher);
@@ -487,6 +540,7 @@ TEST(CscaReconciliationSocket, DiscardingAStaleReportLeavesTheSignerPinStanding)
     ASSERT_FALSE(ec);
 
     Rig second(nullptr, nullptr, first.tmp);
+    confirmEverything(second);
     EXPECT_TRUE(nothingInstalled(anchorState(second, 1))) << "counts were served for anchors that are gone";
 
     // A stranger is still refused. This host folds a changed publisher into

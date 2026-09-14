@@ -246,12 +246,16 @@ private:
     ConfirmFn m_confirm;
     dispatch_queue_t m_confirmQueue{nullptr};
 
+    // What a trust-tier verb is about to do, for the sentence the person reads.
+    // The config key alone cannot say it: import and forget share a key.
+    enum class TrustChange { SetValue, Reset, ImportAnchors, ForgetAnchors };
+
     // The trust-tier detour: ask on a worker, come back to the loop, then run
-    // `apply`. Both config writers share it so neither can drift out of the
+    // `apply`. All four trust-tier verbs share it so none can drift out of the
     // gate.
     void confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
-                          const Agent::CallerToken& caller, std::function<void()> apply);
-    static std::string describeTrustChange(const std::string& key);
+                          const Agent::CallerToken& caller, TrustChange what, std::function<void()> apply);
+    static std::string describeTrustChange(const std::string& key, TrustChange what);
     // The per-key write cascades, shared by the immediate and the confirmed
     // path so both run identical code.
     void applyConfigWrite(std::uint64_t connId, std::uint64_t req, const Agent::Wire::SetConfig& msg);

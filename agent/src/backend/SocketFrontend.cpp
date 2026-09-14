@@ -1500,7 +1500,7 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
     }
 
     if (*mut == A::Config::Mutability::DbusMutableTrust) {
-        confirmThenApply(connId, req, msg.key, caller,
+        confirmThenApply(connId, req, msg.key, caller, TrustChange::SetValue,
                          [this, connId, req, msg] { applyConfigWrite(connId, req, msg); });
         return;
     }
@@ -1687,9 +1687,9 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
     // SENDER'S OFFSET -- which is how a test can tell whether a refused caller
     // was turned away before or after the agent touched what they handed over.
     //
-    // Authorize the client, then rate-limit, and only then read. The trust-tier
-    // action is shared with CscaSources: an import is a larger trust change than
-    // naming a source, not a smaller one.
+    // Authorize the client. Then rate-limit, then the person, and only then
+    // read. The trust-tier action is shared with CscaSources: an import is a
+    // larger trust change than naming a source, not a smaller one.
     switch (m_core.authorizer().authorize(A::kActionConfigureTrust, in.caller)) {
     case A::AuthorizationOutcome::Granted:
         break;
@@ -1707,64 +1707,73 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
         return;
     }
 
-    // A PLAIN descriptor, deliberately: a master list is public data, and the
-    // sealed anonymous file this agent uses elsewhere is its vocabulary for
-    // secrets.
     if (msg.list >= in.fds.size()) {
         replyError(connId, req, A::Wire::SyncError::InvalidRequest);
         return;
     }
-    auto input = readDocument(in.fds[msg.list].get(), A::Trust::kMaxMasterListBytes);
-    if (input.status == ReadStatus::NotRegular) {
-        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
-        return;
-    }
-    if (input.status == ReadStatus::TooLarge) {
-        replyError(connId, req, A::Wire::SyncError::InputTooLarge);
-        return;
-    }
-    if (input.status == ReadStatus::Error) {
-        replyError(connId, req, A::Wire::SyncError::CommunicationError);
-        return;
-    }
+    // Then a person, before a byte is read -- the same place the Linux host
+    // puts its consent (polkit runs inside authorize(), ahead of the read).
+    // The request's descriptor vector dies with this dispatch and the person
+    // answers later, so the descriptor moves into the detour and comes back
+    // with the answer. Nothing below runs unless they said yes.
+    auto held = std::make_shared<A::Wire::UniqueFd>(std::move(in.fds[msg.list]));
+    confirmThenApply(connId, req, "CscaAnchorState", in.caller, TrustChange::ImportAnchors, [this, connId, req, held] {
+        // A PLAIN descriptor, deliberately: a master list is public data, and the
+        // sealed anonymous file this agent uses elsewhere is its vocabulary for
+        // secrets.
+        auto input = readDocument(held->get(), A::Trust::kMaxMasterListBytes);
+        if (input.status == ReadStatus::NotRegular) {
+            replyError(connId, req, A::Wire::SyncError::InvalidRequest);
+            return;
+        }
+        if (input.status == ReadStatus::TooLarge) {
+            replyError(connId, req, A::Wire::SyncError::InputTooLarge);
+            return;
+        }
+        if (input.status == ReadStatus::Error) {
+            replyError(connId, req, A::Wire::SyncError::CommunicationError);
+            return;
+        }
 
-    auto& cfg = m_core.configStore();
-    A::Trust::AnchorCache cache(cfg.cscaCacheDir());
-    const auto now =
-        std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
-    auto imported = A::Trust::importMasterList(input.bytes, cache, now);
-    if (!imported) {
-        replyError(connId, req, syncErrorFor(imported.error().reason));
-        return;
-    }
+        auto& cfg = m_core.configStore();
+        A::Trust::AnchorCache cache(cfg.cscaCacheDir());
+        const auto now =
+            std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        auto imported = A::Trust::importMasterList(input.bytes, cache, now);
+        if (!imported) {
+            replyError(connId, req, syncErrorFor(imported.error().reason));
+            return;
+        }
 
-    // Says what was DONE, never that anything was proved: on a first import no
-    // publisher is established, and a surface rendering "authenticity verified"
-    // over that claims more than the agent measured. The publisher COUNT is
-    // logged rather than served, because the remembered record has no member
-    // that carries it: a key present in the import reply and gone from the
-    // property a moment later would be worse than silence.
-    log::infof("country signing anchors imported: anchors={} issuers={} publishers={} established={}",
-               imported->anchorCount, imported->issuerCount, imported->signers.size(),
-               std::ranges::count_if(imported->signers,
-                                     [](const A::Trust::AcceptedSigner& s) { return s.identityEstablished; }));
+        // Says what was DONE, never that anything was proved: on a first import no
+        // publisher is established, and a surface rendering "authenticity verified"
+        // over that claims more than the agent measured. The publisher COUNT is
+        // logged rather than served, because the remembered record has no member
+        // that carries it: a key present in the import reply and gone from the
+        // property a moment later would be worse than silence.
+        log::infof("country signing anchors imported: anchors={} issuers={} publishers={} established={}",
+                   imported->anchorCount, imported->issuerCount, imported->signers.size(),
+                   std::ranges::count_if(imported->signers,
+                                         [](const A::Trust::AcceptedSigner& s) { return s.identityEstablished; }));
 
-    // The reply tells THIS client what it installed; the record is what tells
-    // the next client to connect, which has no reply to read. The store
-    // persists it and notifies observers itself.
-    const A::Config::CscaAnchorState recorded = detail::recordedStateFor(*imported);
-    cfg.recordCscaAnchorState(recorded);
+        // The reply tells THIS client what it installed; the record is what tells
+        // the next client to connect, which has no reply to read. The store
+        // persists it and notifies observers itself.
+        const A::Config::CscaAnchorState recorded = detail::recordedStateFor(*imported);
+        cfg.recordCscaAnchorState(recorded);
 
-    A::Wire::CscaAnchorStateReply reply;
-    reply.anchors = recorded.anchors;
-    reply.issuers = recorded.issuers;
-    reply.replayRefusalActive = recorded.replayRefusalActive;
-    reply.signer = recorded.signer.empty() ? std::nullopt : std::optional<std::string>{recorded.signer};
-    reply.signerPinned = recorded.signerPinned;
-    reply.acceptedAt = recorded.acceptedAt;
-    reply.signedAt = recorded.signedAt;
-    reply.origin = recorded.origin;
-    sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
+        A::Wire::CscaAnchorStateReply reply;
+        reply.anchors = recorded.anchors;
+        reply.issuers = recorded.issuers;
+        reply.replayRefusalActive = recorded.replayRefusalActive;
+        reply.signer = recorded.signer.empty() ? std::nullopt : std::optional<std::string>{recorded.signer};
+        reply.signerPinned = recorded.signerPinned;
+        reply.acceptedAt = recorded.acceptedAt;
+        reply.signedAt = recorded.signedAt;
+        reply.origin = recorded.origin;
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
+    });
 }
 
 void SocketFrontend::handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t req, const A::CallerToken& caller)
@@ -1787,7 +1796,7 @@ void SocketFrontend::handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t
     // Human confirmation, same as a trust-tier config write. This one destroys
     // rather than replaces, and there is nothing to read it back from
     // afterwards, so the reply below is the only account of what went.
-    confirmThenApply(connId, req, "CscaAnchorState", caller, [this, connId, req] {
+    confirmThenApply(connId, req, "CscaAnchorState", caller, TrustChange::ForgetAnchors, [this, connId, req] {
         auto& cfg = m_core.configStore();
         const auto forgotten = A::Trust::forgetCscaAnchors(cfg);
         if (!forgotten) {
@@ -1834,7 +1843,7 @@ void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, 
         return;
     }
     if (*mut == A::Config::Mutability::DbusMutableTrust) {
-        confirmThenApply(connId, req, msg.key, caller,
+        confirmThenApply(connId, req, msg.key, caller, TrustChange::Reset,
                          [this, connId, req, msg] { applyConfigReset(connId, req, msg); });
         return;
     }
@@ -1859,12 +1868,12 @@ void SocketFrontend::applyConfigReset(std::uint64_t connId, std::uint64_t req, c
 // connection registry: sendTo walks m_connections with no lock and is
 // loop-thread-only, so replying from the worker would be a data race.
 void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
-                                      const A::CallerToken& caller, std::function<void()> apply)
+                                      const A::CallerToken& caller, TrustChange what, std::function<void()> apply)
 {
     wire::ConfirmAction ask;
     ask.kind = "configure_trust";
     ask.title = "Confirm trust change";
-    ask.description = describeTrustChange(key);
+    ask.description = describeTrustChange(key, what);
     // The CLAIMED caller identity. The public SecTask path cannot verify it,
     // so nothing here may word it as verified -- the human is deciding, and a
     // name presented as proven would be doing the deciding for them.
@@ -1887,8 +1896,18 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
     });
 }
 
-std::string SocketFrontend::describeTrustChange(const std::string& key)
+std::string SocketFrontend::describeTrustChange(const std::string& key, TrustChange what)
 {
+    switch (what) {
+    case TrustChange::ImportAnchors:
+        return "Install the country signing certificates from the offered file, replacing the ones this "
+               "computer checks passports against.";
+    case TrustChange::ForgetAnchors:
+        return "Remove every country signing certificate this computer holds.";
+    case TrustChange::SetValue:
+    case TrustChange::Reset:
+        break;
+    }
     if (key == "TsaUrls") {
         return "Change the timestamping authorities this computer will use.";
     }

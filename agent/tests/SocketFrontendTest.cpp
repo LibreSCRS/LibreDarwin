@@ -1282,6 +1282,7 @@ TEST(SocketFrontend, RefusedImportNeverAdvancesTheDescriptorItWasHanded)
 TEST(SocketFrontend, AnAuthorizedImportDoesAdvanceTheDescriptor)
 {
     Rig rig; // allow-all
+    confirmEverything(rig);
 
     const int fd = makeInputFile(std::string(8192, '\x30'));
     ASSERT_GE(fd, 0);
@@ -1507,6 +1508,26 @@ TEST(SocketFrontend, ForgetCscaAnchorsHoldingNothingIsNotAFailure)
     EXPECT_EQ(errName(reply), "") << "holding nothing was reported as a failure";
     ASSERT_NE(reply.find("hadPinnedSigner"), nullptr);
     EXPECT_FALSE(reply.find("hadPinnedSigner")->asBool().value_or(true));
+}
+
+// The sentence the person reads before the anchors go. Import and forget share
+// a config key, so the key cannot say which of the two is being asked for -- and
+// a forget carrying the import's sentence, or the generic one, refuses and
+// clears exactly the same way.
+TEST(SocketFrontend, TheConfirmationForForgettingNamesWhatWillBeRemoved)
+{
+    Rig rig;
+    wire::ConfirmAction seen;
+    rig.frontend->setConfirmProvider([&seen](const wire::ConfirmAction& a) {
+        seen = a;
+        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
+    });
+
+    static_cast<void>(rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{}));
+
+    EXPECT_EQ(seen.kind, "configure_trust");
+    EXPECT_EQ(seen.artifact, "CscaAnchorState");
+    EXPECT_EQ(seen.description, "Remove every country signing certificate this computer holds.");
 }
 
 TEST(SocketFrontend, ARefusedCallerForgetsNothing)
