@@ -1,42 +1,61 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// AppKit credential window. An NSAlert with a NSSecureTextField accessory, run
-// modally on the main thread. The secret is read out of the field before the
-// window is dismissed, then the field is scrubbed. The change variant stacks
-// three secure fields (current / new / confirm) behind the same discipline.
+// AppKit credential surface: ONE non-modal floating panel per prompt, held in a
+// registry keyed by the prompt id. Each panel carries its own entry budget as a
+// visible M:SS countdown, answers Timeout when the budget runs out, and can be
+// closed by the id it answers to (or swept together with every other panel).
+//
+// Nothing here runs a modal loop. The calling worker waits on its panel's
+// semaphore while the main thread keeps running, so a second prompt stands
+// beside the first instead of queueing behind it, and a dismissal arriving on
+// another connection is served while both are up. No panel activates this
+// process: a window that took the foreground would collect one card's secret
+// into another card's field.
+//
+// The secrets are read out of the fields BEFORE the panel comes down
+// (read-before-hide) and the fields are scrubbed on every outcome.
 #include "PromptWindow.h"
 
 #import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
 
-namespace LibreSCRS::Darwin {
-
-struct PromptWindow::Impl
-{
-    NSAlert* activeAlert{nil};  // non-nil while a modal is up (main-thread only)
-    std::string activePromptId; // the id that modal answers to (main-thread only)
-};
-
-PromptWindow::PromptWindow() : m_impl(new Impl) {}
-
-PromptWindow::~PromptWindow()
-{
-    delete m_impl;
-}
-
 namespace {
+
+namespace wire = LibreSCRS::Darwin::wire;
+
 NSString* nsstr(const std::string& s)
 {
     return [NSString stringWithUTF8String:s.c_str()];
 }
+
+// What one panel carries across the thread boundary: the answer the main thread
+// fills in before it signals, plus the change flow's OK-gate bounds (unused by
+// the single-secret panel). Owned by the panel; the waiting worker reads it
+// only AFTER the semaphore is signalled and MOVES the secrets out, so no copy
+// stays behind in the panel.
+struct PanelState
+{
+    // No prompt id here: the registry key IS the id, and every question asked
+    // about a panel's address is asked of the registry. A second copy would be
+    // a second answer to maintain.
+    wire::PromptReplyStatus status{wire::PromptReplyStatus::Cancelled};
+    std::vector<std::uint8_t> primary;   // the single secret / the CURRENT credential
+    std::vector<std::uint8_t> secondary; // the NEW credential (change flow only)
+    std::uint32_t primaryMinLength{0};
+    std::uint32_t primaryMaxLength{0};
+    std::uint32_t newMinLength{0};
+    std::uint32_t newMaxLength{0};
+};
 
 // Recognised `lastError` msgKey (mirrors
 // LibreSCRS::Auth::ErrorKeys::preReadAuthFailed().key on the agent's LM
@@ -66,8 +85,8 @@ NSString* retryErrorLine(std::uint32_t attempt, const std::string& lastError)
 }
 
 // Shared informative-text chrome (retry error / description / requester /
-// artifact) — identical for the single-secret and change prompts;
-// `retryError` is nil for the change prompt (RequestSecrets carries no
+// artifact) — identical for the single-secret and change panels;
+// `retryError` is nil for the change panel (RequestSecrets carries no
 // retry context -- change_pin is never a CAN/MRZ retry) and shown FIRST,
 // immediately above the rest of the informative text, mirroring the Linux
 // PromptDialog placing its retry label above the input widget.
@@ -100,7 +119,7 @@ NSString* informativeText(const std::string& description, const std::string& req
     return info;
 }
 
-// The change modal's OK gate, pure so it is testable by inspection: current
+// The change panel's OK gate, pure so it is testable by inspection: current
 // within the primary bounds AND new within the new bounds AND confirm equal
 // to new. Lengths are UTF-8 byte counts — the unit that crosses the wire. A
 // zero bound is "unset" on the wire (the request codec omits zero fields):
@@ -112,11 +131,10 @@ bool withinBounds(std::size_t len, std::uint32_t minLen, std::uint32_t maxLen)
     return len >= minLen && (maxLen == 0 || len <= maxLen);
 }
 
-bool changeInputsAcceptable(const wire::RequestSecrets& req, std::size_t currentLen, std::size_t newLen,
-                            bool confirmMatchesNew)
+bool changeInputsAcceptable(const PanelState& state, std::size_t currentLen, std::size_t newLen, bool confirmMatchesNew)
 {
-    return withinBounds(currentLen, req.primaryMinLength, req.primaryMaxLength) &&
-           withinBounds(newLen, req.newMinLength, req.newMaxLength) && confirmMatchesNew;
+    return withinBounds(currentLen, state.primaryMinLength, state.primaryMaxLength) &&
+           withinBounds(newLen, state.newMinLength, state.newMaxLength) && confirmMatchesNew;
 }
 
 std::size_t utf8Length(NSString* value)
@@ -124,209 +142,665 @@ std::size_t utf8Length(NSString* value)
     return static_cast<std::size_t>([value lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
 }
 
-// One captioned secure-entry row inside the change modal's accessory view;
-// `y` is the FIELD's bottom edge (AppKit origin is bottom-left, so rows are
-// laid out bottom-up: caption 16 pt above a 24 pt field, 2 pt apart).
-NSSecureTextField* addSecureRow(NSView* accessory, NSString* caption, CGFloat y, CGFloat width)
+// The bytes a secure field holds right now. The caller scrubs the field.
+std::vector<std::uint8_t> readSecret(NSSecureTextField* field)
 {
-    NSTextField* label = [NSTextField labelWithString:caption];
-    label.frame = NSMakeRect(0, y + 26, width, 16);
-    label.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
-    [accessory addSubview:label];
-    NSSecureTextField* field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, y, width, 24)];
-    [accessory addSubview:field];
-    return field;
+    const char* utf8 = field.stringValue.UTF8String;
+    if (utf8 == nullptr) {
+        return {};
+    }
+    const auto* bytes = reinterpret_cast<const std::uint8_t*>(utf8);
+    return std::vector<std::uint8_t>(bytes, bytes + std::strlen(utf8));
 }
+
+// Monotonic seconds: the countdown the holder is watching must not jump because
+// the wall clock moved under it.
+double monotonicSeconds()
+{
+    return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+
+// The remaining entry time as M:SS behind a stopwatch glyph — language-neutral
+// by design and rendered exactly as the Linux dialog renders it: LibreDarwin has
+// no localisation at all, so a worded countdown would read identically on only
+// one of the two platforms.
+NSString* formatRemaining(double remaining)
+{
+    const long total = remaining > 0 ? static_cast<long>(remaining) : 0;
+    return [NSString stringWithFormat:@"⏱ %ld:%02ld", total / 60, total % 60];
+}
+
+// The credential this prompt asks for, in the title bar (which names the window
+// in the window list) and in the panel's own heading line.
+NSString* windowTitleForKind(wire::PromptKind kind)
+{
+    switch (kind) {
+    case wire::PromptKind::Can:
+        return @"Card Access Number";
+    case wire::PromptKind::Mrz:
+        return @"Machine-Readable Zone";
+    case wire::PromptKind::Pin:
+        break;
+    }
+    return @"PIN";
+}
+
+NSString* promptHeading(const wire::PromptRequest& req)
+{
+    if (!req.title.empty()) {
+        return nsstr(req.title);
+    }
+    switch (req.kind) {
+    case wire::PromptKind::Can:
+        return @"Enter your Card Access Number (CAN)";
+    case wire::PromptKind::Mrz:
+        return @"Enter your Machine-Readable Zone (MRZ)";
+    case wire::PromptKind::Pin:
+        break;
+    }
+    return @"Enter your PIN";
+}
+
 } // namespace
+
+// One non-modal credential panel: its floating window, its secure fields, its
+// countdown and the semaphore the calling worker waits on. Every method is
+// main-thread only, except `done` and `state`, which the worker reads after the
+// semaphore is signalled — by which time the panel has stopped touching them.
+//
+// The view ivars are NOT owned: the window's content view holds them, and the
+// window is released last, in dealloc. What this object does own is the window,
+// the semaphore and the state.
+@interface LibreSCRSPromptPanel : NSObject <NSWindowDelegate, NSTextFieldDelegate>
+// Called once, on the main thread, when the panel has answered — with the panel
+// itself, so the registry can drop it. It never captures the panel, so there is
+// no ownership cycle to break.
+@property(copy) void (^onFinished)(LibreSCRSPromptPanel*);
+- (instancetype)initWithWindowTitle:(NSString*)windowTitle
+                            heading:(NSString*)heading
+                               info:(NSString*)info
+                         changeFlow:(BOOL)isChangeFlow NS_DESIGNATED_INITIALIZER;
+// There is no such thing as a panel without a window, a semaphore and a state:
+// a bare init would hand out an object whose every accessor returns nothing.
+- (instancetype)init NS_UNAVAILABLE;
+- (void)showWithDeadlineMs:(std::uint32_t)deadlineMs cascadeStep:(NSInteger)cascadeStep soleStanding:(BOOL)soleStanding;
+- (void)refreshOkGate;
+- (void)finishWithStatus:(wire::PromptReplyStatus)status;
+- (dispatch_semaphore_t)done;
+- (PanelState*)state;
+@end
+
+@implementation LibreSCRSPromptPanel {
+    NSPanel* panel;
+    NSSecureTextField* primaryField;
+    NSSecureTextField* newField;     // change flow only, nil otherwise
+    NSSecureTextField* confirmField; // change flow only, nil otherwise
+    NSTextField* countdownLabel;
+    NSButton* okButton;
+    NSTimer* deadlineTimer;  // held by the run loop while armed
+    NSTimer* countdownTimer; // held by the run loop while armed
+    double budgetSeconds;
+    double shownAtSeconds;
+    dispatch_semaphore_t doneSemaphore;
+    PanelState* panelState;
+    BOOL changeFlow;
+    BOOL finished;
+}
+
+- (void)addWrappingLabel:(NSTextField*)label toStack:(NSStackView*)stack width:(CGFloat)width
+{
+    label.usesSingleLineMode = NO;
+    label.maximumNumberOfLines = 0;
+    label.lineBreakMode = NSLineBreakByWordWrapping;
+    label.preferredMaxLayoutWidth = width;
+    [stack addArrangedSubview:label];
+    [[label.widthAnchor constraintEqualToConstant:width] setActive:YES];
+}
+
+- (NSSecureTextField*)addSecureRowWithCaption:(NSString*)caption toStack:(NSStackView*)stack width:(CGFloat)width
+{
+    if (caption.length != 0) {
+        NSTextField* captionLabel = [NSTextField labelWithString:caption];
+        captionLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+        [stack addArrangedSubview:captionLabel];
+    }
+    NSSecureTextField* field = [[[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, width, 24)] autorelease];
+    field.delegate = self;
+    [stack addArrangedSubview:field];
+    [[field.widthAnchor constraintEqualToConstant:width] setActive:YES];
+    return field; // owned by the stack from here on
+}
+
+- (instancetype)initWithWindowTitle:(NSString*)windowTitle
+                            heading:(NSString*)heading
+                               info:(NSString*)info
+                         changeFlow:(BOOL)isChangeFlow
+{
+    self = [super init];
+    if (self == nil) {
+        return nil;
+    }
+    panelState = new PanelState();
+    doneSemaphore = dispatch_semaphore_create(0);
+    changeFlow = isChangeFlow;
+
+    const CGFloat contentWidth = 320;
+    NSStackView* stack = [[[NSStackView alloc] initWithFrame:NSZeroRect] autorelease];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.alignment = NSLayoutAttributeLeading;
+    stack.spacing = 8;
+    stack.edgeInsets = NSEdgeInsetsMake(18, 18, 18, 18);
+
+    if (heading.length != 0) {
+        NSTextField* headingLabel = [NSTextField labelWithString:heading];
+        headingLabel.font = [NSFont boldSystemFontOfSize:[NSFont systemFontSize]];
+        [self addWrappingLabel:headingLabel toStack:stack width:contentWidth];
+    }
+    if (info.length != 0) {
+        NSTextField* infoLabel = [NSTextField labelWithString:info];
+        infoLabel.font = [NSFont systemFontOfSize:[NSFont smallSystemFontSize]];
+        [self addWrappingLabel:infoLabel toStack:stack width:contentWidth];
+    }
+
+    if (changeFlow) {
+        primaryField = [self addSecureRowWithCaption:@"Current PIN" toStack:stack width:contentWidth];
+        newField = [self addSecureRowWithCaption:@"New PIN" toStack:stack width:contentWidth];
+        confirmField = [self addSecureRowWithCaption:@"Confirm new PIN" toStack:stack width:contentWidth];
+        primaryField.nextKeyView = newField;
+        newField.nextKeyView = confirmField;
+        confirmField.nextKeyView = primaryField;
+    } else {
+        primaryField = [self addSecureRowWithCaption:nil toStack:stack width:contentWidth];
+    }
+
+    // Created up front and empty: the row is only filled (and the window only
+    // re-fitted around it) when the request actually carries a budget.
+    countdownLabel = [NSTextField labelWithString:@""];
+    countdownLabel.font = [NSFont monospacedDigitSystemFontOfSize:[NSFont smallSystemFontSize]
+                                                           weight:NSFontWeightRegular];
+    countdownLabel.hidden = YES;
+    [stack addArrangedSubview:countdownLabel];
+
+    NSButton* cancelButton = [NSButton buttonWithTitle:@"Cancel" target:self action:@selector(cancelPressed:)];
+    cancelButton.keyEquivalent = @"\033"; // Escape cancels, as the modal's did
+    okButton = [NSButton buttonWithTitle:@"OK" target:self action:@selector(okPressed:)];
+    okButton.keyEquivalent = @"\r"; // the default button: Return in a field answers
+    NSStackView* buttonRow = [[[NSStackView alloc] initWithFrame:NSZeroRect] autorelease];
+    buttonRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    buttonRow.spacing = 8;
+    [buttonRow addView:cancelButton inGravity:NSStackViewGravityTrailing];
+    [buttonRow addView:okButton inGravity:NSStackViewGravityTrailing];
+    [stack addArrangedSubview:buttonRow];
+    [[buttonRow.widthAnchor constraintEqualToConstant:contentWidth] setActive:YES];
+
+    const NSSize fitting = stack.fittingSize;
+    panel = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, fitting.width, fitting.height)
+                                       styleMask:(NSWindowStyleMaskTitled | NSWindowStyleMaskClosable)
+                                         backing:NSBackingStoreBuffered
+                                           defer:NO];
+    panel.title = windowTitle;
+    // Above the person's own windows, because a credential prompt they cannot
+    // see is a credential prompt that expires in silence.
+    panel.level = NSFloatingWindowLevel;
+    // A panel hides itself when its app deactivates unless told otherwise, and
+    // this process is never the active one: without this the prompt would
+    // vanish the moment the person clicked back into their own work.
+    panel.hidesOnDeactivate = NO;
+    panel.releasedWhenClosed = NO; // this object owns the window
+    panel.delegate = self;
+    panel.contentView = stack;
+    [panel setContentSize:fitting];
+    [panel setInitialFirstResponder:primaryField];
+    return self;
+}
+
+- (void)dealloc
+{
+    // Reached only after the answer has been taken: by then the timers are
+    // invalidated, the window is off screen and nothing is waiting.
+    //
+    // Every delegate slot pointing at this object is cleared first. They are all
+    // unretained back-references, and the view hierarchy is torn down by the
+    // window release below — after this object is already half gone.
+    panel.delegate = nil;
+    primaryField.delegate = nil;
+    newField.delegate = nil;
+    confirmField.delegate = nil;
+    [panel release];
+    delete panelState;
+    if (doneSemaphore != nullptr) {
+        dispatch_release(doneSemaphore);
+    }
+    self.onFinished = nil;
+    [super dealloc];
+}
+
+- (dispatch_semaphore_t)done
+{
+    return doneSemaphore;
+}
+
+- (PanelState*)state
+{
+    return panelState;
+}
+
+- (void)renderRemaining
+{
+    countdownLabel.stringValue = formatRemaining(budgetSeconds - (monotonicSeconds() - shownAtSeconds));
+}
+
+- (void)showWithDeadlineMs:(std::uint32_t)deadlineMs cascadeStep:(NSInteger)cascadeStep soleStanding:(BOOL)soleStanding
+{
+    // The budget is a DURATION and it starts HERE, at the moment the window is
+    // shown: what elapses is exactly what the holder sees counting down, and
+    // the time the request spent in transit is not charged to them.
+    shownAtSeconds = monotonicSeconds();
+    if (deadlineMs != 0) { // 0 is "unset" and must never read as an instant expiry
+        budgetSeconds = static_cast<double>(deadlineMs) / 1000.0;
+        countdownLabel.hidden = NO;
+        [self renderRemaining];
+        [panel setContentSize:((NSView*)panel.contentView).fittingSize];
+        deadlineTimer = [NSTimer timerWithTimeInterval:budgetSeconds
+                                                target:self
+                                              selector:@selector(deadlineFired:)
+                                              userInfo:nil
+                                               repeats:NO];
+        countdownTimer = [NSTimer timerWithTimeInterval:1.0
+                                                 target:self
+                                               selector:@selector(countdownFired:)
+                                               userInfo:nil
+                                                repeats:YES];
+        // Common modes, not the default mode alone: a menu or a window drag
+        // puts the main run loop into event-tracking mode, where a default-mode
+        // timer stops firing — the clock must not pause because someone opened
+        // a menu.
+        [[NSRunLoop mainRunLoop] addTimer:deadlineTimer forMode:NSRunLoopCommonModes];
+        [[NSRunLoop mainRunLoop] addTimer:countdownTimer forMode:NSRunLoopCommonModes];
+    }
+
+    [panel center];
+    if (cascadeStep > 0) {
+        // Offset each further panel so two prompts are two visible windows
+        // rather than one hiding the other; wrapped so a long-running helper
+        // does not walk them off the screen.
+        const CGFloat offset = 26 * static_cast<CGFloat>(cascadeStep % 6);
+        const NSRect frame = panel.frame;
+        [panel setFrameOrigin:NSMakePoint(frame.origin.x + offset, frame.origin.y - offset)];
+    }
+    // A new window never steals focus: it is ordered in, and this process never
+    // activates itself. The first panel standing may take the app's key status
+    // so the person can type the moment they turn to it; a later one must not
+    // pull the caret out of the panel they are already answering — that is how
+    // one card's secret ends up in another card's field.
+    if (soleStanding && [NSApp keyWindow] == nil) {
+        [panel makeKeyAndOrderFront:nil];
+    } else {
+        [panel orderFront:nil];
+    }
+}
+
+- (void)refreshOkGate
+{
+    if (!changeFlow) {
+        return;
+    }
+    // Per-role length gating: OK stays disabled until every field passes
+    // (current within the primary bounds, new within the new bounds, confirm
+    // equal to new). The equality check is the confirm entry's ONLY consumer —
+    // its value never leaves the panel.
+    okButton.enabled =
+        changeInputsAcceptable(*panelState, utf8Length(primaryField.stringValue), utf8Length(newField.stringValue),
+                               [confirmField.stringValue isEqualToString:newField.stringValue]);
+}
+
+- (void)finishWithStatus:(wire::PromptReplyStatus)status
+{
+    if (finished) {
+        return; // idempotent: a dismissal can race the person's own answer
+    }
+    finished = YES;
+    // The pool is what makes the residual claim below true: the autoreleased
+    // NSString the plaintext passes through is drained HERE, when this block
+    // ends, and not at some later turn of the run loop.
+    @autoreleasepool {
+        if (status == wire::PromptReplyStatus::Ok) {
+            // Read-before-hide: pull the secrets out of the fields NOW, while
+            // they are still up. Documented residual: the NSSecureTextField /
+            // NSString internals (autoreleased, immutable) cannot be
+            // deterministically zeroed from here; their lifetime is minimised
+            // (this pool) and everything downstream — the reply, the CBOR tree,
+            // the encoded frame — is zeroed after the send
+            // (sendPromptReplyScrubbed).
+            panelState->primary = readSecret(primaryField);
+            if (changeFlow) {
+                panelState->secondary = readSecret(newField);
+            }
+        }
+        panelState->status = status;
+        // Clear EVERY field on EVERY outcome. The confirm entry was never read
+        // into the answer — validation was its only consumer — but its buffer
+        // holds a copy of the new PIN, so its residual is cleared explicitly too.
+        primaryField.stringValue = @"";
+        newField.stringValue = @"";
+        confirmField.stringValue = @"";
+        [deadlineTimer invalidate];
+        deadlineTimer = nil;
+        [countdownTimer invalidate];
+        countdownTimer = nil;
+        [panel orderOut:nil];
+        if (self.onFinished != nil) {
+            self.onFinished(self);
+            self.onFinished = nil; // the registry no longer holds this panel
+        }
+    }
+    // LAST, after every main-thread mutation and after the pool has drained:
+    // the waiting worker reads the answer the moment this returns, and must
+    // never see a half-filled one.
+    dispatch_semaphore_signal(doneSemaphore);
+}
+
+- (void)okPressed:(id)sender
+{
+    (void)sender;
+    [self finishWithStatus:wire::PromptReplyStatus::Ok];
+}
+
+- (void)cancelPressed:(id)sender
+{
+    (void)sender;
+    [self finishWithStatus:wire::PromptReplyStatus::Cancelled];
+}
+
+- (void)deadlineFired:(NSTimer*)timer
+{
+    (void)timer;
+    // The clock took it, not the person: Timeout, never Cancelled.
+    [self finishWithStatus:wire::PromptReplyStatus::Timeout];
+}
+
+- (void)countdownFired:(NSTimer*)timer
+{
+    (void)timer;
+    [self renderRemaining];
+}
+
+- (void)controlTextDidChange:(NSNotification*)note
+{
+    (void)note;
+    [self refreshOkGate];
+}
+
+- (BOOL)windowShouldClose:(NSWindow*)sender
+{
+    (void)sender;
+    // The title bar's close button is the person declining. Answer it here and
+    // order the window out from there; NO keeps AppKit from closing a window
+    // this object still owns.
+    [self finishWithStatus:wire::PromptReplyStatus::Cancelled];
+    return NO;
+}
+
+@end
+
+namespace LibreSCRS::Darwin {
+
+namespace {
+
+// The panels standing right now, keyed by the id their prompt was addressed
+// with. A multimap, not a map: a caller that addresses nothing (the counterpart
+// of the unaddressed dismissal) can have two panels standing under the same
+// empty id, and refusing the second would refuse exactly the concurrency this
+// registry exists for.
+using PanelRegistry = std::multimap<std::string, LibreSCRSPromptPanel*>;
+
+// Run @p block on the main thread and wait for it. Used by the calls that only
+// TOUCH the registry (they never wait for a human), so running inline is the
+// honest answer for a main-thread caller, where dispatch_sync would deadlock.
+// The two calls that wait for an answer refuse the main thread outright rather
+// than come through here.
+void runOnMain(dispatch_block_t block)
+{
+    if ([NSThread isMainThread]) {
+        block();
+        return;
+    }
+    dispatch_sync(dispatch_get_main_queue(), block);
+}
+
+// Which panels a dismissal reaches.
+enum class Sweep : std::uint8_t {
+    // Everything standing (the reset verb).
+    Everything,
+    // The panel the id names, PLUS any panel raised without an id at all: both
+    // sides have to know an address for one to be matched by it, so a panel
+    // that carries none must not be strandable by a dismissal that does. That
+    // matters most for the change panel, which this wire gives no deadline —
+    // an unmatchable id would leave it standing with nothing left to close it.
+    Addressed,
+    // A dismissal that names nothing: the OLDEST unaddressed panel, and only
+    // that one. A caller that knows no ids is cancelling the one prompt it
+    // knows about, not every prompt on the screen.
+    Unaddressed,
+};
+
+// Close the panels the dismissal selects and answer each waiting caller
+// Cancelled; returns how many were closed. Main thread only.
+//
+// The targets are snapshotted first because finishing a panel removes it from
+// the registry through its own completion — iterating and erasing at once would
+// be walking a container while it is being edited.
+std::uint32_t finishPanels(PanelRegistry& panels, Sweep sweep, const std::string& wanted)
+{
+    std::vector<LibreSCRSPromptPanel*> targets;
+    // Registry order is age order among equal keys: a multimap keeps elements
+    // with equivalent keys in insertion order, and the empty key sorts first —
+    // so the first unaddressed panel this loop meets is the oldest one, which
+    // is what Sweep::Unaddressed takes.
+    for (const auto& [promptId, panel] : panels) {
+        bool selected = false;
+        switch (sweep) {
+        case Sweep::Everything:
+            selected = true;
+            break;
+        case Sweep::Addressed:
+            selected = promptId.empty() || promptId == wanted;
+            break;
+        case Sweep::Unaddressed:
+            selected = promptId.empty();
+            break;
+        }
+        if (!selected) {
+            continue;
+        }
+        targets.push_back(panel);
+        if (sweep == Sweep::Unaddressed) {
+            break; // the oldest one only
+        }
+    }
+    for (LibreSCRSPromptPanel* panel : targets) {
+        [panel finishWithStatus:wire::PromptReplyStatus::Cancelled];
+    }
+    return static_cast<std::uint32_t>(targets.size());
+}
+
+} // namespace
+
+struct PromptWindow::Impl
+{
+    PanelRegistry panels; // main-thread only
+    NSInteger cascade{0}; // main-thread only: where on screen the next panel lands
+};
+
+PromptWindow::PromptWindow() : m_impl(new Impl) {}
+
+PromptWindow::~PromptWindow()
+{
+    // Close what is still standing BEFORE the registry goes: every live panel's
+    // completion block holds this Impl, and a panel answered after the delete
+    // would write through a dangling one. The sweep also releases the waiting
+    // callers instead of leaving them blocked on a window nobody can answer.
+    static_cast<void>(dismissAll());
+    delete m_impl;
+}
 
 wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
 {
-    __block wire::PromptReply reply;
-    reply.status = wire::PromptReplyStatus::Error;
+    // This call waits until the panel is answered, and only the main run loop
+    // can answer it: waiting on the main thread would stop the very thread that
+    // has to signal, and the hang would be silent. Fail closed instead.
+    if ([NSThread isMainThread]) {
+        wire::PromptReply refusal;
+        refusal.status = wire::PromptReplyStatus::Error;
+        refusal.userMessage = "prompt requested on the main thread";
+        return refusal;
+    }
     Impl* impl = m_impl;
-
+    __block LibreSCRSPromptPanel* panel = nil;
+    // dispatch_sync, not the inline-on-main helper: the refusal above has
+    // already established that this is not the main thread.
     dispatch_sync(dispatch_get_main_queue(), ^{
       @autoreleasepool {
-          // Cooperative activation (macOS 14+; this repo requires 15+). The
-          // deprecated activateIgnoringOtherApps: force-steal is gone — the
-          // system may defer activation to the frontmost app's cooperation,
-          // which is the supported behavior for an accessory-policy prompter.
-          [NSApp activate];
-          NSAlert* alert = [[NSAlert alloc] init];
-          const char* kindLabel = req.kind == wire::PromptKind::Can   ? "Card Access Number (CAN)"
-                                  : req.kind == wire::PromptKind::Mrz ? "Machine-Readable Zone (MRZ)"
-                                                                      : "PIN";
-          alert.messageText =
-              req.title.empty() ? [NSString stringWithFormat:@"Enter your %s", kindLabel] : nsstr(req.title);
-          alert.informativeText = informativeText(req.description, req.requester, req.artifact, req.artifacts,
-                                                  retryErrorLine(req.attempt, req.lastError));
-          [alert addButtonWithTitle:@"OK"];
-          [alert addButtonWithTitle:@"Cancel"];
-
-          NSSecureTextField* field = [[NSSecureTextField alloc] initWithFrame:NSMakeRect(0, 0, 260, 24)];
-          alert.accessoryView = field;
-          [alert.window setInitialFirstResponder:field];
-
-          impl->activeAlert = alert;
-          impl->activePromptId = req.promptId;
-          const NSModalResponse resp = [alert runModal];
-          impl->activeAlert = nil;
-          impl->activePromptId.clear();
-
-          if (resp == NSAlertFirstButtonReturn) {
-              // Read-before-hide: pull the secret out of the field NOW, then scrub.
-              // Documented residual: the NSSecureTextField/NSString internals
-              // (autoreleased, immutable) cannot be deterministically zeroed from
-              // here; their lifetime is minimised (autoreleasepool around this
-              // block) and everything downstream — reply.secret, the CBOR tree,
-              // the encoded frame — is zeroed after send (sendPromptReplyScrubbed).
-              // The reply itself leaves by explicit move, so the __block byref
-              // storage keeps no unscrubbed copy of the secret.
-              NSString* value = field.stringValue;
-              const char* utf8 = value.UTF8String;
-              const std::size_t len = utf8 != nullptr ? std::strlen(utf8) : 0;
-              reply.status = wire::PromptReplyStatus::Ok;
-              reply.secret.assign(utf8, utf8 + len);
-              field.stringValue = @"";
-          } else {
-              reply.status = wire::PromptReplyStatus::Cancelled;
-          }
+          panel = [[LibreSCRSPromptPanel alloc]
+              initWithWindowTitle:windowTitleForKind(req.kind)
+                          heading:promptHeading(req)
+                             info:informativeText(req.description, req.requester, req.artifact, req.artifacts,
+                                                  retryErrorLine(req.attempt, req.lastError))
+                       changeFlow:NO];
+          const BOOL soleStanding = impl->panels.empty() ? YES : NO;
+          // The registry entry goes in BEFORE the window appears, so a
+          // dismissal that arrives in the same breath finds something to close.
+          // The iterator stays valid until this very panel is erased through
+          // it: a map node outlives every erase but its own.
+          const PanelRegistry::iterator entry = impl->panels.emplace(req.promptId, panel);
+          panel.onFinished = ^(LibreSCRSPromptPanel* answered) {
+            (void)answered;
+            impl->panels.erase(entry);
+          };
+          [panel showWithDeadlineMs:req.deadlineMs cascadeStep:impl->cascade++ soleStanding:soleStanding];
+          // req.altDeadlineMs is the budget of an ALTERNATIVE entry form (the
+          // MRZ a holder may switch to under a CAN prompt). This panel offers
+          // no such switch — one request, one form — so there is no clock here
+          // for it to re-base, and it is deliberately applied nowhere.
       }
     });
-    return std::move(reply);
+
+    // Waiting off the main thread, which keeps running the panel. The semaphore
+    // is signalled only after the main thread has filled the answer in and let
+    // the panel go, so what is read below cannot be half-written.
+    dispatch_semaphore_wait(panel.done, DISPATCH_TIME_FOREVER);
+    PanelState* state = panel.state;
+    wire::PromptReply reply;
+    reply.status = state->status;
+    reply.secret = std::move(state->primary); // MOVED: no copy stays in the panel
+    LibreSCRSPromptPanel* answered = panel;
+    // AppKit objects are deallocated on the main thread, never on this worker.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [answered release];
+    });
+    return reply;
 }
 
 wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets& req)
 {
-    __block wire::MultiPromptReply reply;
-    reply.status = wire::PromptReplyStatus::Error;
     // Fail closed on a flow this window does not implement (`kind` is an open
     // discriminator at the wire layer): no UI, no secrets.
     if (req.kind != "change_pin") {
-        reply.userMessage = "unsupported RequestSecrets kind";
-        return reply;
+        wire::MultiPromptReply refusal;
+        refusal.status = wire::PromptReplyStatus::Error;
+        refusal.userMessage = "unsupported RequestSecrets kind";
+        return refusal;
+    }
+    // Same refusal, same reason, as the single-secret path: a wait on the main
+    // thread is a silent hang, never a prompt.
+    if ([NSThread isMainThread]) {
+        wire::MultiPromptReply refusal;
+        refusal.status = wire::PromptReplyStatus::Error;
+        refusal.userMessage = "prompt requested on the main thread";
+        return refusal;
     }
     Impl* impl = m_impl;
-
+    __block LibreSCRSPromptPanel* panel = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
       @autoreleasepool {
-          // Cooperative activation (macOS 14+; this repo requires 15+). The
-          // deprecated activateIgnoringOtherApps: force-steal is gone — the
-          // system may defer activation to the frontmost app's cooperation,
-          // which is the supported behavior for an accessory-policy prompter.
-          [NSApp activate];
-          NSAlert* alert = [[NSAlert alloc] init];
-          alert.messageText = req.title.empty() ? @"Change your PIN" : nsstr(req.title);
-          // RequestSecrets carries no retry context (change_pin is never a
-          // CAN/MRZ retry) -- nil, same as the single-secret path's
-          // first-ever prompt.
-          // RequestSecrets (change_pin) carries no per-document artifacts list.
-          alert.informativeText = informativeText(req.description, req.requester, req.artifact, {}, nil);
-          [alert addButtonWithTitle:@"OK"];
-          [alert addButtonWithTitle:@"Cancel"];
-
-          const CGFloat width = 260;
-          NSView* accessory = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, 142)];
-          NSSecureTextField* currentField = addSecureRow(accessory, @"Current PIN", 100, width);
-          NSSecureTextField* newField = addSecureRow(accessory, @"New PIN", 50, width);
-          NSSecureTextField* confirmField = addSecureRow(accessory, @"Confirm new PIN", 0, width);
-          currentField.nextKeyView = newField;
-          newField.nextKeyView = confirmField;
-          confirmField.nextKeyView = currentField;
-          alert.accessoryView = accessory;
-          [alert.window setInitialFirstResponder:currentField];
-
-          // Per-role length gating: OK stays disabled until every field
-          // passes changeInputsAcceptable (current within the primary bounds,
-          // new within the new bounds, confirm equal to new). The equality
-          // check is the confirm entry's ONLY consumer — its value never
-          // leaves the window.
-          NSButton* okButton = alert.buttons.firstObject;
-          bool (^inputsAcceptable)(void) = ^{
-            return changeInputsAcceptable(req, utf8Length(currentField.stringValue), utf8Length(newField.stringValue),
-                                          [confirmField.stringValue isEqualToString:newField.stringValue]);
+          panel = [[LibreSCRSPromptPanel alloc]
+              initWithWindowTitle:@"Change PIN"
+                          heading:req.title.empty() ? @"Change your PIN" : nsstr(req.title)
+                             // RequestSecrets carries no retry context (change_pin is never a
+                             // CAN/MRZ retry) and no per-document artifacts list.
+                             info:informativeText(req.description, req.requester, req.artifact, {}, nil)
+                       changeFlow:YES];
+          PanelState* state = panel.state;
+          state->primaryMinLength = req.primaryMinLength;
+          state->primaryMaxLength = req.primaryMaxLength;
+          state->newMinLength = req.newMinLength;
+          state->newMaxLength = req.newMaxLength;
+          [panel refreshOkGate];
+          const BOOL soleStanding = impl->panels.empty() ? YES : NO;
+          const PanelRegistry::iterator entry = impl->panels.emplace(req.promptId, panel);
+          panel.onFinished = ^(LibreSCRSPromptPanel* answered) {
+            (void)answered;
+            impl->panels.erase(entry);
           };
-          okButton.enabled = inputsAcceptable();
-          NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
-          NSMutableArray<id>* observers = [NSMutableArray array];
-          for (NSSecureTextField* field in @[ currentField, newField, confirmField ]) {
-              [observers addObject:[center addObserverForName:NSControlTextDidChangeNotification
-                                                       object:field
-                                                        queue:nil
-                                                   usingBlock:^(NSNotification* note) {
-                                                     (void)note;
-                                                     okButton.enabled = inputsAcceptable();
-                                                   }]];
-          }
-
-          impl->activeAlert = alert;
-          impl->activePromptId = req.promptId;
-          const NSModalResponse resp = [alert runModal];
-          impl->activeAlert = nil;
-          impl->activePromptId.clear();
-          for (id token in observers) {
-              [center removeObserver:token];
-          }
-
-          if (resp == NSAlertFirstButtonReturn) {
-              // Read-before-hide: pull BOTH secrets out of their fields NOW,
-              // then scrub. Documented residual: the NSSecureTextField/
-              // NSString internals (autoreleased, immutable) cannot be
-              // deterministically zeroed from here; their lifetime is
-              // minimised (autoreleasepool around this block) and everything
-              // downstream — reply.primary/reply.secondary, the CBOR tree,
-              // the encoded frame — is zeroed after send
-              // (sendPromptReplyScrubbed). The reply itself leaves by explicit
-              // move, so the __block byref storage keeps no unscrubbed copies.
-              NSString* currentValue = currentField.stringValue;
-              const char* currentUtf8 = currentValue.UTF8String;
-              const std::size_t currentLen = currentUtf8 != nullptr ? std::strlen(currentUtf8) : 0;
-              NSString* newValue = newField.stringValue;
-              const char* newUtf8 = newValue.UTF8String;
-              const std::size_t newLen = newUtf8 != nullptr ? std::strlen(newUtf8) : 0;
-              reply.status = wire::PromptReplyStatus::Ok;
-              reply.primary.assign(currentUtf8, currentUtf8 + currentLen);
-              reply.secondary.assign(newUtf8, newUtf8 + newLen);
-          } else {
-              reply.status = wire::PromptReplyStatus::Cancelled;
-          }
-          // Clear ALL THREE fields after the read, on BOTH outcomes. The
-          // confirm entry was never read into the reply — validation was its
-          // only consumer — but its buffer holds a copy of the new PIN, so
-          // its residual is cleared explicitly too.
-          currentField.stringValue = @"";
-          newField.stringValue = @"";
-          confirmField.stringValue = @"";
+          // RequestSecrets carries no deadline on this wire, so the change
+          // panel stands until it is answered or dismissed — a clock it was
+          // never given must not be invented here.
+          [panel showWithDeadlineMs:0 cascadeStep:impl->cascade++ soleStanding:soleStanding];
       }
     });
-    return std::move(reply);
+
+    dispatch_semaphore_wait(panel.done, DISPATCH_TIME_FOREVER);
+    PanelState* state = panel.state;
+    wire::MultiPromptReply reply;
+    reply.status = state->status;
+    reply.primary = std::move(state->primary);
+    reply.secondary = std::move(state->secondary);
+    LibreSCRSPromptPanel* answered = panel;
+    dispatch_async(dispatch_get_main_queue(), ^{
+      [answered release];
+    });
+    return reply;
 }
 
 void PromptWindow::dismiss(const std::string& promptId)
 {
     Impl* impl = m_impl;
     const std::string wanted = promptId;
-    // GCD main-queue blocks are NOT drained while [NSAlert runModal] spins the
-    // modal run loop (NSModalPanelRunLoopMode excludes the common-modes source
-    // that services the main queue), so a dispatch_async(main) abort would only
-    // run AFTER the modal ends — too late by definition. Enqueue directly on
-    // the main CFRunLoop in the modal mode (plus common modes for the no-modal
-    // case) and wake it. The block is idempotent: activeAlert is nil once the
-    // modal ended, so double-scheduling across modes is harmless.
-    void (^abortBlock)(void) = ^{
-      if (impl->activeAlert == nil) {
-          return;
+    // async, never sync: this runs inline on the server's serial queue, which
+    // must not block. With no modal loop left anywhere, a main-queue block is
+    // drained on the next turn of the run loop rather than after a modal ends.
+    dispatch_async(dispatch_get_main_queue(), ^{
+      @autoreleasepool {
+          static_cast<void>(finishPanels(impl->panels, wanted.empty() ? Sweep::Unaddressed : Sweep::Addressed, wanted));
       }
-      // Addressed when both sides know the address. This window has no
-      // deadline of its own yet, so an unmatchable id must not strand it.
-      if (wanted.empty() || impl->activePromptId.empty() || impl->activePromptId == wanted) {
-          [NSApp abortModal]; // runModal returns != FirstButton -> Cancelled
+    });
+}
+
+std::uint32_t PromptWindow::dismissAll()
+{
+    Impl* impl = m_impl;
+    __block std::uint32_t closed = 0;
+    // Synchronous, unlike dismiss: the caller answers with the COUNT, and a
+    // count reported before the sweep would be a guess.
+    runOnMain(^{
+      @autoreleasepool {
+          closed = finishPanels(impl->panels, Sweep::Everything, std::string());
       }
-    };
-    CFRunLoopRef mainLoop = CFRunLoopGetMain();
-    CFRunLoopPerformBlock(mainLoop, (__bridge CFStringRef)NSModalPanelRunLoopMode, abortBlock);
-    CFRunLoopPerformBlock(mainLoop, kCFRunLoopCommonModes, abortBlock);
-    CFRunLoopWakeUp(mainLoop);
+    });
+    return closed;
+}
+
+std::vector<std::string> PromptWindow::liveIds() const
+{
+    Impl* impl = m_impl;
+    __block std::vector<std::string> ids;
+    runOnMain(^{
+      for (const auto& [promptId, panel] : impl->panels) {
+          static_cast<void>(panel);
+          ids.push_back(promptId);
+      }
+    });
+    return ids;
 }
 
 } // namespace LibreSCRS::Darwin
