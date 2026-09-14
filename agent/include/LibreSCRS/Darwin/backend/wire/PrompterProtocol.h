@@ -271,6 +271,11 @@ struct ConfirmReply
 // ResetDone (prompter -> agent): the answer to Reset, saying how many windows
 // it actually closed. The count is what separates "there was nothing standing"
 // from "the helper ignored the verb", which is otherwise the same silence.
+// Alone among the replies it exposes no protocolVersion reader, and needs none:
+// the encoder stamps the version onto this message like every other, but a
+// helper old enough to be refused on it is one that does not know the verb and
+// therefore answers nothing at all -- so the only ResetDone there is to read a
+// version off already came from a helper new enough to have one.
 struct ResetDone
 {
     std::uint32_t closed{0};

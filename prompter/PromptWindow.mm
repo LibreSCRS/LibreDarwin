@@ -93,7 +93,11 @@ NSString* retryErrorLine(std::uint32_t attempt, const std::string& lastError)
         return localized("prompter_retry_generic", "The value you entered was not accepted. Please try again.");
     }
     if (lastError == kErrorPreReadAuthFailed) {
-        return localized(kErrorPreReadAuthFailed, "The value you entered was not accepted. Please try again.");
+        // The fallback is the CORE's own English for this key, byte for byte,
+        // not a second sentence of our own: the catalogue carries that one, so
+        // a generic retry line here would show a bundled holder a different
+        // sentence than an unbundled development run of the same code.
+        return localized(kErrorPreReadAuthFailed, "Card authentication failed before reading could begin.");
     }
     return localized("prompter_retry_rejected", "Your previous entry was not accepted. Please try again.");
 }

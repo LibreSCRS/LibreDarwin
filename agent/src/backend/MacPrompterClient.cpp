@@ -58,6 +58,10 @@ Agent::Wire::UniqueFd connectPrompter(const std::string& path)
 // thing the answer adds is the COUNT -- which separates "nothing was standing"
 // from "the helper ignored the verb". Worth a short wait, not a long one.
 constexpr int kResetReplyBudgetMs = 500;
+// The whole budget is packed into a timeval's MICROSECOND field alone, with
+// tv_sec left at 0; a budget of a second or more would be silently truncated
+// there rather than rounded.
+static_assert(kResetReplyBudgetMs < 1000, "the reset budget is packed into tv_usec alone, so it must stay sub-second");
 
 // The floor under the receive timeout below. SO_RCVTIMEO of {0, 0} is not
 // "expire at once" on this platform -- it is the DEFAULT, which is no timeout

@@ -801,13 +801,6 @@ public:
 
     FakeResetPrompter(std::string path, std::optional<wire::ResetDone> reply) : m_path(std::move(path)), m_reply(reply)
     {
-        m_listen = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        sockaddr_un addr{};
-        addr.sun_family = AF_UNIX;
-        std::strncpy(addr.sun_path, m_path.c_str(), sizeof(addr.sun_path) - 1);
-        ::unlink(m_path.c_str());
-        EXPECT_EQ(::bind(m_listen, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
-        EXPECT_EQ(::listen(m_listen, 4), 0);
         listenOn();
     }
     FakeResetPrompter(std::string path, HeaderThenStall) : m_path(std::move(path)), m_truncate(true)
