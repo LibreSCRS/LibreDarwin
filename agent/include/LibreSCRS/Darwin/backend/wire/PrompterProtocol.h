@@ -335,14 +335,32 @@ void sendConfirmReply(int connFd, const ConfirmReply& reply) noexcept;
 void sendResetDone(int connFd, const ResetDone& reply) noexcept;
 
 // --- display -----------------------------------------------------------------
+// What a batch-sign consent list comes to: the listed names, and how many the
+// cap left out.
+struct UntrustedArtifactList
+{
+    // One "  <bullet> <name>" line per listed name, newline-separated, with no
+    // leading and no trailing newline. Empty when there is nothing to list.
+    std::string block;
+    // How many names the cap left out. Zero when every name is listed. It is a
+    // COUNT rather than a rendered sentence because the sentence around it is a
+    // word in the holder's language, and this layer has no catalogue.
+    std::size_t omitted{0};
+};
+
 // Render the UNTRUSTED per-document display names of a batch-sign consent
-// (PromptRequest::artifacts) into a plain, inert block for the prompt window,
+// (PromptRequest::artifacts) into a plain, inert list for the prompt window,
 // shown BELOW the trusted "Requested by" framing. Each name is neutralized --
 // control characters, including the newlines a crafted filename could use to
 // forge a line that mimics the agent-vouched chrome, become spaces -- and elided
 // to a bounded, UTF-8-valid length. At most @p maxItems (0 = unlimited) names
-// are listed, with a "(+N more)" tail. An empty names list yields an empty
-// string (no batch, nothing to show).
-[[nodiscard]] std::string formatUntrustedArtifactList(const std::vector<std::string>& names, std::size_t maxItems);
+// are listed; the rest are counted in `omitted`. An empty names list yields an
+// empty block and nothing omitted (no batch, nothing to show).
+//
+// No prose of any kind comes out of here: the heading above the list and the
+// sentence that says how many were left out are words the holder reads in their
+// own language, and the window takes both from the application's catalogue.
+[[nodiscard]] UntrustedArtifactList formatUntrustedArtifactList(const std::vector<std::string>& names,
+                                                                std::size_t maxItems);
 
 } // namespace LibreSCRS::Darwin::wire

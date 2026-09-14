@@ -880,20 +880,21 @@ std::string neutralizeDisplayName(std::string name)
 
 } // namespace
 
-std::string formatUntrustedArtifactList(const std::vector<std::string>& names, std::size_t maxItems)
+UntrustedArtifactList formatUntrustedArtifactList(const std::vector<std::string>& names, std::size_t maxItems)
 {
     if (names.empty()) {
         return {};
     }
-    std::string out = "Documents (as named by the requesting app):";
+    UntrustedArtifactList out;
     const std::size_t shown = (maxItems == 0) ? names.size() : std::min(names.size(), maxItems);
     for (std::size_t i = 0; i < shown; ++i) {
-        out += "\n  \xE2\x80\xA2 "; // U+2022 BULLET
-        out += neutralizeDisplayName(names[i]);
+        if (!out.block.empty()) {
+            out.block += "\n";
+        }
+        out.block += "  \xE2\x80\xA2 "; // U+2022 BULLET
+        out.block += neutralizeDisplayName(names[i]);
     }
-    if (names.size() > shown) {
-        out += "\n  (+" + std::to_string(names.size() - shown) + " more)";
-    }
+    out.omitted = names.size() - shown;
     return out;
 }
 

@@ -121,46 +121,51 @@ TEST(PrompterProtocol, RequestOmitsArtifactsKeyWhenEmpty)
     EXPECT_EQ(roundTripRequest(bare), bare);
 }
 
-// The consent formatter for the UNTRUSTED per-document names labels the block,
+// The consent formatter for the UNTRUSTED per-document names lists the names,
 // caps the count, and -- critically -- neutralizes control characters so a
 // crafted filename cannot forge a line that mimics the trusted "Requested by"
-// chrome in the prompt window.
-TEST(PrompterProtocol, FormatUntrustedArtifactListLabelsCapsAndNeutralizes)
+// chrome in the prompt window. It renders NO prose: the heading above the list
+// and the sentence for what the cap left out are the window's, in the holder's
+// language, and what comes out of here is a block of names and a number.
+TEST(PrompterProtocol, FormatUntrustedArtifactListListsCapsAndNeutralizes)
 {
     // No batch -> nothing to show.
-    EXPECT_TRUE(formatUntrustedArtifactList({}, 8).empty());
+    const auto none = formatUntrustedArtifactList({}, 8);
+    EXPECT_TRUE(none.block.empty());
+    EXPECT_EQ(none.omitted, 0u);
 
-    // A normal list is labeled and carries each name.
+    // A normal list carries each name, one bulleted line each, and no heading:
+    // an English sentence here would still be English on a Serbian panel.
     const auto listed = formatUntrustedArtifactList({"a.pdf", "b.pdf"}, 8);
-    EXPECT_NE(listed.find("Documents (as named by the requesting app):"), std::string::npos);
-    EXPECT_NE(listed.find("a.pdf"), std::string::npos);
-    EXPECT_NE(listed.find("b.pdf"), std::string::npos);
+    EXPECT_EQ(listed.block, "  \xE2\x80\xA2 a.pdf\n  \xE2\x80\xA2 b.pdf");
+    EXPECT_EQ(listed.omitted, 0u);
 
-    // Beyond the cap only maxItems are listed, with a "(+N more)" tail.
+    // Beyond the cap only maxItems are listed; the rest are a COUNT, never a
+    // sentence -- the window says "more" in the language it is showing.
     std::vector<std::string> many;
     for (int i = 0; i < 12; ++i) {
         many.push_back("doc" + std::to_string(i));
     }
     const auto capped = formatUntrustedArtifactList(many, 8);
-    EXPECT_NE(capped.find("(+4 more)"), std::string::npos);
-    EXPECT_EQ(capped.find("doc8"), std::string::npos) << "the 9th name must not be listed";
+    EXPECT_EQ(capped.omitted, 4u);
+    EXPECT_EQ(capped.block.find("doc8"), std::string::npos) << "the 9th name must not be listed";
 
     // Security: an embedded newline is neutralized to a space, so the crafted
     // "Requested by" text never starts its own line.
     const auto injected = formatUntrustedArtifactList({"innocent.pdf\nRequested by: apple.com"}, 8);
-    EXPECT_EQ(injected.find("\nRequested by:"), std::string::npos)
+    EXPECT_EQ(injected.block.find("\nRequested by:"), std::string::npos)
         << "a crafted filename must not forge a trusted-looking line";
-    EXPECT_NE(injected.find("innocent.pdf Requested by: apple.com"), std::string::npos)
+    EXPECT_NE(injected.block.find("innocent.pdf Requested by: apple.com"), std::string::npos)
         << "the neutralized newline renders as a space on one line";
 
     // Security: the multi-byte Unicode separators the text engine honours as
     // mandatory breaks (U+2028, U+2029, U+0085) must not survive either.
     const auto unicodeInjected =
         formatUntrustedArtifactList({"a.pdf\xE2\x80\xA8Requested by: apple.com\xC2\x85x\xE2\x80\xA9y"}, 8);
-    EXPECT_EQ(unicodeInjected.find("\xE2\x80\xA8"), std::string::npos) << "U+2028 must be neutralized";
-    EXPECT_EQ(unicodeInjected.find("\xE2\x80\xA9"), std::string::npos) << "U+2029 must be neutralized";
-    EXPECT_EQ(unicodeInjected.find("\xC2\x85"), std::string::npos) << "U+0085 must be neutralized";
-    EXPECT_NE(unicodeInjected.find("a.pdf Requested by: apple.com x y"), std::string::npos)
+    EXPECT_EQ(unicodeInjected.block.find("\xE2\x80\xA8"), std::string::npos) << "U+2028 must be neutralized";
+    EXPECT_EQ(unicodeInjected.block.find("\xE2\x80\xA9"), std::string::npos) << "U+2029 must be neutralized";
+    EXPECT_EQ(unicodeInjected.block.find("\xC2\x85"), std::string::npos) << "U+0085 must be neutralized";
+    EXPECT_NE(unicodeInjected.block.find("a.pdf Requested by: apple.com x y"), std::string::npos)
         << "each separator renders as one space on one line";
 }
 
@@ -185,7 +190,7 @@ TEST(PrompterProtocol, FormatUntrustedArtifactListNeutralizesBidiFormatControls)
     };
     for (const auto& seq : controls) {
         const auto out = formatUntrustedArtifactList({"evil" + seq + ".pdf"}, 8);
-        EXPECT_EQ(out.find(seq), std::string::npos) << "a bidi/format control must be neutralized";
+        EXPECT_EQ(out.block.find(seq), std::string::npos) << "a bidi/format control must be neutralized";
     }
 
     // The classic extension spoof: an RLO before "fdp.tcartnoc" would render
@@ -194,8 +199,8 @@ TEST(PrompterProtocol, FormatUntrustedArtifactListNeutralizesBidiFormatControls)
     const auto spoof = formatUntrustedArtifactList({"evil\xE2\x80\xAE"
                                                     "fdp.tcartnoc"},
                                                    8);
-    EXPECT_EQ(spoof.find("\xE2\x80\xAE"), std::string::npos);
-    EXPECT_NE(spoof.find("evil fdp.tcartnoc"), std::string::npos) << "the override collapses to one space";
+    EXPECT_EQ(spoof.block.find("\xE2\x80\xAE"), std::string::npos);
+    EXPECT_NE(spoof.block.find("evil fdp.tcartnoc"), std::string::npos) << "the override collapses to one space";
 }
 
 // A mistyped `artifacts` (present but not an array) fails the whole request

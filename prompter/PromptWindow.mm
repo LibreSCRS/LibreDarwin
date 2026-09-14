@@ -188,13 +188,25 @@ NSString* informativeText(const std::string& description, const std::string& req
     }
     // A batch sign carries the UNTRUSTED per-document names in `artifacts`: list
     // them plainly BELOW the trusted requester line (the formatter neutralizes
-    // and elides each name). A single-document request instead names its one
-    // trusted artifact inline; for a batch, `artifact` is only the category
-    // token ("signature-batch"), so it is not shown as a document.
+    // and elides each name). The heading above the list and the line that says
+    // how many names the cap left out are the only words here, so they come
+    // from the catalogue like every other word on the panel -- the formatter
+    // hands over the names and a count and nothing that reads as a sentence.
+    // A single-document request instead names its one trusted artifact inline;
+    // for a batch, `artifact` is only the category token ("signature-batch"),
+    // so it is not shown as a document.
     if (!artifacts.empty()) {
-        const std::string block = wire::formatUntrustedArtifactList(artifacts, 8);
-        if (!block.empty()) {
-            [info appendFormat:@"%@%@", info.length ? @"\n" : @"", nsstr(block)];
+        const wire::UntrustedArtifactList listed = wire::formatUntrustedArtifactList(artifacts, 8);
+        if (!listed.block.empty()) {
+            [info appendFormat:@"%@%@\n%@", info.length ? @"\n" : @"",
+                               localized("prompter_batch_documents", "Documents (as named by the requesting app):"),
+                               nsstr(listed.block)];
+            if (listed.omitted > 0) {
+                // The two spaces are the list's indentation, not a word, so they
+                // stay here; the sentence and its number are the catalogue's.
+                [info appendFormat:@"\n  %@", [NSString stringWithFormat:localized("prompter_batch_more", "(+%@ more)"),
+                                                                         @(listed.omitted)]];
+            }
         }
     } else if (!artifact.empty()) {
         [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_document", "Document:"),
