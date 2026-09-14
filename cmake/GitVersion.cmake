@@ -15,13 +15,11 @@ if(NOT DEFINED GIT_EXECUTABLE)
     find_package(Git QUIET REQUIRED)
 endif()
 
-# CMAKE_CURRENT_LIST_DIR is the cmake/ subdir hosting this module, so
-# `${CMAKE_CURRENT_LIST_DIR}/..` is the LibreAgent root regardless of how
-# the repo is consumed. PROJECT_SOURCE_DIR is not yet set at the time this
-# module is include()d (project() hasn't been called yet — it needs the
-# version this file derives), and CMAKE_SOURCE_DIR would point at the
-# consumer when LibreAgent is pulled in via FetchContent by a platform
-# backend.
+# CMAKE_CURRENT_LIST_DIR is this repository's cmake/ directory, so
+# `${CMAKE_CURRENT_LIST_DIR}/..` is the LibreDarwin root however the
+# top-level CMakeLists was reached. PROJECT_SOURCE_DIR is not set yet when
+# this module is include()d -- project() needs the version this file
+# derives -- so the module locates the tree from its own path.
 set(SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
 
 if(GIT_EXECUTABLE)
