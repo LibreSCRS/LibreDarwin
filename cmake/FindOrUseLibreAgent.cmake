@@ -17,9 +17,30 @@
 option(LIBREDARWIN_USE_INSTALLED_AGENT_CORE
        "Consume LibreAgent via find_package(CONFIG) instead of FetchContent" OFF)
 
+# The agent's synthetic master-list fixture archive, LibreAgent::TestSupport:
+# the anchor-import test under agent/tests drives ImportCscaMasterList with a
+# signed list and links it. That fixture is the agent's, asked for by name
+# rather than carried here as a copy -- the Linux host does the same in its
+# file of this name. Set BEFORE either branch below, both of which read it.
+#
+# Deliberately not gated on BUILD_TESTING: this file is included before the
+# root include(CTest) defines that variable, so the condition would simply be
+# false, the component would never be requested, and the fixture would go
+# missing at link time. A gate that is always closed is worse than no gate.
+set(LIBREAGENT_BUILD_TEST_SUPPORT ON CACHE BOOL "" FORCE)
+
 if(LIBREDARWIN_USE_INSTALLED_AGENT_CORE)
     # LibreAgent is on the 5.x train (VERSION 5.0.0 today); bump in lockstep.
-    find_package(LibreAgent 5.0 REQUIRED CONFIG)
+    #
+    # Name the components. Without them the lookup probes EVERY known component,
+    # which on a machine that also has the Qt client installed runs that
+    # component's find_dependency(Qt6) and fails hard for a dependency this
+    # backend never asked for. Naming them also makes an agent package built
+    # without one of them fail configuration BY NAME here, instead of the
+    # fixture test quietly disappearing at link time. Three are needed: the
+    # neutral core and the wire vocabulary the daemon links, and the
+    # master-list fixture the anchor-import test links.
+    find_package(LibreAgent 5.0 REQUIRED CONFIG COMPONENTS Core Wire TestSupport)
     message(STATUS "LibreAgent: using installed package (CONFIG)")
 else()
     message(STATUS "LibreAgent: building from source (FetchContent)")

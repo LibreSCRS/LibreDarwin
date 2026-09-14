@@ -51,3 +51,20 @@ target_compile_definitions(ManagePinOperationTest PRIVATE LIBRESCRS_INTERNAL_BUI
 # factory, so it takes the identical src/ include + internal-build opt-in.
 target_include_directories(SocketFrontendTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(SocketFrontendTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
+
+# ImportCscaMasterList end to end over the socket: the authorise -> rate-limit
+# -> read ORDER (proved by the descriptor's own file offset and by a pipe, not
+# by the error name, which an implementation with the checks reversed also
+# returns), the descriptor discipline, the accepted path, and that building the
+# frontend reconciles a remembered report against the cache without touching
+# the cache. Links the agent's own signed-master-list fixture archive; the
+# OpenSSL that mints its certificates rides with that imported target and
+# reaches nothing under test.
+add_executable(CscaImportSocketTest CscaImportSocketTest.cpp)
+target_link_libraries(CscaImportSocketTest
+    PRIVATE
+        LibreDarwinAgentBackend
+        LibreAgent::TestSupport
+        GTest::gtest
+        GTest::gtest_main)
+add_test(NAME CscaImportSocketTest COMMAND CscaImportSocketTest)
