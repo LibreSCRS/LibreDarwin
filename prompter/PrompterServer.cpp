@@ -313,6 +313,19 @@ void PrompterServer::onReadReady(std::uint64_t connId)
                   clearNonBlocking(*connFd);
                   wire::sendConfirmReply(*connFd, reply);
                 });
+            } else if constexpr (std::is_same_v<T, wire::PromptReset>) {
+                // Closing every standing window and reporting how many needs
+                // the per-prompt panel registry, which this build does not
+                // have: there is exactly one modal at a time and no roster to
+                // sweep. So the verb is answered truthfully -- nothing was
+                // closed -- rather than left unanswered, which would hang a
+                // caller waiting for ResetDone.
+                static_cast<void>(msg);
+                const std::shared_ptr<int> connFd = fd;
+                dispatch_async(m_worker, ^{
+                  clearNonBlocking(*connFd);
+                  wire::sendResetDone(*connFd, wire::ResetDone{});
+                });
             } else {
                 static_assert(always_false_v<T>, "PrompterServer::onReadReady: unhandled PrompterRequest arm");
             }

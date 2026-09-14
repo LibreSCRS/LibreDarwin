@@ -213,6 +213,10 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
     case wire::PromptReplyStatus::Error:
         result.status = Agent::PromptStatus::Error;
         break;
+    case wire::PromptReplyStatus::Timeout:
+        // The holder's entry time ran out; never folded into Cancelled.
+        result.status = Agent::PromptStatus::Timeout;
+        break;
     }
     if (!reply->userMessage.empty() && result.userMessage.empty()) {
         result.userMessage = reply->userMessage;
@@ -289,6 +293,10 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
         break;
     case wire::PromptReplyStatus::Error:
         result.status = Agent::PromptStatus::Error;
+        break;
+    case wire::PromptReplyStatus::Timeout:
+        // The holder's entry time ran out; never folded into Cancelled.
+        result.status = Agent::PromptStatus::Timeout;
         break;
     }
     if (!reply->userMessage.empty() && result.userMessage.empty()) {

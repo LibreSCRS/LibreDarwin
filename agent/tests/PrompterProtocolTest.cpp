@@ -14,6 +14,9 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdint>
+#include <optional>
+#include <variant>
 #include <vector>
 
 using namespace LibreSCRS::Darwin::wire;
@@ -30,6 +33,20 @@ PromptRequest roundTripRequest(const PromptRequest& r)
     auto parsed = parsePrompterRequest(bytes);
     EXPECT_TRUE(parsed.has_value());
     return std::get<PromptRequest>(*parsed);
+}
+
+PromptReply roundTripReply(const PromptReply& r)
+{
+    auto parsed = parsePromptReply(toCbor(r).encode());
+    EXPECT_TRUE(parsed.has_value());
+    return *parsed;
+}
+
+ResetDone roundTripResetDone(const ResetDone& r)
+{
+    auto parsed = parseResetDone(toCbor(r).encode());
+    EXPECT_TRUE(parsed.has_value());
+    return *parsed;
 }
 
 TEST(PrompterProtocol, RequestRoundTrips)
@@ -674,6 +691,134 @@ TEST(PrompterProtocol, ConfirmReplyWithUnknownStatusFailsClosed)
     const auto parsed = parseConfirmReply(body);
     ASSERT_FALSE(parsed.has_value());
     EXPECT_EQ(parsed.error(), PrompterParseError::BadEnum);
+}
+
+// --- protocol version 2: deadlines, Timeout, Reset, and the version word ----
+
+// A prompt can now say how long the holder has, and how long the alternative
+// entry form is worth if this prompt offers one. Both are DURATIONS, so the two
+// processes need no shared clock; 0 means "no deadline set" and is spelled as
+// ABSENCE, which is exactly what a prompter predating the key already reads.
+TEST(PrompterProtocol, DeadlinesRoundTripAndAreAbsentWhenZero)
+{
+    const PromptRequest withDeadline{.kind = PromptKind::Pin,
+                                     .title = "Title",
+                                     .minLength = 4,
+                                     .maxLength = 12,
+                                     .deadlineMs = 90'000,
+                                     .altDeadlineMs = 30'000};
+    EXPECT_EQ(roundTripRequest(withDeadline), withDeadline);
+    const auto bytes = toCbor(PromptRequest{.kind = PromptKind::Pin, .minLength = 4, .maxLength = 12}).encode();
+    const auto decoded = LibreSCRS::Agent::Wire::decode(bytes);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(decoded->find("deadlineMs"), nullptr)
+        << "no deadline is spelled as absence, so an older prompter reads nothing";
+    EXPECT_EQ(decoded->find("altDeadlineMs"), nullptr);
+}
+
+TEST(PrompterProtocol, TimeoutIsAReplyStatusOfItsOwn)
+{
+    PromptReply reply;
+    reply.status = PromptReplyStatus::Timeout;
+    EXPECT_EQ(roundTripReply(reply).status, PromptReplyStatus::Timeout);
+}
+
+TEST(PrompterProtocol, EveryReplyAnnouncesTheProtocolVersion)
+{
+    // The prompter can outlive the agent that installed it; the agent reads
+    // the version off every reply so an older helper is named, never guessed.
+    PromptReply reply;
+    reply.status = PromptReplyStatus::Cancelled;
+    const auto decoded = LibreSCRS::Agent::Wire::decode(toCbor(reply).encode());
+    ASSERT_NE(decoded->find("v"), nullptr);
+    EXPECT_EQ(decoded->find("v")->asUInt().value_or(0), kPrompterProtocolVersion);
+    EXPECT_EQ(roundTripReply(reply).protocolVersion, std::optional{kPrompterProtocolVersion});
+}
+
+TEST(PrompterProtocol, AReplyWithoutAVersionReadsAsAnOlderHelper)
+{
+    LibreSCRS::Agent::Wire::CborValue::Map m;
+    m.emplace("t", LibreSCRS::Agent::Wire::CborValue("Secret"));
+    m.emplace("status", LibreSCRS::Agent::Wire::CborValue("cancelled"));
+    const auto parsed = parsePromptReply(LibreSCRS::Agent::Wire::CborValue(std::move(m)).encode());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_FALSE(parsed->protocolVersion.has_value());
+}
+
+TEST(PrompterProtocol, ResetAndResetDoneRoundTrip)
+{
+    const auto parsed = parsePrompterRequest(toCbor(PromptReset{}).encode());
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_TRUE(std::holds_alternative<PromptReset>(*parsed));
+    ResetDone done;
+    done.closed = 2;
+    EXPECT_EQ(roundTripResetDone(done).closed, 2u);
+}
+
+TEST(PrompterProtocol, ARequestOneVersionAheadIsRefusedByName)
+{
+    const auto bytes = toCbor(PromptCancel{.promptId = "p1"}).encode();
+    auto decoded = LibreSCRS::Agent::Wire::decode(bytes);
+    LibreSCRS::Agent::Wire::CborValue::Map m = *decoded->asMap();
+    m["v"] = LibreSCRS::Agent::Wire::CborValue::uint(kPrompterProtocolVersion + 1);
+    const auto parsed = parsePrompterRequest(LibreSCRS::Agent::Wire::CborValue(std::move(m)).encode());
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error(), PrompterParseError::UnsupportedVersion);
+
+    // "Newer than me" is a question about the WHOLE announced number. Narrowing
+    // it to 32 bits before the comparison turns a version of 2^32 + ours back
+    // into ours, and the request this build cannot read would be honoured.
+    LibreSCRS::Agent::Wire::CborValue::Map wide = *decoded->asMap();
+    wide["v"] =
+        LibreSCRS::Agent::Wire::CborValue::uint(static_cast<std::uint64_t>(kPrompterProtocolVersion) + (1ULL << 32));
+    const auto wideParsed = parsePrompterRequest(LibreSCRS::Agent::Wire::CborValue(std::move(wide)).encode());
+    ASSERT_FALSE(wideParsed.has_value());
+    EXPECT_EQ(wideParsed.error(), PrompterParseError::UnsupportedVersion);
+}
+
+// "v" was proven on the single-secret reply above; this case is the sweep, so a
+// reply kind added later cannot be the one that quietly ships without it. The
+// wire key AND the parsed field are both asserted: the key is what an older
+// agent reads, the field is what this one acts on.
+TEST(PrompterProtocol, EveryReplyKindCarriesTheVersionOnTheWireAndInTheParse)
+{
+    const auto versionOf = [](const std::vector<std::uint8_t>& body) -> std::optional<std::uint64_t> {
+        const auto tree = LibreSCRS::Agent::Wire::decode(body);
+        if (!tree.has_value() || tree->find("v") == nullptr) {
+            return std::nullopt;
+        }
+        return tree->find("v")->asUInt();
+    };
+
+    PromptReply single;
+    single.status = PromptReplyStatus::Cancelled;
+    const auto singleBody = toCbor(single).encode();
+    EXPECT_EQ(versionOf(singleBody), std::optional<std::uint64_t>{kPrompterProtocolVersion}) << "Secret";
+    const auto singleParsed = parsePromptReply(singleBody);
+    ASSERT_TRUE(singleParsed.has_value());
+    EXPECT_EQ(singleParsed->protocolVersion, std::optional{kPrompterProtocolVersion});
+
+    MultiPromptReply multi;
+    multi.status = PromptReplyStatus::Cancelled;
+    const auto multiBody = toCbor(multi).encode();
+    EXPECT_EQ(versionOf(multiBody), std::optional<std::uint64_t>{kPrompterProtocolVersion}) << "Secrets";
+    const auto multiParsed = parseMultiPromptReply(multiBody);
+    ASSERT_TRUE(multiParsed.has_value());
+    EXPECT_EQ(multiParsed->protocolVersion, std::optional{kPrompterProtocolVersion});
+
+    ConfirmReply confirm;
+    confirm.status = PromptReplyStatus::Cancelled;
+    const auto confirmBody = toCbor(confirm).encode();
+    EXPECT_EQ(versionOf(confirmBody), std::optional<std::uint64_t>{kPrompterProtocolVersion}) << "Confirm";
+    const auto confirmParsed = parseConfirmReply(confirmBody);
+    ASSERT_TRUE(confirmParsed.has_value());
+    EXPECT_EQ(confirmParsed->protocolVersion, std::optional{kPrompterProtocolVersion});
+
+    // ResetDone exposes no protocolVersion of its own -- nothing consumes one --
+    // but it announces itself on the wire like every other reply.
+    const auto resetBody = toCbor(ResetDone{}).encode();
+    EXPECT_EQ(versionOf(resetBody), std::optional<std::uint64_t>{kPrompterProtocolVersion}) << "ResetDone";
+    EXPECT_TRUE(parseResetDone(resetBody).has_value());
 }
 
 } // namespace

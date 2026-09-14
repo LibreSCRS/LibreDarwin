@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <expected>
+#include <optional>
 #include <span>
 #include <string>
 #include <variant>
@@ -23,11 +24,36 @@ namespace LibreSCRS::Darwin::wire {
 
 using LibreSCRS::Agent::Wire::CborValue;
 
+// The contract this tree implements, carried as the "v" key on every request
+// and on every reply.
+//
+// Why a version at all: the prompter is a long-lived per-user helper and
+// SURVIVES an agent restart, so a new agent routinely meets an older helper. A
+// helper that cannot be told to close what the previous agent left behind, or
+// that answers a timed-out window as a cancellation, is a helper the agent has
+// to recognise rather than guess at. Bump this whenever a message the agent
+// DEPENDS ON changes shape.
+//   1 -- RequestSecret / RequestSecrets / ConfirmAction / CancelCurrent, no
+//        deadlines, no "timeout" reply word, no Reset, no "v"
+//   2 -- entry deadlines, the "timeout" reply word, Reset/ResetDone, and "v"
+inline constexpr std::uint32_t kPrompterProtocolVersion = 2;
+
 enum class PromptKind : std::uint8_t { Pin, Can, Mrz };
 
 // Prompter1 status vocabulary. "unauthorized" is the fail-closed rejection of a
 // non-agent caller (a same-uid process trying to drive the prompter directly).
-enum class PromptReplyStatus : std::uint8_t { Ok, Cancelled, Error, Unauthorized };
+// APPEND new values, never insert: the numeric values are compiled into every
+// consumer of this header.
+enum class PromptReplyStatus : std::uint8_t {
+    Ok,
+    Cancelled,
+    Error,
+    Unauthorized,
+    // The prompter closed the window because the holder's entry time ran out.
+    // Distinct from Cancelled deliberately: telling someone they cancelled what
+    // the clock took from them is the confusion this word removes.
+    Timeout,
+};
 
 enum class PrompterParseError : std::uint8_t {
     NotDecodable,
@@ -37,6 +63,10 @@ enum class PrompterParseError : std::uint8_t {
     UnknownMessage,
     BadEnum,
     SecretTooLarge,
+    // The request announced a protocol NEWER than kPrompterProtocolVersion.
+    // Refused by name rather than parsed on a best-effort basis: a message this
+    // build cannot fully read must not be half-honoured.
+    UnsupportedVersion,
 };
 
 // Upper bound for an inline prompter secret (PIN/CAN/MRZ are tens of bytes);
@@ -74,6 +104,15 @@ struct PromptRequest
     // The prompt this request raises, as the agent addresses it. The prompt
     // gate is keyed by card, so a later dismissal has to name one window.
     std::string promptId;
+    // The window counts the first down and answers Timeout; the second is the
+    // budget of the alternative entry (MRZ under a CAN prompt). Both are
+    // DURATIONS in milliseconds from the moment the window is SHOWN -- not
+    // absolute times, so the two processes need no shared clock, and not an
+    // increment on each other. 0 means "no deadline set" and is spelled as
+    // ABSENCE on the wire: a prompter predating these keys reads nothing, and
+    // must never read an absent deadline as an instant expiry.
+    std::uint32_t deadlineMs{0};
+    std::uint32_t altDeadlineMs{0};
     bool operator==(const PromptRequest&) const = default;
 };
 
@@ -127,7 +166,17 @@ struct ConfirmAction
     bool operator==(const ConfirmAction&) const = default;
 };
 
-using PrompterRequest = std::variant<PromptRequest, PromptCancel, RequestSecrets, ConfirmAction>;
+// Reset (agent -> prompter): close every window this prompter still has
+// standing and forget the state behind them. The helper outlives the agent that
+// installed it, so a fresh agent meets windows it never raised and cannot
+// address by id -- this is how it clears them. Idempotent; carries nothing,
+// because "everything" needs no argument.
+struct PromptReset
+{
+    bool operator==(const PromptReset&) const = default;
+};
+
+using PrompterRequest = std::variant<PromptRequest, PromptCancel, RequestSecrets, ConfirmAction, PromptReset>;
 
 // The reply (prompter -> agent). `secret` is present iff status == Ok.
 struct PromptReply
@@ -135,6 +184,12 @@ struct PromptReply
     PromptReplyStatus status{PromptReplyStatus::Error};
     std::vector<std::uint8_t> secret;
     std::string userMessage;
+    // The protocol the ANSWERING helper speaks, read off the "v" key. Empty
+    // when the reply carried none, which names a helper older than that key
+    // rather than guessing a version for it. The explicit default also keeps
+    // every pre-existing positional brace-init of this aggregate free of
+    // -Wmissing-field-initializers, so appending here stays source-compatible.
+    std::optional<std::uint32_t> protocolVersion = std::nullopt;
 };
 
 // The multi-secret reply (prompter -> agent). Both secrets are present iff
@@ -147,6 +202,9 @@ struct MultiPromptReply
     std::vector<std::uint8_t> primary;   // current credential; present iff Ok
     std::vector<std::uint8_t> secondary; // new credential; present iff Ok
     std::string userMessage;
+    // The protocol the answering helper speaks; read the same way, and for the
+    // same reason, as PromptReply::protocolVersion above.
+    std::optional<std::uint32_t> protocolVersion = std::nullopt;
 };
 
 // The confirmation reply (prompter -> agent). Deliberately carries NO secret
@@ -157,6 +215,17 @@ struct ConfirmReply
 {
     PromptReplyStatus status{PromptReplyStatus::Error};
     std::string userMessage;
+    // The protocol the answering helper speaks; read the same way, and for the
+    // same reason, as PromptReply::protocolVersion above.
+    std::optional<std::uint32_t> protocolVersion = std::nullopt;
+};
+
+// ResetDone (prompter -> agent): the answer to Reset, saying how many windows
+// it actually closed. The count is what separates "there was nothing standing"
+// from "the helper ignored the verb", which is otherwise the same silence.
+struct ResetDone
+{
+    std::uint32_t closed{0};
 };
 
 // --- encode (build the CBOR body; the caller frames it) ----------------------
@@ -167,8 +236,15 @@ struct ConfirmReply
 [[nodiscard]] CborValue toCbor(const MultiPromptReply& r);
 [[nodiscard]] CborValue toCbor(const ConfirmAction& r);
 [[nodiscard]] CborValue toCbor(const ConfirmReply& r);
+[[nodiscard]] CborValue toCbor(const PromptReset& r);
+[[nodiscard]] CborValue toCbor(const ResetDone& r);
 
 // --- decode (strict; fail closed) --------------------------------------------
+// Reads only the keys it knows, so a key added by a newer agent is ignored
+// rather than fatal -- except the announced protocol itself: a request whose
+// "v" is NEWER than kPrompterProtocolVersion is refused as UnsupportedVersion,
+// because a message this build cannot fully read must not be half-honoured. An
+// absent "v" is the first protocol and is accepted.
 [[nodiscard]] std::expected<PrompterRequest, PrompterParseError>
 parsePrompterRequest(std::span<const std::uint8_t> body);
 // Rejects a secret over kMaxSecretBytes (SecretTooLarge). Scrubs its own
@@ -189,6 +265,9 @@ parseMultiPromptReply(std::span<const std::uint8_t> body);
 // status token fails closed like every other reply here, which on this path
 // means the change is refused.
 [[nodiscard]] std::expected<ConfirmReply, PrompterParseError> parseConfirmReply(std::span<const std::uint8_t> body);
+// The Reset answer. Carries no secret and no status vocabulary -- only the
+// count of windows the helper closed.
+[[nodiscard]] std::expected<ResetDone, PrompterParseError> parseResetDone(std::span<const std::uint8_t> body);
 
 // Encode + send one prompter reply on a connected fd, then zero every
 // secret-bearing buffer this side created: the CBOR tree copy, the encoded
@@ -203,6 +282,9 @@ void sendPromptReplyScrubbed(int connFd, MultiPromptReply& reply) noexcept;
 // afterwards -- the message has no secret field. Named without "Scrubbed" so
 // the absence is visible at the call site rather than implied.
 void sendConfirmReply(int connFd, const ConfirmReply& reply) noexcept;
+// The Reset answer: same encode-and-send core, nothing to scrub -- the message
+// carries a count and nothing else.
+void sendResetDone(int connFd, const ResetDone& reply) noexcept;
 
 // --- display -----------------------------------------------------------------
 // Render the UNTRUSTED per-document display names of a batch-sign consent

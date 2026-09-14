@@ -558,4 +558,44 @@ TEST(PrompterServer, CancelDeliversTheIdItAddresses)
     std::filesystem::remove(path);
 }
 
+// The Reset verb is answered, never merely absorbed: a caller that sends it
+// waits for ResetDone, and silence would hang it. Today's honest count is 0 --
+// this build has one modal at a time and no window roster to sweep -- so the
+// case is named for the property that does not change when the sweep lands,
+// and the count assertion is what the next step tightens.
+TEST(PrompterServer, ResetAnswersResetDoneWithTheProtocolVersion)
+{
+    const std::string path = uniqueSocketPath();
+    PrompterServer server(
+        path, rejectSingleProvider(), rejectMultiProvider(),
+        [](const std::string&) { ADD_FAILURE() << "Reset must not route into the addressed-cancel arm"; },
+        rejectConfirmProvider(), [](const PeerCredentials&) { return true; });
+    ASSERT_TRUE(server.start().has_value());
+
+    const int conn = connectClient(path);
+    ASSERT_TRUE(Agent::Wire::sendFrame(conn, wire::toCbor(wire::PromptReset{}).encode()).has_value());
+
+    auto reply = Agent::Wire::recvFrame(conn);
+    ASSERT_TRUE(reply.has_value());
+
+    // The raw frame is inspected before it is parsed: the agent reads the
+    // helper's protocol off the reply itself, so the key has to be ON the wire,
+    // not merely reconstructed by a parser that knows its own version.
+    const auto tree = Agent::Wire::decode(reply->body);
+    ASSERT_TRUE(tree.has_value());
+    ASSERT_NE(tree->find("t"), nullptr);
+    ASSERT_NE(tree->find("t")->asText(), nullptr);
+    EXPECT_EQ(*tree->find("t")->asText(), "ResetDone");
+    ASSERT_NE(tree->find("v"), nullptr);
+    EXPECT_EQ(tree->find("v")->asUInt().value_or(0), wire::kPrompterProtocolVersion);
+
+    auto parsed = wire::parseResetDone(reply->body);
+    ASSERT_TRUE(parsed.has_value());
+    EXPECT_EQ(parsed->closed, 0u) << "this build has no window roster to sweep, and says so";
+
+    ::close(conn);
+    server.stop();
+    std::filesystem::remove(path);
+}
+
 } // namespace

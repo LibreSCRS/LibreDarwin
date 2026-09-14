@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -54,6 +55,8 @@ std::string_view statusName(PromptReplyStatus s)
         return "error";
     case PromptReplyStatus::Unauthorized:
         return "unauthorized";
+    case PromptReplyStatus::Timeout:
+        return "timeout";
     }
     return "error";
 }
@@ -71,6 +74,9 @@ std::optional<PromptReplyStatus> statusFromName(std::string_view s)
     }
     if (s == "unauthorized") {
         return PromptReplyStatus::Unauthorized;
+    }
+    if (s == "timeout") {
+        return PromptReplyStatus::Timeout;
     }
     return std::nullopt;
 }
@@ -135,6 +141,53 @@ std::optional<std::vector<std::string>> optStringArray(const Map& m, std::string
         out.push_back(*s);
     }
     return out;
+}
+
+// Stamp the protocol this build speaks onto a message. Every request and every
+// reply carries it: the prompter outlives the agent that installed it, so
+// neither end may assume the other is its own age.
+void emplaceVersion(Map& m)
+{
+    m.emplace("v", CborValue::uint(kPrompterProtocolVersion));
+}
+
+// The protocol the peer announced, at its FULL wire width. Absent is not an
+// error -- it names a peer older than the key, which is the first protocol;
+// only a PRESENT-but-mistyped value fails closed, like every other field here.
+//
+// Deliberately NOT narrowed here: "is this newer than me" is a question about
+// the whole number, and narrowing first turns 2^32 into 0 and 2^32 + ours back
+// into ours -- a request this build cannot read would be honoured as its own
+// age. The callers narrow after they have judged.
+std::expected<std::optional<std::uint64_t>, PrompterParseError> optAnnouncedVersion(const Map& m)
+{
+    const auto it = m.find("v");
+    if (it == m.end()) {
+        return std::optional<std::uint64_t>{};
+    }
+    const auto v = it->second.asUInt();
+    if (!v) {
+        return std::unexpected(PrompterParseError::WrongType);
+    }
+    return std::optional<std::uint64_t>{*v};
+}
+
+// The same value as a reply struct holds it. A version too wide to name in a
+// std::uint32_t is not version 0 and not our own -- it is a value this wire
+// cannot express, so it fails closed like every other unreadable field.
+std::expected<std::optional<std::uint32_t>, PrompterParseError> optReplyVersion(const Map& m)
+{
+    const auto announced = optAnnouncedVersion(m);
+    if (!announced) {
+        return std::unexpected(announced.error());
+    }
+    if (!announced->has_value()) {
+        return std::optional<std::uint32_t>{};
+    }
+    if (**announced > std::numeric_limits<std::uint32_t>::max()) {
+        return std::unexpected(PrompterParseError::WrongType);
+    }
+    return std::optional<std::uint32_t>{static_cast<std::uint32_t>(**announced)};
 }
 
 // The display metadata shared by both secret-request messages (all optional
@@ -216,6 +269,7 @@ CborValue toCbor(const PromptRequest& r)
 {
     Map m;
     m.emplace("t", CborValue("RequestSecret"));
+    emplaceVersion(m);
     m.emplace("kind", CborValue(std::string(kindName(r.kind))));
     if (!r.title.empty()) {
         m.emplace("title", CborValue(r.title));
@@ -252,6 +306,14 @@ CborValue toCbor(const PromptRequest& r)
     if (!r.promptId.empty()) {
         m.emplace("promptId", CborValue(r.promptId));
     }
+    // A deadline of none is spelled as absence, like every other zero on this
+    // wire, so a prompter predating these keys reads nothing at all.
+    if (r.deadlineMs != 0) {
+        m.emplace("deadlineMs", CborValue::uint(r.deadlineMs));
+    }
+    if (r.altDeadlineMs != 0) {
+        m.emplace("altDeadlineMs", CborValue::uint(r.altDeadlineMs));
+    }
     return CborValue(std::move(m));
 }
 
@@ -259,6 +321,7 @@ CborValue toCbor(const PromptCancel& r)
 {
     Map m;
     m.emplace("t", CborValue("CancelCurrent"));
+    emplaceVersion(m);
     if (!r.promptId.empty()) {
         m.emplace("promptId", CborValue(r.promptId));
     }
@@ -269,6 +332,7 @@ CborValue toCbor(const RequestSecrets& r)
 {
     Map m;
     m.emplace("t", CborValue("RequestSecrets"));
+    emplaceVersion(m);
     m.emplace("kind", CborValue(r.kind));
     if (!r.title.empty()) {
         m.emplace("title", CborValue(r.title));
@@ -304,6 +368,7 @@ CborValue toCbor(const ConfirmAction& r)
 {
     Map m;
     m.emplace("t", CborValue("ConfirmAction"));
+    emplaceVersion(m);
     m.emplace("kind", CborValue(r.kind));
     if (!r.title.empty()) {
         m.emplace("title", CborValue(r.title));
@@ -324,6 +389,7 @@ CborValue toCbor(const ConfirmReply& r)
 {
     Map m;
     m.emplace("t", CborValue("Confirm"));
+    emplaceVersion(m);
     m.emplace("status", CborValue(std::string(statusName(r.status))));
     if (!r.userMessage.empty()) {
         m.emplace("userMessage", CborValue(r.userMessage));
@@ -335,6 +401,7 @@ CborValue toCbor(const PromptReply& r)
 {
     Map m;
     m.emplace("t", CborValue("Secret"));
+    emplaceVersion(m);
     m.emplace("status", CborValue(std::string(statusName(r.status))));
     if (r.status == PromptReplyStatus::Ok) {
         m.emplace("secret", CborValue(r.secret));
@@ -345,10 +412,30 @@ CborValue toCbor(const PromptReply& r)
     return CborValue(std::move(m));
 }
 
+CborValue toCbor(const PromptReset&)
+{
+    Map m;
+    m.emplace("t", CborValue("Reset"));
+    emplaceVersion(m);
+    return CborValue(std::move(m));
+}
+
+CborValue toCbor(const ResetDone& r)
+{
+    Map m;
+    m.emplace("t", CborValue("ResetDone"));
+    emplaceVersion(m);
+    if (r.closed != 0) {
+        m.emplace("closed", CborValue::uint(r.closed));
+    }
+    return CborValue(std::move(m));
+}
+
 CborValue toCbor(const MultiPromptReply& r)
 {
     Map m;
     m.emplace("t", CborValue("Secrets"));
+    emplaceVersion(m);
     m.emplace("status", CborValue(std::string(statusName(r.status))));
     if (r.status == PromptReplyStatus::Ok) {
         m.emplace("primary", CborValue(r.primary));
@@ -369,11 +456,26 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     }
     const Map& m = **mapRes;
 
+    // The announced protocol is read BEFORE the message tag: a request from a
+    // newer agent may well carry a tag this build has never heard of, and
+    // "newer than me" is the more useful thing to say about it than "unknown".
+    const auto announced = optAnnouncedVersion(m);
+    if (!announced) {
+        return std::unexpected(announced.error());
+    }
+    if (announced->value_or(0) > static_cast<std::uint64_t>(kPrompterProtocolVersion)) {
+        return std::unexpected(PrompterParseError::UnsupportedVersion);
+    }
+
     const auto tIt = m.find("t");
     if (tIt == m.end() || tIt->second.asText() == nullptr) {
         return std::unexpected(PrompterParseError::MissingField);
     }
     const std::string& t = *tIt->second.asText();
+
+    if (t == "Reset") {
+        return PrompterRequest{PromptReset{}};
+    }
 
     if (t == "CancelCurrent") {
         auto id = optText(m, "promptId");
@@ -462,7 +564,13 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     const auto attempt = optUint(m, "attempt");
     const auto lastError = optText(m, "lastError");
     auto promptId = optText(m, "promptId");
-    if (!display || !minLen || !maxLen || !artifacts || !attempt || !lastError || !promptId) {
+    // Absent on every prompt without a clock (and on every prompt an agent
+    // predating these keys sends): optUint defaults a missing key to 0, which
+    // is exactly "no deadline set".
+    const auto deadline = optUint(m, "deadlineMs");
+    const auto altDeadline = optUint(m, "altDeadlineMs");
+    if (!display || !minLen || !maxLen || !artifacts || !attempt || !lastError || !promptId || !deadline ||
+        !altDeadline) {
         return std::unexpected(PrompterParseError::WrongType);
     }
     r.title = std::move(display->title);
@@ -475,6 +583,8 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
     r.attempt = static_cast<std::uint32_t>(*attempt);
     r.lastError = std::move(*lastError);
     r.promptId = std::move(*promptId);
+    r.deadlineMs = static_cast<std::uint32_t>(*deadline);
+    r.altDeadlineMs = static_cast<std::uint32_t>(*altDeadline);
     return PrompterRequest{std::move(r)};
 }
 
@@ -498,8 +608,15 @@ std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const 
     if (!status) {
         return std::unexpected(PrompterParseError::BadEnum);
     }
+    // Read before the secret is extracted, so this exit has no plaintext copy
+    // of its own to scrub (the tree itself is handled by the guard above).
+    const auto announced = optReplyVersion(m);
+    if (!announced) {
+        return std::unexpected(announced.error());
+    }
     PromptReply reply;
     reply.status = *status;
+    reply.protocolVersion = *announced;
 
     if (reply.status == PromptReplyStatus::Ok) {
         auto secret = requiredSecret(m, "secret");
@@ -551,9 +668,43 @@ std::expected<ConfirmReply, PrompterParseError> parseConfirmReply(std::span<cons
     if (!msg) {
         return std::unexpected(PrompterParseError::WrongType);
     }
+    const auto announced = optReplyVersion(m);
+    if (!announced) {
+        return std::unexpected(announced.error());
+    }
     ConfirmReply reply;
     reply.status = *status;
     reply.userMessage = std::move(*msg);
+    reply.protocolVersion = *announced;
+    return reply;
+}
+
+std::expected<ResetDone, PrompterParseError> parseResetDone(std::span<const std::uint8_t> body)
+{
+    std::optional<CborValue> hold;
+    auto mapRes = topMap(body, hold);
+    if (!mapRes) {
+        return std::unexpected(mapRes.error());
+    }
+    // Nothing here is secret, but the bytes handed in are not this side's to
+    // trust and decoding has already copied them -- scrubbed on every exit like
+    // every other reply parser on this wire.
+    const HoldScrub scrubGuard{hold};
+    const Map& m = **mapRes;
+
+    const auto tIt = m.find("t");
+    if (tIt == m.end() || tIt->second.asText() == nullptr) {
+        return std::unexpected(PrompterParseError::MissingField);
+    }
+    if (*tIt->second.asText() != "ResetDone") {
+        return std::unexpected(PrompterParseError::UnknownMessage);
+    }
+    const auto closed = optUint(m, "closed");
+    if (!closed) {
+        return std::unexpected(PrompterParseError::WrongType);
+    }
+    ResetDone reply;
+    reply.closed = static_cast<std::uint32_t>(*closed);
     return reply;
 }
 
@@ -577,8 +728,15 @@ std::expected<MultiPromptReply, PrompterParseError> parseMultiPromptReply(std::s
     if (!status) {
         return std::unexpected(PrompterParseError::BadEnum);
     }
+    // Read before either secret is extracted, so this exit has no plaintext
+    // copy of its own to scrub (the tree itself is handled by the guard above).
+    const auto announced = optReplyVersion(m);
+    if (!announced) {
+        return std::unexpected(announced.error());
+    }
     MultiPromptReply reply;
     reply.status = *status;
+    reply.protocolVersion = *announced;
 
     if (reply.status == PromptReplyStatus::Ok) {
         auto primary = requiredSecret(m, "primary");
@@ -613,6 +771,13 @@ void sendConfirmReply(int connFd, const ConfirmReply& reply) noexcept
 {
     // The wire buffers are zeroed by the shared core anyway; there is simply
     // no secret in the struct to zero after it.
+    sendReplyAndZeroWire(connFd, reply);
+}
+
+void sendResetDone(int connFd, const ResetDone& reply) noexcept
+{
+    // The wire buffers are zeroed by the shared core anyway; this message has
+    // no secret in it to zero afterwards.
     sendReplyAndZeroWire(connFd, reply);
 }
 
