@@ -683,7 +683,7 @@ TEST(MacPrompterClient, ConfirmationCrossesTheWireAndTheVerdictComesBack)
     action.requester = "org.librescrs.LibreMac";
     action.artifact = "TslSources";
 
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
     const auto reply = client.requestConfirmation(action);
 
     EXPECT_EQ(reply.status, wire::PromptReplyStatus::Ok);
@@ -701,7 +701,7 @@ TEST(MacPrompterClient, DeclinedConfirmationComesBackAsCancelled)
 
     wire::ConfirmAction action;
     action.kind = "configure_trust";
-    MacPrompterClient client(path);
+    MacPrompterClient client(path, trustAnyPeerForTest());
 
     const auto reply = client.requestConfirmation(action);
 
@@ -739,6 +739,29 @@ TEST(MacPrompterClient, RejectedServingPeerGetsNoRequestAndItsReplyIsNeverConsum
     EXPECT_FALSE(r.secret.has_value());
     // The client bailed before sending: the fake can never have parsed a request.
     EXPECT_FALSE(server.capturedRequest().has_value());
+}
+
+// The confirmation path takes the identical pre-send gate. It is the one call
+// here that changes what this computer TRUSTS rather than reading a secret, so
+// a same-uid process that re-bound prompter.sock must not be able to answer it:
+// an approval it never obtained would replace the trust anchors on the holder's
+// behalf.
+TEST(MacPrompterClient, RejectedServingPeerFailsTheConfirmationClosed)
+{
+    const std::string path = uniquePath();
+    // An approval waiting to be handed over, if the gate ever let it through.
+    FakeConfirmPrompter server(path, wire::ConfirmReply{wire::PromptReplyStatus::Ok, "approved"});
+
+    MacPrompterClient client(path, [](int) { return false; }); // verification fails
+    const auto reply = client.requestConfirmation(wire::ConfirmAction{.kind = "configure_trust"});
+
+    EXPECT_NE(reply.status, wire::PromptReplyStatus::Ok);
+    EXPECT_EQ(reply.status, wire::PromptReplyStatus::Error);
+    EXPECT_EQ(reply.userMessage, "prompter peer verification failed");
+    // The client bailed before sending, so the fake never parsed a request --
+    // which means it never reached its reply, and the approval above was never
+    // consumed. capturedAction() is the fake's own record of what it read.
+    EXPECT_FALSE(server.capturedAction().has_value());
 }
 
 // The change path takes the identical pre-send gate.

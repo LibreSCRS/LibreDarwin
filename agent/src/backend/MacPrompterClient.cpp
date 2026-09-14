@@ -228,6 +228,11 @@ wire::ConfirmReply MacPrompterClient::requestConfirmation(const wire::ConfirmAct
     if (!fd) {
         return refuse("prompter unavailable");
     }
+    // Verify the SERVING peer before anything crosses the socket: a re-bound
+    // prompter.sock must get no request and have no reply consumed.
+    if (!m_peerVerifier(fd.get())) {
+        return refuse("prompter peer verification failed");
+    }
     const auto body = wire::toCbor(action).encode();
     if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return refuse("prompter send failed");
