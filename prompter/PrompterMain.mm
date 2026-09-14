@@ -3,8 +3,9 @@
 //
 // librescrs-prompter: the agent-owned secure credential window helper. The
 // server serves the private prompter.sock on its own GCD queues (peer-
-// authenticating the agent); the AppKit run loop on the main thread shows the
-// modal on demand, and a cross-connection CancelCurrent can dismiss it.
+// authenticating the agent); the AppKit run loop on the main thread raises one
+// floating panel per prompt and keeps running while they stand, so a
+// cross-connection CancelCurrent can dismiss any of them at any time.
 #include "PromptWindow.h"
 #include "ConfirmAuthorizer.h"
 #include "PrompterServer.h"
@@ -18,6 +19,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace {
 
@@ -65,7 +67,8 @@ LibreSCRS::Darwin::PrompterServer::PeerAuthorized makePeerAuth()
 int main(int /*argc*/, char** /*argv*/)
 {
     @autoreleasepool {
-        // LSUIElement (no Dock icon / menu bar); the window is a transient modal.
+        // LSUIElement (no Dock icon / menu bar); the windows are transient
+        // floating panels, and nothing here ever runs a modal loop.
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
 
@@ -82,7 +85,24 @@ int main(int /*argc*/, char** /*argv*/)
             [](const LibreSCRS::Darwin::wire::ConfirmAction& req) {
                 return LibreSCRS::Darwin::confirmWithDeviceOwner(req);
             },
-            [window]() { return window->dismissAll(); }, makePeerAuth());
+            [window]() {
+                // Name the prompts before sweeping them. A reset happens when a
+                // fresh agent meets panels a previous one left standing, so the
+                // count that goes back on the wire is the one thing it can say
+                // — and the ids are the only record of WHICH prompts they were,
+                // which is what a person reading the log after an agent restart
+                // is actually looking for. An id is an address the agent minted,
+                // never anything the holder typed.
+                const std::vector<std::string> closing = window->liveIds();
+                NSMutableString* ids = [NSMutableString string];
+                for (const std::string& id : closing) {
+                    [ids appendFormat:@"%@%s", ids.length ? @", " : @"", id.empty() ? "<unaddressed>" : id.c_str()];
+                }
+                NSLog(@"librescrs-prompter: reset closing %lu prompt(s): %@",
+                      static_cast<unsigned long>(closing.size()), ids.length ? ids : @"(none)");
+                return window->dismissAll();
+            },
+            makePeerAuth());
 
         if (auto started = server.start(); !started) {
             NSLog(@"librescrs-prompter: %s", started.error().c_str());

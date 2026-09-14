@@ -5,7 +5,7 @@
 // authenticates the agent at accept (fail-closed "unauthorized"), then serves
 // one RequestSecret / CancelCurrent per connection; the blocking provider call
 // runs on a concurrent worker queue so a cross-connection CancelCurrent is
-// dispatched while a modal is up.
+// dispatched while a panel is up.
 #include "PrompterServer.h"
 
 #include <LibreSCRS/Agent/wire/Framing.h>
@@ -165,7 +165,7 @@ void PrompterServer::stop() noexcept
     // cancellation handlers have run before the listen fd closes (Apple's
     // fd-source teardown discipline; per-connection fds are co-owned by their
     // cancel handlers and close themselves). No blocking accept() to wake ->
-    // no join() -> stop() cannot hang on a pending modal.
+    // no join() -> stop() cannot hang on a provider still waiting for a panel.
     dispatch_sync(m_queue, ^{
       if (m_acceptSource != nullptr) {
           dispatch_source_cancel(m_acceptSource);
@@ -290,16 +290,18 @@ void PrompterServer::onReadReady(std::uint64_t connId)
         [this, &fd](auto&& msg) {
             using T = std::decay_t<decltype(msg)>;
             if constexpr (std::is_same_v<T, wire::PromptCancel>) {
-                // Inline on the serial queue — which a modal never blocks (the
-                // modal blocks the worker + main queues), so a cross-connection
-                // cancel can always dismiss it. The handler dispatches
-                // abortModal asynchronously. CancelCurrent has no reply.
+                // Inline on the serial queue — which a standing panel never
+                // blocks (its wait holds only the worker thread that raised
+                // it), so a cross-connection cancel can always dismiss it. The
+                // handler marshals the dismissal to the main queue
+                // asynchronously. CancelCurrent has no reply.
                 m_cancel(msg.promptId);
             } else if constexpr (std::is_same_v<T, wire::PromptRequest>) {
-                // The blocking provider call (dispatch_sync(main) + runModal)
-                // runs on the concurrent worker. The block holds its own copies
-                // (provider, request, fd share) and never touches `this`, so a
-                // stop()/destruction while the modal is up cannot dangle; the
+                // The blocking provider call (raise the panel on main, then
+                // wait on its semaphore) runs on the concurrent worker. The
+                // block holds its own copies (provider, request, fd share) and
+                // never touches `this`, so a stop()/destruction while a panel
+                // is up cannot dangle; the
                 // reply is sent + scrubbed on the worker and the fd closes with
                 // its last share. The fd turns blocking for the send: the read
                 // side is retired, and a reply near the 8 KiB cap may not fit
@@ -313,8 +315,8 @@ void PrompterServer::onReadReady(std::uint64_t connId)
                   wire::sendPromptReplyScrubbed(*connFd, reply);
                 });
             } else if constexpr (std::is_same_v<T, wire::RequestSecrets>) {
-                // Same worker discipline as PromptRequest: the change modal
-                // blocks identically, and the reply — BOTH secrets inline —
+                // Same worker discipline as PromptRequest: the change panel
+                // waits identically, and the reply — BOTH secrets inline —
                 // goes out through the scrubbing multi overload.
                 const wire::RequestSecrets req = std::move(msg);
                 const MultiSecretProvider provider = m_multiProvider;

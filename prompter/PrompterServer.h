@@ -23,20 +23,22 @@ namespace LibreSCRS::Darwin {
 // (fail-closed "unauthorized" otherwise — a same-uid process must not be able
 // to drive the credential window and harvest a secret), and dispatches each
 // RequestSecret to an injected SecretProvider (the AppKit window), each
-// RequestSecrets to a MultiSecretProvider (the change modal) and each
+// RequestSecrets to a MultiSecretProvider (the change panel) and each
 // CancelCurrent to a CancelHandler with the id it addresses. LM-free (links
 // wire-core only); the providers + peer-auth are seams so the server logic is
 // unit-testable without a display or real code signing.
 //
 // Event-driven on GCD dispatch sources (mirroring the agent SocketTransport):
 // one serial queue hosts the accept source, every per-connection read source,
-// and the connection registry; the BLOCKING provider call (the modal) runs on
-// a separate concurrent worker queue. A CancelCurrent arriving on a
-// second connection is therefore read and dispatched WHILE a modal raised by a
-// first connection is still up — the modal blocks the worker and the main
-// queue, never the serial queue. One request is served per connection; the
-// reply is sent + scrubbed on the worker and the fd closes with its last
-// co-owning share.
+// and the connection registry; the BLOCKING provider call — it raises a panel
+// on the main thread and then waits on that panel's own semaphore — runs on a
+// separate concurrent worker queue. A CancelCurrent arriving on a second
+// connection is therefore read and dispatched WHILE a panel raised by a first
+// connection is still up: the wait blocks ONLY the worker thread that asked
+// for it, never the serial queue and never the main queue, which goes on
+// running the run loop the panels are drawn by. One request is served per
+// connection; the reply is sent + scrubbed on the worker and the fd closes
+// with its last co-owning share.
 class PrompterServer
 {
 public:
@@ -48,9 +50,9 @@ public:
     // as SecretProvider.
     using MultiSecretProvider = std::function<wire::MultiPromptReply(const wire::RequestSecrets& req)>;
     // Dismiss the window @p promptId names (CancelCurrent). Called inline on
-    // the serial queue; must not block (the window impl dispatches abortModal
-    // asynchronously to the main queue). An empty id is an unaddressed
-    // dismissal from a caller that knows no id.
+    // the serial queue; must not block (the window impl marshals the dismissal
+    // to the main queue asynchronously and returns at once). An empty id is an
+    // unaddressed dismissal from a caller that knows no id.
     using CancelHandler = std::function<void(const std::string& promptId)>;
     // Ask the human to confirm a non-card action (ConfirmAction). Same
     // worker-queue calling convention as the secret providers: it blocks until
@@ -84,9 +86,10 @@ public:
     [[nodiscard]] std::expected<void, std::string> start();
 
     // Cancel the accept + connection sources and quiesce the serial queue.
-    // Returns promptly even while a provider call is still blocked inside a
-    // modal: that call finishes on its own detached fd share and never touches
-    // the server again (no blocking accept() to wake -> no join() hang).
+    // Returns promptly even while a provider call is still blocked waiting on
+    // its panel: that call finishes on its own detached fd share and never
+    // touches the server again (no blocking accept() to wake -> no join()
+    // hang).
     // Idempotent; start() may be called again afterwards.
     void stop() noexcept;
 
