@@ -63,6 +63,10 @@ if(EXISTS "${SRC_DIR}/VERSION")
   file(STRINGS "${SRC_DIR}/VERSION" GITVERSION_FILE_VERSION LIMIT_COUNT 1)
   string(STRIP "${GITVERSION_FILE_VERSION}" GITVERSION_FILE_VERSION)
   string(REGEX REPLACE "^v" "" GITVERSION_FILE_VERSION "${GITVERSION_FILE_VERSION}")
+  # file(STRINGS ...) registers no configure dependency, so editing VERSION in
+  # an existing build directory left PROJECT_VERSION -- and everything derived
+  # from it, including the generated Info.plists -- stale until a manual reconfigure.
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${SRC_DIR}/VERSION")
 endif()
 
 if(NOT DEFINED PROJECT_VERSION)
