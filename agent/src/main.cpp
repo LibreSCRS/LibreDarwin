@@ -180,6 +180,12 @@ int main()
         prompterVerifier = [](int) { return true; };
     }
     auto prompter = std::make_shared<LibreSCRS::Darwin::MacPrompterClient>(prompterSocket, std::move(prompterVerifier));
+    // The prompter helper outlives the agent that installed it, so this process
+    // can come up beside windows a previous one raised -- windows it holds no id
+    // for and nothing else will close. Clear them here, before anything below
+    // can raise a prompt of its own. Bounded and silent on failure: a prompter
+    // that is absent or wedged must not hold up the start-up.
+    prompter->reset();
 
     // [3] The owning neutral-core aggregate.
     std::mutex stateMutex;

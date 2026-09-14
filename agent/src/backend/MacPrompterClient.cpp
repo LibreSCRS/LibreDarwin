@@ -8,17 +8,24 @@
 
 #include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 
+#include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <LibreSCRS/Secure/String.h>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <cstdint>
+#include <optional>
 #include <cstring>
 #include <string_view>
 #include <utility>
@@ -46,6 +53,46 @@ Agent::Wire::UniqueFd connectPrompter(const std::string& path)
     return fd;
 }
 
+// How long the start-up reset waits for the prompter's answer. Short on
+// purpose: nothing this agent offers is served until it elapses, and the only
+// thing the answer adds is the COUNT -- which separates "nothing was standing"
+// from "the helper ignored the verb". Worth a short wait, not a long one.
+constexpr int kResetReplyBudgetMs = 500;
+
+// The floor under the receive timeout below. SO_RCVTIMEO of {0, 0} is not
+// "expire at once" on this platform -- it is the DEFAULT, which is no timeout
+// at all -- so a remainder small enough to round away must still be asked for
+// as a real interval, or the bound silently becomes its opposite.
+constexpr std::int64_t kMinReceiveBudgetUs = 1000;
+
+// Wait until @p fd has something to read, but not past @p deadline. poll's own
+// timeout restarts from the top on every EINTR, so the deadline is kept here
+// rather than handed to poll once and hoped for. Returns what is LEFT of the
+// budget when the first byte lands, so the caller's own wait for the rest of
+// the frame comes out of the same allowance -- two waits of the full budget
+// would be twice the delay this bound exists to cap. That remainder can be
+// zero or negative (the poll may return in the deadline's last fraction, or
+// just past it); expressing it in MICROSECONDS keeps a sub-millisecond one
+// from rounding to nothing, and the caller clamps what is left.
+std::optional<std::chrono::microseconds> waitReadable(int fd, std::chrono::steady_clock::time_point deadline)
+{
+    for (;;) {
+        const auto left =
+            std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now());
+        if (left <= std::chrono::milliseconds::zero()) {
+            return std::nullopt;
+        }
+        pollfd waited{.fd = fd, .events = POLLIN, .revents = 0};
+        const int ready = ::poll(&waited, 1, static_cast<int>(left.count()));
+        if (ready > 0) {
+            return std::chrono::duration_cast<std::chrono::microseconds>(deadline - std::chrono::steady_clock::now());
+        }
+        if (ready == 0 || errno != EINTR) {
+            return std::nullopt;
+        }
+    }
+}
+
 wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptions& o)
 {
     wire::PromptRequest r;
@@ -69,6 +116,14 @@ wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptio
     // The agent's address for this prompt: the prompter records it and matches
     // a later dismissal against it.
     r.promptId = o.promptId;
+    // The entry budgets. The core stops its own watchdog once a prompt is up,
+    // on the understanding that the window carries a visible deadline -- so a
+    // window shown without one is a window nothing is counting. Both travel:
+    // what the requested form is worth, and what the alternative form is worth
+    // if the holder switches to it in-dialog. 0 is spelled as absence further
+    // down the wire and must never read as an instant expiry.
+    r.deadlineMs = o.deadlineMs;
+    r.altDeadlineMs = o.altDeadlineMs;
     return r;
 }
 
@@ -158,6 +213,15 @@ wire::ConfirmReply MacPrompterClient::requestConfirmation(const wire::ConfirmAct
     if (!reply.has_value()) {
         return refuse("prompter reply malformed");
     }
+    // Same refusal as the two secret paths below, for the same reason: a reply
+    // that does not say which protocol it speaks, or says an older one, comes
+    // from a helper left behind by a previous install. An approval is the one
+    // thing that must never be accepted from a peer this agent cannot place --
+    // and the only refusal this path can express is a non-Ok verdict, which is
+    // exactly what leaves the stored value where it was.
+    if (!reply->protocolVersion || *reply->protocolVersion < wire::kPrompterProtocolVersion) {
+        return refuse("prompter too old to confirm");
+    }
     return std::move(*reply);
 }
 
@@ -191,6 +255,15 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
     }
 
     Agent::PromptResult result;
+    // The helper can outlive the agent that installed it. A reply that does
+    // not say which protocol it speaks, or says an older one, comes from a
+    // prompter that never saw the deadline, so nothing it entered is taken --
+    // the same refusal the Linux host makes when it probes its helper.
+    if (!reply->protocolVersion || *reply->protocolVersion < wire::kPrompterProtocolVersion) {
+        result.status = Agent::PromptStatus::HelperTooOld;
+        std::fill(reply->secret.begin(), reply->secret.end(), std::uint8_t{0});
+        return result;
+    }
     switch (reply->status) {
     case wire::PromptReplyStatus::Ok: {
         result.status = Agent::PromptStatus::Ok;
@@ -214,7 +287,8 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
         result.status = Agent::PromptStatus::Error;
         break;
     case wire::PromptReplyStatus::Timeout:
-        // The holder's entry time ran out; never folded into Cancelled.
+        // The window's own clock; never folded into Cancelled, which is the
+        // person's act.
         result.status = Agent::PromptStatus::Timeout;
         break;
     }
@@ -269,6 +343,14 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
     }
 
     Agent::PinChangePromptResult result;
+    // The identical refusal, over BOTH secrets: a helper that never saw the
+    // deadline never showed one, whichever modal it raised.
+    if (!reply->protocolVersion || *reply->protocolVersion < wire::kPrompterProtocolVersion) {
+        result.status = Agent::PromptStatus::HelperTooOld;
+        std::fill(reply->primary.begin(), reply->primary.end(), std::uint8_t{0});
+        std::fill(reply->secondary.begin(), reply->secondary.end(), std::uint8_t{0});
+        return result;
+    }
     switch (reply->status) {
     case wire::PromptReplyStatus::Ok: {
         result.status = Agent::PromptStatus::Ok;
@@ -295,7 +377,8 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
         result.status = Agent::PromptStatus::Error;
         break;
     case wire::PromptReplyStatus::Timeout:
-        // The holder's entry time ran out; never folded into Cancelled.
+        // The window's own clock; never folded into Cancelled, which is the
+        // person's act.
         result.status = Agent::PromptStatus::Timeout;
         break;
     }
@@ -318,6 +401,75 @@ void MacPrompterClient::cancel(const std::string& promptId) noexcept
     cancelMsg.promptId = promptId;
     const auto body = wire::toCbor(cancelMsg).encode();
     static_cast<void>(Agent::Wire::sendFrame(fd.get(), body));
+}
+
+void MacPrompterClient::reset() noexcept
+{
+    // One handler around the whole body: the log facade formats a line and
+    // hands it to an injected std::function sink, so it can throw where a bare
+    // write could not -- and a throw out of a noexcept function is the process.
+    try {
+        Agent::Wire::UniqueFd fd = connectPrompter(m_socketPath);
+        if (!fd) {
+            // The ordinary case on a machine whose prompter has never been
+            // launched: nothing is standing, because nobody raised anything.
+            // Said at the lowest level all the same -- a start-up that skips a
+            // step silently reads the same as one that never had the step.
+            Agent::log::info("prompter not running at start-up; nothing to reset");
+            return;
+        }
+        // Verified like every other path here: a process that unlinked and
+        // re-bound prompter.sock gets no frame from us.
+        if (!m_peerVerifier(fd.get())) {
+            Agent::log::warn("prompter reset skipped: the serving peer failed verification");
+            return;
+        }
+        if (!Agent::Wire::sendFrame(fd.get(), wire::toCbor(wire::PromptReset{}).encode()).has_value()) {
+            Agent::log::warn("prompter reset could not be sent");
+            return;
+        }
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kResetReplyBudgetMs);
+        const auto left = waitReadable(fd.get(), deadline);
+        if (!left) {
+            Agent::log::warn("prompter did not answer the reset within the start-up budget");
+            return;
+        }
+        // poll only says a byte arrived; recvFrame reads a WHOLE frame and
+        // would sit on a peer that sent a partial one. The receive timeout is
+        // what bounds that second wait -- out of what REMAINS of the same
+        // budget, because a helper that dribbles half a frame is as wedged as
+        // one that sends nothing, and must cost the start-up no more.
+        //
+        // Clamped to a floor, and never asked for as zero: a first byte landing
+        // in the last fraction of the budget leaves a remainder that rounds
+        // away (and a poll returning just past the deadline leaves a negative
+        // one, which setsockopt refuses outright) -- and either way the socket
+        // would keep SO_RCVTIMEO's default of no timeout, turning the bound
+        // this comment promises into the unbounded read it exists to prevent.
+        const timeval receiveBudget{
+            .tv_sec = 0,
+            .tv_usec = static_cast<suseconds_t>(std::max<std::int64_t>(left->count(), kMinReceiveBudgetUs))};
+        if (::setsockopt(fd.get(), SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0) {
+            // With no bound in place there is nothing to stop the read below
+            // sitting on a half-sent frame, so it is not attempted at all.
+            Agent::log::warn("prompter reset: the reply wait could not be bounded, so it was not taken");
+            return;
+        }
+        auto frame = Agent::Wire::recvFrame(fd.get());
+        if (!frame.has_value()) {
+            Agent::log::warn("prompter gave no readable answer to the reset");
+            return;
+        }
+        const auto done = wire::parseResetDone(frame->body);
+        if (!done.has_value()) {
+            Agent::log::warn("prompter answered the reset with a message this build cannot read");
+            return;
+        }
+        Agent::log::infof("prompter reset: {} window(s) closed", done->closed);
+    } catch (...) {
+        // Nothing on this path is worth the agent's life, and after a throw out
+        // of the log facade there is nothing left to say it with either.
+    }
 }
 
 } // namespace LibreSCRS::Darwin

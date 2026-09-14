@@ -59,6 +59,18 @@ public:
     // card, so an unaddressed dismissal would close whichever window is up --
     // very often another card's.
     void cancel(const std::string& promptId) noexcept override;
+    // Ask the prompter to close every window it still has standing and forget
+    // the state behind them, then wait -- briefly -- for it to say it has. The
+    // helper OUTLIVES the agent that installed it, so a fresh agent can start
+    // beside windows it never raised: it has no id for them, and a dismissal
+    // without one would close whichever modal happens to be topmost. Called
+    // once at start-up, before anything can raise a prompt of its own.
+    //
+    // Never throws, and never waits long. Nothing is served until this returns,
+    // so a prompter that is absent, wedged or silent must cost the start-up a
+    // bounded moment rather than hold it: an agent that never finishes starting
+    // is worse than one that starts beside a stale window.
+    void reset() noexcept;
 
 private:
     [[nodiscard]] Agent::PromptResult request(wire::PromptKind kind, const Agent::PromptOptions& options);
