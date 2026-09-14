@@ -200,6 +200,30 @@ private:
     bool m_open{false};
 };
 
+// Opens a latch when the scope ends, however it ends. A failing ASSERT returns
+// from the middle of a case, and a latch that some other thread is parked on
+// must not be left shut behind it: the rig's teardown waits on that thread, so
+// the real failure would be followed by a second, misleading one from a park
+// that timed out. Opening twice is harmless -- the latch is one-shot -- so this
+// sits under an explicit open rather than replacing it, and only the explicit
+// one is load-bearing for the ordering a case asserts.
+class LatchRelease
+{
+public:
+    explicit LatchRelease(std::shared_ptr<Latch> latch) : m_latch(std::move(latch)) {}
+
+    ~LatchRelease()
+    {
+        m_latch->open();
+    }
+
+    LatchRelease(const LatchRelease&) = delete;
+    LatchRelease& operator=(const LatchRelease&) = delete;
+
+private:
+    std::shared_ptr<Latch> m_latch;
+};
+
 // The agent's log facade, captured for the length of one case. The line this
 // file cares about is emitted on the confirmation worker, so the lines are held
 // under a mutex; resetForTest() runs from the destructor so a failing assertion
@@ -363,6 +387,49 @@ TEST(CscaImportSocket, AnImportTheHumanDeclinesChangesNothing)
         << "a declined import installed anchors";
 }
 
+// The other half of the order the confirmation sits in: a request that cannot
+// be served must not reach a person at all. Putting a dialog in front of
+// someone and then refusing the request whatever they answer teaches them that
+// the question does not matter -- and it hands an unserviceable request the
+// power to interrupt whoever is at the keyboard. The refusal name alone cannot
+// tell the two implementations apart, because a person who says no is answered
+// NotAuthorized while a malformed request is answered InvalidRequest only if
+// the malformation was noticed first; so the COUNT of times the person was
+// asked is what is asserted here.
+TEST(CscaImportSocket, AnImportAddressingADescriptorThatIsNotThereAsksNobody)
+{
+    Rig rig;
+    int asked = 0;
+    rig.frontend->setConfirmProvider([&asked](const LibreSCRS::Darwin::wire::ConfirmAction&) {
+        ++asked;
+        // Cancelled, so an implementation that asks first answers NotAuthorized
+        // -- a different name from the one this case expects, on top of the
+        // count below.
+        return LibreSCRS::Darwin::wire::ConfirmReply{LibreSCRS::Darwin::wire::PromptReplyStatus::Cancelled, ""};
+    });
+
+    const int fd = makeInputFile(asView(aValidMasterList()));
+    ASSERT_GE(fd, 0);
+    ASSERT_EQ(::lseek(fd, 0, SEEK_CUR), 0) << "the descriptor must start where a read would be visible";
+
+    // ONE descriptor, addressed as the second: the index is out of range for
+    // the vector that actually arrived. The frame is built here rather than
+    // through importFd, which always addresses index 0 and so cannot express
+    // this at all.
+    const std::array<int, 1> fds{fd};
+    const auto reply = rig.roundTrip(1, Agent::Wire::ImportCscaMasterList{.list = 1}, fds);
+
+    EXPECT_EQ(errName(reply), "InvalidRequest") << "an index with no descriptor behind it was not refused as malformed";
+    EXPECT_EQ(asked, 0) << "a person was asked to approve an import that could never have been performed";
+
+    EXPECT_EQ(::lseek(fd, 0, SEEK_CUR), 0) << "a malformed import read the descriptor that did arrive";
+    ::close(fd);
+
+    EXPECT_FALSE(rig.core->configStore().cscaAnchorState().has_value()) << "a malformed import was recorded";
+    EXPECT_FALSE(Agent::Trust::AnchorCache{fs::path{rig.core->configStore().cscaCacheDir()}}.holdsAnchor())
+        << "a malformed import installed anchors";
+}
+
 // --- an answer that arrives after everything that asked for it is gone -------
 //
 // The block that waits for the person outlives whatever asked it: the person
@@ -432,6 +499,111 @@ TEST(CscaImportSocket, AnAnswerThatArrivesAfterTheFrontendIsGoneIsDiscarded)
     // The core is gone, so the disk is the only witness left -- and it still
     // holds what the import put there.
     EXPECT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor()) << "a late answer forgot the anchors";
+}
+
+// The SECOND place the same answer can arrive too late, and the one no
+// teardown can close by waiting. Above, the person was still holding the
+// dialog when the frontend went, so the worker itself found it gone. Here they
+// answer while the frontend is still standing: the worker finds it alive and
+// marshals the verdict back to the loop -- and the frontend is released before
+// the loop gets round to running it. The window opens AFTER the last moment a
+// host could wait for, which is why the continuation carries a liveness check
+// of its own and says so in its own words when it fires.
+//
+// The loop is parked on purpose so that "before the loop gets round to it" is
+// a fact rather than a race, and the worker is allowed to finish before the
+// frontend is released so that the verdict is enqueued while the frontend is
+// still alive -- otherwise this case would silently become the one above.
+TEST(CscaImportSocket, AnAnswerMarshalledBackToALoopThatRunsItTooLateIsDiscarded)
+{
+    Rig rig;
+    confirmEverything(rig);
+    ASSERT_EQ(errName(importBytes(rig, 1, aValidMasterList())), "") << "a valid list was refused";
+
+    const fs::path cacheDir{rig.core->configStore().cscaCacheDir()};
+    ASSERT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor()) << "the import installed no anchor to protect";
+
+    CapturedLog log;
+
+    // Shared rather than captured by reference, for the same reason as above:
+    // the provider lives on in the dispatch block's copy of the confirmation
+    // function, which outlives this frame on a failing path.
+    const auto entered = std::make_shared<Latch>();
+    const auto released = std::make_shared<Latch>();
+    rig.frontend->setConfirmProvider([entered, released](const LibreSCRS::Darwin::wire::ConfirmAction&) {
+        entered->open();
+        EXPECT_TRUE(released->wait(std::chrono::seconds(30))) << "the confirmation was never let go";
+        return LibreSCRS::Darwin::wire::ConfirmReply{LibreSCRS::Darwin::wire::PromptReplyStatus::Ok, ""};
+    });
+
+    // Sent and deliberately never read: the answer this case is about never
+    // reaches a reply. The connection is closed here, at the end of this scope,
+    // rather than at the end of the case -- so the hang-up the transport handles
+    // for it runs while the frontend is still standing, and the dispatch_sync
+    // below drains it. Left to the end it would be handled against a frontend
+    // that had been released, which is safe today only because this rig
+    // registers no disconnect handlers.
+    {
+        Client client(rig.path);
+        client.send(1, Agent::Wire::ForgetCscaAnchors{});
+        if (!entered->wait(std::chrono::seconds(5))) {
+            released->open();
+            FAIL() << "the forget request never reached the confirmation";
+        }
+    }
+
+    // Drop the frontend's own copy of the confirmation function, ON the thread
+    // that reads it -- which doubles as proof that the handler which posted the
+    // worker has returned, so its stack copy is gone with it. What is left is
+    // the copy the dispatch block took when it was posted, and a dispatch block
+    // releases its captures only after its last statement.
+    SocketFrontend* frontend = &*rig.frontend;
+    dispatch_sync(rig.transport->loopQueue(), ^{
+      frontend->setConfirmProvider([](const LibreSCRS::Darwin::wire::ConfirmAction&) {
+          ADD_FAILURE() << "nothing else in this case asks a person anything";
+          return LibreSCRS::Darwin::wire::ConfirmReply{LibreSCRS::Darwin::wire::PromptReplyStatus::Cancelled, ""};
+      });
+    });
+
+    // Park the loop BEFORE the person answers, so the verdict the worker
+    // marshals back is enqueued behind this block instead of running on
+    // arrival. The loop queue is serial, so anything posted afterwards is
+    // behind it whether or not it has started.
+    const auto loopHeld = std::make_shared<Latch>();
+    // The loop cannot be let go here: the release below has to follow the
+    // frontend's, or the verdict runs against a frontend that is still alive and
+    // this case quietly becomes a different one. So the early-return path gets a
+    // guard instead of an earlier open.
+    const LatchRelease releaseLoop(loopHeld);
+    rig.transport->post(
+        [loopHeld] { EXPECT_TRUE(loopHeld->wait(std::chrono::seconds(30))) << "the loop was never let go"; });
+
+    released->open();
+
+    // The handshake that makes the ordering a fact rather than a hope. With the
+    // frontend's copy of the provider dropped above, the latch that provider
+    // captured falls back to this test's single reference exactly when the
+    // dispatch block is done -- and by then the block has taken the guard,
+    // found the frontend alive, and enqueued the verdict behind the parked
+    // loop. Releasing the frontend before that would put this case back on the
+    // worker-side path the previous one already holds.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (released.use_count() > 1 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ASSERT_EQ(released.use_count(), 1) << "the confirmation worker never finished with the answer";
+
+    // No quiesce: the transport and the core stay up and the loop keeps its
+    // posted work, which is the whole point -- only the frontend goes.
+    rig.frontend.reset();
+    loopHeld->open();
+
+    ASSERT_TRUE(log.waitForLine("answered after the frontend was gone; discarded on the loop", std::chrono::seconds(2)))
+        << "the verdict was dropped on the loop without a word of its own:\n"
+        << log.joined();
+
+    EXPECT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor())
+        << "an answer that arrived too late forgot the anchors anyway";
 }
 
 // The Linux suite spends the budget over the wire, one refused import at a
@@ -599,8 +771,10 @@ TEST(CscaReconciliationSocket, ARememberedReportSurvivesARestartThatFindsItsAnch
     // Guards the three discards below against the cheap way to pass them: a
     // construction that cleared the report unconditionally is green over every
     // empty cache and fails only here, where the anchors are real.
+    //
+    // No confirmation provider on this rig: it only reads what the restart made
+    // of the report, and reading asks nobody.
     Rig second(nullptr, nullptr, first.tmp);
-    confirmEverything(second);
     const auto state = anchorState(second, 1);
     ASSERT_FALSE(nothingInstalled(state)) << "a restart discarded a report whose anchors are still on disk";
     EXPECT_EQ(uintOf(state, "anchors"), 2u);

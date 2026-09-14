@@ -1923,6 +1923,16 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
       transport->post([this, guard, connId, req, verdict, apply] {
           const std::lock_guard continuationLock(guard->mutex);
           if (!guard->alive) {
+              // The same fact reached the other way round: the answer was in
+              // time when the worker marshalled it here and is not any more.
+              // The suffix is what separates the two, because no teardown can
+              // close this window by waiting -- it opens after the last moment
+              // a host could wait for. Swallowed for the same reason as above.
+              try {
+                  A::log::warn("trust confirmation answered after the frontend was gone; discarded on the loop");
+              } catch (...) {
+                  // Nothing left to say it with.
+              }
               return;
           }
           if (verdict.status != wire::PromptReplyStatus::Ok) {
