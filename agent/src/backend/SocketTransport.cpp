@@ -517,6 +517,7 @@ void SocketTransport::publishReader(const Agent::ReaderState& reader)
         r.card = handleFor(reader.card);
     }
     m_readers[r.handle] = r;
+    rebuildRoster();
     broadcast(Agent::Wire::toCbor(Agent::Wire::ReaderAdded{r}));
 }
 
@@ -553,6 +554,7 @@ void SocketTransport::publishCard(const Agent::CardState& card)
     routing.caps = card.capabilities;
     routing.preAuth = card.preReadAuth;
     m_cardRouting[c.handle] = std::move(routing);
+    rebuildRoster();
 
     broadcast(Agent::Wire::toCbor(Agent::Wire::CardAdded{c}));
 }
@@ -572,6 +574,7 @@ void SocketTransport::withdraw(Agent::ObjectId object)
     }
     m_idToHandle.erase(it);
     m_handleToId.erase(handle);
+    rebuildRoster();
 }
 
 void SocketTransport::updateProperties(Agent::ObjectId reader, const Agent::PropertyDelta& delta)
@@ -715,6 +718,41 @@ std::optional<SocketTransport::ReaderCardInfo> SocketTransport::readerCard(const
         }
     }
     return info;
+}
+
+SocketTransport::PresenceRoster SocketTransport::presenceRoster() const
+{
+    std::lock_guard<std::mutex> lk(m_rosterMutex);
+    return m_roster;
+}
+
+void SocketTransport::rebuildRoster()
+{
+    PresenceRoster roster;
+    roster.readerNames.reserve(m_readers.size());
+    roster.cardKeys.reserve(m_readers.size());
+    for (const auto& [readerHandle, reader] : m_readers) {
+        roster.readerNames.push_back(reader.name);
+        // The card objects are the source: each names the reader it sits in, and
+        // its routing carries the per-insertion key (the stringified ObjectId).
+        // At most one card object names a reader at any time: a withdraw is
+        // posted the moment the monitor sees the card gone, a publish only after
+        // the deferred resolve, and a card withdrawn while resolving is dropped
+        // before it can be published (applyCardResolution). The first match is
+        // therefore the only match.
+        std::string cardKey;
+        for (const auto& [cardHandle, card] : m_cards) {
+            if (card.reader == readerHandle) {
+                if (const auto rit = m_cardRouting.find(cardHandle); rit != m_cardRouting.end()) {
+                    cardKey = rit->second.cardKey;
+                }
+                break;
+            }
+        }
+        roster.cardKeys.push_back(std::move(cardKey));
+    }
+    std::lock_guard<std::mutex> lk(m_rosterMutex);
+    m_roster = std::move(roster);
 }
 
 void SocketTransport::broadcastConfigChanged(const std::string& key)

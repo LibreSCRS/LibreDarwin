@@ -6,6 +6,7 @@
 // post marshaling, and the client-disconnect fan-out (registration order). The
 // transport's own serial dispatch queue is serviced by GCD (no run loop needed);
 // loop-affine calls are marshaled with dispatch_sync.
+#include <LibreSCRS/Darwin/backend/AgentCoreSeams.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
@@ -16,11 +17,20 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <atomic>
+#include <charconv>
+#include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace LibreSCRS::Darwin;
@@ -258,6 +268,252 @@ TEST(SocketTransport, PostRunsOnTheLoop)
     Latch<int> ran;
     tr->post([&] { ran.push(1); });
     EXPECT_TRUE(ran.waitFor(1, std::chrono::seconds(2)));
+
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
+// The presence roster the reader-identity seams read: every published
+// reader's PC/SC name, index-aligned with the per-insertion key of the card it
+// holds -- the stringified card ObjectId CardRouting and the CardKeyTracker
+// use -- or empty for an empty slot. The key comes from the CARD objects
+// (each names its reader), so it is present the moment publishCard returns
+// and gone the moment the card is withdrawn, independent of the reader's
+// HasCard/Card property flip that follows both.
+TEST(SocketTransport, PresenceRosterAlignsEveryReaderWithTheKeyOfItsCard)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    SocketTransport* trp = tr.get();
+
+    __block SocketTransport::PresenceRoster roster;
+    dispatch_sync(tr->loopQueue(), ^{
+      Agent::ReaderState a;
+      a.id = Agent::ObjectId(7);
+      a.name = "Reader A";
+      trp->publishReader(a);
+      Agent::CardState c;
+      c.id = Agent::ObjectId(8);
+      c.reader = Agent::ObjectId(7);
+      trp->publishCard(c);
+      Agent::ReaderState b;
+      b.id = Agent::ObjectId(9);
+      b.name = "Reader B";
+      trp->publishReader(b);
+      roster = trp->presenceRoster();
+    });
+
+    ASSERT_EQ(roster.readerNames.size(), 2u);
+    ASSERT_EQ(roster.cardKeys.size(), roster.readerNames.size());
+    // A __block variable cannot be captured by a lambda, so the lookup takes the
+    // roster it reads. A miss yields an empty optional rather than an index one
+    // past the end, so a failing roster fails on the name, not on a read past
+    // the vector.
+    const auto keyOf = [](const SocketTransport::PresenceRoster& r, const std::string& name) {
+        const auto it = std::find(r.readerNames.begin(), r.readerNames.end(), name);
+        return it == r.readerNames.end()
+                   ? std::optional<std::string>{}
+                   : std::optional<std::string>{r.cardKeys[static_cast<std::size_t>(it - r.readerNames.begin())]};
+    };
+    EXPECT_EQ(keyOf(roster, "Reader A"), "8") << "the card's ObjectId, stringified, not its wire handle";
+    EXPECT_EQ(keyOf(roster, "Reader B"), "") << "an empty slot carries an empty key";
+
+    // The card is withdrawn: the slot reads empty again.
+    dispatch_sync(tr->loopQueue(), ^{
+      trp->withdraw(Agent::ObjectId(8));
+      roster = trp->presenceRoster();
+    });
+    ASSERT_EQ(roster.readerNames.size(), 2u);
+    EXPECT_EQ(keyOf(roster, "Reader A"), "");
+
+    // A withdrawn reader leaves the roster, both columns together.
+    dispatch_sync(tr->loopQueue(), ^{
+      trp->withdraw(Agent::ObjectId(9));
+      roster = trp->presenceRoster();
+    });
+    ASSERT_EQ(roster.readerNames.size(), 1u);
+    ASSERT_EQ(roster.cardKeys.size(), 1u);
+    EXPECT_EQ(roster.readerNames[0], "Reader A");
+
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
+// The three seams main.cpp composes over the live transport, driven through the
+// same functions production installs -- not re-implemented in the test. The
+// routing seams are loop-thread reads (a reader-addressed request arrives on
+// the loop); the identity resolver is the one seam a reader WORKER thread
+// calls, so it is exercised from the test thread, off the loop.
+TEST(SocketTransport, ComposedSeamsResolveThroughTheLiveRoster)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    SocketTransport* trp = tr.get();
+
+    __block std::string readerAHandle;
+    __block std::string readerBHandle;
+    __block std::optional<Agent::ReaderCard> readerACard;
+    __block std::optional<Agent::ReaderCard> readerBCard;
+    __block std::optional<Agent::ObjectId> readerAKey;
+    __block std::optional<Agent::ObjectId> readerBKey;
+    dispatch_sync(tr->loopQueue(), ^{
+      Agent::ReaderState a;
+      a.id = Agent::ObjectId(7);
+      a.name = "Reader A";
+      trp->publishReader(a);
+      Agent::CardState c;
+      c.id = Agent::ObjectId(8);
+      c.reader = Agent::ObjectId(7);
+      trp->publishCard(c);
+      // The reader's HasCard/Card flip PresenceModel emits right after the card
+      // object. readerCard() (the two routing seams) reads the reader's Card
+      // property; the roster (the identity seam) reads the card objects. In
+      // production the flip lands on the loop before the deferred resolve
+      // publishes the card, so for the length of that resolve readerCard()
+      // names a key the roster does not yet carry -- a reader-addressed prompt
+      // in that window names no reader, which the design calls honest.
+      trp->updateProperties(Agent::ObjectId(7), Agent::PropertyDelta{.hasCard = true, .card = Agent::ObjectId(8)});
+      Agent::ReaderState b;
+      b.id = Agent::ObjectId(9);
+      b.name = "Reader B";
+      trp->publishReader(b);
+      for (const auto& rs : trp->currentState().readers) {
+          (rs.name == "Reader A" ? readerAHandle : readerBHandle) = rs.handle;
+      }
+      readerACard = makeResolveReaderCard(*trp)(readerAHandle);
+      readerBCard = makeResolveReaderCard(*trp)(readerBHandle);
+      readerAKey = makeResolveCardKey(*trp)(readerAHandle);
+      readerBKey = makeResolveCardKey(*trp)(readerBHandle);
+    });
+
+    ASSERT_TRUE(readerACard.has_value());
+    EXPECT_EQ(readerACard->readerId, Agent::ObjectId(7));
+    EXPECT_EQ(readerACard->readerName, "Reader A");
+    EXPECT_EQ(readerACard->cardKey, "8");
+    EXPECT_FALSE(readerBCard.has_value()) << "a reader holding no card resolves to nothing";
+    ASSERT_TRUE(readerAKey.has_value());
+    EXPECT_EQ(*readerAKey, Agent::ObjectId(8));
+    EXPECT_FALSE(readerBKey.has_value());
+
+    // Off the loop, as the prompt gate calls it.
+    const auto resolveIdentity = makeResolveReaderIdentity(*tr);
+    EXPECT_EQ(resolveIdentity("8").full, "Reader A");
+    EXPECT_EQ(resolveIdentity("9"), Agent::ReaderIdentity{}) << "an unknown key names no reader";
+    EXPECT_EQ(resolveIdentity(""), Agent::ReaderIdentity{}) << "an empty key never borrows an empty slot's name";
+
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
+// The roster is the one presence read a reader worker makes while the loop
+// keeps mutating presence. A reader thread snapshots it continuously while the
+// loop withdraws and re-publishes one card; every snapshot must be a consistent
+// state (sizes aligned, the untouched reader's key stable, the churning
+// reader's key one of its two legal values) and BOTH legal values must be
+// observed, or the reads never overlapped the mutations and the test proved
+// nothing. This build has no thread sanitizer, so this exercises the
+// cross-thread path rather than proving the mutex race-free.
+TEST(SocketTransport, PresenceRosterIsReadableWhileTheLoopMutatesIt)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    SocketTransport* trp = tr.get();
+
+    dispatch_sync(tr->loopQueue(), ^{
+      Agent::ReaderState a;
+      a.id = Agent::ObjectId(7);
+      a.name = "Reader A";
+      trp->publishReader(a);
+      Agent::ReaderState b;
+      b.id = Agent::ObjectId(9);
+      b.name = "Reader B";
+      trp->publishReader(b);
+      // An ODD id: the churn below mints even ids only, and a publish of an
+      // id already published would re-home that card rather than add one.
+      Agent::CardState stable;
+      stable.id = Agent::ObjectId(11);
+      stable.reader = Agent::ObjectId(9);
+      trp->publishCard(stable);
+    });
+
+    // The churn: a card comes and goes in reader A, one publish OR one withdraw
+    // per loop turn so each state lasts a whole turn, re-posted while the
+    // sampler is still running. A fresh even ObjectId per insertion, as the
+    // presence model mints one per insert. Everything the loop touches outlives
+    // the last step: the drain below runs after the stop.
+    std::atomic<bool> running{true};
+    std::uint64_t nextCard = 8; // loop thread only
+    bool seated = false;        // loop thread only
+    std::function<void()> churn;
+    churn = [&churn, &running, &nextCard, &seated, trp] {
+        if (!running.load()) {
+            return;
+        }
+        if (seated) {
+            trp->withdraw(Agent::ObjectId(nextCard));
+            nextCard += 2;
+        } else {
+            Agent::CardState c;
+            c.id = Agent::ObjectId(nextCard);
+            c.reader = Agent::ObjectId(7);
+            trp->publishCard(c);
+        }
+        seated = !seated;
+        dispatch_async(trp->loopQueue(), ^{
+          churn();
+        });
+    };
+    std::atomic<bool> seenHeld{false};
+    std::atomic<bool> seenEmpty{false};
+    std::atomic<int> inconsistent{0};
+    // The sampler starts BEFORE the churn is kicked, so it overlaps the
+    // mutations from the first step even on a slow runner.
+    std::thread sampler([&] {
+        const auto start = std::chrono::steady_clock::now();
+        while (!(seenHeld.load() && seenEmpty.load()) &&
+               std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            const auto roster = trp->presenceRoster();
+            if (roster.readerNames.size() != roster.cardKeys.size() || roster.readerNames.size() != 2) {
+                inconsistent.fetch_add(1);
+                continue;
+            }
+            for (std::size_t i = 0; i < roster.readerNames.size(); ++i) {
+                if (roster.readerNames[i] == "Reader B") {
+                    if (roster.cardKeys[i] != "11") {
+                        inconsistent.fetch_add(1);
+                    }
+                } else if (roster.readerNames[i] == "Reader A") {
+                    if (roster.cardKeys[i].empty()) {
+                        seenEmpty.store(true);
+                        continue;
+                    }
+                    // Parsed without exceptions: a throw on this thread would
+                    // end the whole binary instead of failing this test.
+                    std::uint64_t key = 0;
+                    const auto* end = roster.cardKeys[i].data() + roster.cardKeys[i].size();
+                    const auto parsed = std::from_chars(roster.cardKeys[i].data(), end, key);
+                    if (parsed.ec != std::errc{} || parsed.ptr != end || key % 2 != 0) {
+                        inconsistent.fetch_add(1); // not a key the churn ever minted
+                    } else {
+                        seenHeld.store(true);
+                    }
+                } else {
+                    inconsistent.fetch_add(1);
+                }
+            }
+        }
+    });
+    dispatch_async(tr->loopQueue(), ^{
+      churn();
+    });
+    sampler.join();
+    running.store(false);
+    dispatch_sync(tr->loopQueue(), ^{
+                  }); // drain the last churn step
+
+    EXPECT_EQ(inconsistent.load(), 0) << "every snapshot must be one consistent presence state";
+    EXPECT_TRUE(seenHeld.load()) << "the sampler never saw reader A holding a card: reads did not overlap";
+    EXPECT_TRUE(seenEmpty.load()) << "the sampler never saw reader A empty: reads did not overlap";
 
     tr.reset();
     std::filesystem::remove(path);

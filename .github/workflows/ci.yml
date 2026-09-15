@@ -221,23 +221,13 @@ jobs:
     # answers "has this repository followed the agent trunk"; this one answers
     # "does what it declares still build", and the two can disagree.
     #
-    # It is red on purpose right now, and this is what turns it green: the pin
-    # names a LibreAgent revision from before the authorizer's return type
-    # became a three-way outcome, so the header this repository ships does not
-    # compile against it. A pin may only name a revision that exists on the
-    # remote, so the order is fixed -- the agent is published first, then this
-    # pin is moved to a published revision that carries the outcome type, and
-    # only then is anything tagged here. Raising the pin by hand to a revision
-    # nobody can fetch would turn this green and every checkout that uses it
-    # red.
-    #
-    # Until that first step happens the job ABOVE is red as well, for the same
-    # missing type: the outcome type is not on the agent's published branch
-    # either, so `ref: main` fetches headers that predate it. The benefit of
-    # splitting the two -- a trunk verdict that survives a stale pin -- is
-    # therefore pending, not yet demonstrated; what the split does buy today is
-    # that the two reds name different next steps, publish and re-pin, instead
-    # of one job naming a pin for both.
+    # The pin may only name a revision that exists on the remote, so the
+    # order is fixed: the agent is published first, then the pin is moved to
+    # that published revision, and only then is anything tagged here. Raising
+    # the pin by hand to a revision nobody can fetch would turn this green and
+    # every checkout that uses it red. The split buys a trunk verdict that
+    # survives a stale pin: when the two disagree they name different next
+    # steps, publish and re-pin, instead of one job naming a pin for both.
     #
     # Failing here rather than inside the macOS build is the whole point: the
     # same headers fail the same way in build-macos, an hour in, naming no
@@ -288,7 +278,7 @@ jobs:
           rc=0
           ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgentPinned/include" pin || rc=$?
           if [ "$rc" -eq 1 ]; then
-            echo "::error file=cmake/libreagent.pin::this repository does not build against the LibreAgent revision it declares. Publish the agent revision that carries the three-way authorization outcome, move this pin to it, and re-run; the pin may name only a revision that exists on the remote, so moving it first would break every checkout that reads it."
+            echo "::error file=cmake/libreagent.pin::this repository does not build against the LibreAgent revision it declares. Publish the agent revision these headers need, move this pin to it, and re-run; the pin may name only a revision that exists on the remote, so moving it first would break every checkout that reads it."
           elif [ "$rc" -ne 0 ]; then
             echo "::error::the interface check refused to judge the pinned revision (rc=$rc); its own output above names why. This says nothing about the pin."
           fi

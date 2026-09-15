@@ -7,6 +7,7 @@
 // around the neutral LibreAgent::AgentCore, then drives the process CFRunLoop while
 // the transport's GCD queue services the socket and the MonitorBridge pumps card
 // presence.
+#include <LibreSCRS/Darwin/backend/AgentCoreSeams.h> // the reader-routing + identity seams the core consults
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 #include <LibreSCRS/Darwin/backend/OsLogSink.h>
@@ -60,32 +61,6 @@ std::string envOr(const char* key, const std::string& fallback)
 {
     const char* v = std::getenv(key);
     return (v != nullptr && *v != '\0') ? std::string(v) : fallback;
-}
-
-// The macOS reader-routing seams AgentCore consults: reader wire handle ->
-// {readerId, readerName, cardKey} / the card's ObjectId, answered from the
-// transport's self-consistent presence snapshot (the twin of Linux's
-// AgentCoreSeams). The transport MUST outlive the AgentCore that stores these.
-Agent::ResolveReaderCard makeResolveReaderCard(const LibreSCRS::Darwin::SocketTransport& transport)
-{
-    return [&transport](const std::string& readerHandle) -> std::optional<Agent::ReaderCard> {
-        const auto rc = transport.readerCard(readerHandle);
-        if (!rc || rc->cardKey.empty()) {
-            return std::nullopt;
-        }
-        return Agent::ReaderCard{.readerId = rc->readerId, .readerName = rc->readerName, .cardKey = rc->cardKey};
-    };
-}
-
-Agent::Pkcs11Broker::ResolveCardKeySeam makeResolveCardKey(const LibreSCRS::Darwin::SocketTransport& transport)
-{
-    return [&transport](const std::string& readerHandle) -> std::optional<Agent::ObjectId> {
-        const auto rc = transport.readerCard(readerHandle);
-        if (!rc || rc->cardKey.empty()) {
-            return std::nullopt;
-        }
-        return Agent::ObjectId{std::strtoull(rc->cardKey.c_str(), nullptr, 10)};
-    };
 }
 
 } // namespace
@@ -191,6 +166,10 @@ int main()
     std::mutex stateMutex;
     Agent::AgentCore core(resolver, *transport, authorizer, prompter, configFile, cacheRoot,
                           makeResolveReaderCard(*transport), makeResolveCardKey(*transport));
+    // The prompt gate stamps every dialog with the reader that holds the card
+    // (model + contact/contactless slot), looked up in the transport's presence
+    // roster. Before any operation can run; the rig performs the same step.
+    installReaderIdentityResolver(core, *transport);
 
     // Tell the plugins where the country-signing anchors live, before any card
     // can be read against them. The DIRECTORY travels, never its contents, so a
@@ -260,7 +239,10 @@ int main()
         if (frontend) {
             frontend->onCardRemovedForLease(cardKey);
         }
-        core.operationManager().invalidateReaderSession(core.presenceModel().readerIdFor(readerName));
+        // Release the power hold and invalidate the session through the shared
+        // helper: the release is what its test pins; release-then-invalidate
+        // is the documented convention.
+        Agent::releaseReaderOnCardRemoved(core.operationManager(), core.presenceModel().readerIdFor(readerName));
     });
 
     // A successful config mutation emits Config1.Changed to every subscriber.
@@ -304,6 +286,13 @@ int main()
             // The exact cache set lives in clearFullScrubCaches(), one source
             // of truth shared with the scrub regression test.
             Agent::clearFullScrubCaches(core.credentialCache(), core.credentialSnapshotCache());
+            // The power-hold FLAG is deliberately left where it is, unlike in
+            // the card-removed hook: the worker drops the hold handle on this
+            // invalidate (the reader loses power on sleep anyway) and renews
+            // it on its next idle sweep if the card is still seated after
+            // wake. A card gone by then clears the flag through the
+            // card-removed hook; a reader re-enumerated by then is withdrawn
+            // first, and the frontend stops its worker, flag and all.
             for (const auto& reader : core.objectRegistry().readers()) {
                 core.operationManager().invalidateReaderSession(reader.id);
             }

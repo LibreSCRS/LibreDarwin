@@ -21,6 +21,7 @@
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
 
+#include <LibreSCRS/Darwin/backend/AgentCoreSeams.h> // installReaderIdentityResolver
 #include <LibreSCRS/Agent/AgentCore.h>
 #include <LibreSCRS/Agent/PresenceTypes.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
@@ -139,6 +140,9 @@ struct Rig
             tmp / "config.json", tmp / "cache",
             [](const std::string&) -> std::optional<Agent::ReaderCard> { return std::nullopt; },
             [](const std::string&) -> std::optional<Agent::ObjectId> { return std::nullopt; });
+        // The same composition step main.cpp performs, so a rig-driven prompt
+        // names the reader the way production does.
+        LibreSCRS::Darwin::installReaderIdentityResolver(*core, *transport);
         frontend.emplace(*transport, *core, "0.1-test", std::move(plugins));
         frontend->start();
     }

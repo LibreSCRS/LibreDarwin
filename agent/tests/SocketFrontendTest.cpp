@@ -59,6 +59,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 using namespace LibreSCRS::Darwin;
@@ -1631,4 +1632,161 @@ TEST(SocketFrontend, FallsBackToTheNoOpDepositorWithoutARegistry)
     Rig rig; // no registry
     EXPECT_NE(dynamic_cast<Agent::Operations::NullCredentialDepositor*>(&rig.frontend->credentialDepositor()), nullptr)
         << "a host with no registry must hand the flows the shared no-op, not nothing";
+}
+
+namespace {
+
+// The bench roster: the two OMNIKEY slots share a serial and differ only in
+// the bracketed product string, which is what tells the contact slot from its
+// contactless twin. A single-interface Gemalto is the control. Readers 1..3,
+// cards 11..13, one card per reader.
+struct BenchReader
+{
+    Agent::ObjectId reader;
+    Agent::ObjectId card;
+    const char* name;
+};
+const std::array<BenchReader, 3> kBench{{
+    {Agent::ObjectId(1), Agent::ObjectId(11), "Gemalto PC Twin Reader (69988A87) 02 00"},
+    {Agent::ObjectId(2), Agent::ObjectId(12),
+     "HID Global OMNIKEY 5422 Smartcard Reader [OMNIKEY 5422 Smartcard Reader] (IM0O2C00NF10456904) 01 00"},
+    {Agent::ObjectId(3), Agent::ObjectId(13),
+     "HID Global OMNIKEY 5422 Smartcard Reader [OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00"},
+}};
+
+// Export the bench through the PRODUCTION presence path: onReaderPublished ->
+// onCardPublished -> deferred held-session resolve on the reader's worker ->
+// applyCardResolution -> publishCard, with the detached session factory so no
+// PC/SC daemon is needed. Cards go in the order PresenceModel emits an
+// insertion: the card object, then the reader's HasCard/Card flip. The fake
+// resolver knows no plugin, so each resolve exhausts its retries and publishes
+// the card with no capabilities -- the export still happens, which is what the
+// hold is keyed on. Returns once every card is exported (bounded); a fatal
+// failure here aborts only this helper, so callers wrap it in
+// ASSERT_NO_FATAL_FAILURE.
+void exportBench(Rig& rig)
+{
+    rig.core->operationManager().setSessionFactoryForTest(detachedSessionFactory());
+    for (const auto& b : kBench) {
+        Agent::ReaderState r;
+        r.id = b.reader;
+        r.name = b.name;
+        rig.frontend->onReaderPublished(r);
+    }
+    for (const auto& b : kBench) {
+        Agent::CardState c;
+        c.id = b.card;
+        c.reader = b.reader;
+        rig.frontend->onCardPublished(c);
+        rig.frontend->onReaderPropertiesChanged(b.reader, Agent::PropertyDelta{.hasCard = true, .card = b.card});
+    }
+    SocketTransport* trp = rig.transport.get();
+    const auto publishedCards = [trp] {
+        __block std::size_t n = 0;
+        dispatch_sync(trp->loopQueue(), ^{
+          n = trp->currentState().cards.size();
+        });
+        return n;
+    };
+    const auto start = std::chrono::steady_clock::now();
+    while (publishedCards() < kBench.size() && std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_EQ(publishedCards(), kBench.size()) << "every card was exported within 5 s";
+}
+
+} // namespace
+
+// Export of a card on the CONTACT slot of a dual-interface unit asks the
+// reader's worker for a bare power hold, so the same single-chip card's
+// contactless twin stops flapping in and out of the CL slot; a card on the CL
+// slot, or in a single-interface reader, never does. Read back through the
+// operation manager's hold flag -- the thing the worker acts on -- not through
+// a log line. All three workers exist after the export (each card resolved on
+// its own), so a false here is the flag, not an absent worker.
+TEST(SocketFrontend, ExportOfAContactSlotCardHoldsTheReaderAndOtherSlotsDoNot)
+{
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+
+    auto& ops = rig.core->operationManager();
+    EXPECT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(2))) << "the OMNIKEY contact slot is held on export";
+    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(3))) << "the OMNIKEY CL slot is never held";
+    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(1))) << "a single-interface reader is never held";
+}
+
+// The prompt gate stamps every dialog with the reader holding the card. The
+// rig installs the resolver through the SAME helper main.cpp calls
+// (installReaderIdentityResolver), so this drives the composed lookup -- core
+// -> resolver -> transport roster -> core labelling -- rather than the seam in
+// isolation. Before that helper existed, the daemon never set a resolver and
+// every macOS prompt named no reader.
+TEST(SocketFrontend, ThePromptGateNamesTheReaderHoldingTheCard)
+{
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+
+    const auto& gate = rig.core->promptSerializer();
+    const auto contact = gate.readerIdentityFor("12");
+    EXPECT_EQ(contact.iface, Agent::ReaderInterface::Contact);
+    EXPECT_EQ(contact.full, kBench[1].name);
+    EXPECT_FALSE(contact.model.empty());
+    EXPECT_EQ(gate.readerIdentityFor("13").iface, Agent::ReaderInterface::Contactless);
+    const auto single = gate.readerIdentityFor("11");
+    EXPECT_EQ(single.iface, Agent::ReaderInterface::Unknown);
+    EXPECT_EQ(single.full, kBench[0].name);
+    EXPECT_EQ(gate.readerIdentityFor("99"), Agent::ReaderIdentity{}) << "a card that is gone names no reader";
+}
+
+// Card removal clears the hold flag, so a later idle sweep cannot re-acquire a
+// hold on an empty reader. Driven through releaseReaderOnCardRemoved() -- the
+// SHARED helper main.cpp's card-removed hook calls -- so the release is under
+// test rather than re-mirrored by hand: dropping it from the helper fails here
+// AND in production together. The helper's release-then-invalidate ORDER is a
+// documented convention, not an observable: the worker handles both flags in
+// one pass and ends in releaseHold() either way, so no seam can tell the two
+// orders apart.
+TEST(SocketFrontend, CardRemovalReleasesTheHold)
+{
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+    auto& ops = rig.core->operationManager();
+    ASSERT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(2)));
+
+    // The exact production removal code (not a re-implementation).
+    Agent::releaseReaderOnCardRemoved(ops, Agent::ObjectId(2));
+
+    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(2))) << "the flag is the host's to clear on removal";
+    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(3))) << "an unrelated reader is untouched";
+}
+
+// A withdrawn READER takes its worker with it, as the Linux host's unexport
+// does. Without that, the worker outlives the reader with its hold flag set,
+// and its 45 s sweep keeps re-acquiring a hold BY READER NAME: a same-named
+// unit plugged back in with a card in the contact slot is then held by an
+// orphan no card-removed hook can reach (the hook targets the new reader id).
+// Observed through the one seam that tells "worker gone" from "flag false":
+// setReaderHold is a silent no-op without a worker, so a set that does not
+// land proves the worker is gone. Reader 1's worker, never withdrawn, is the
+// control that the probe itself works.
+TEST(SocketFrontend, AWithdrawnReaderTakesItsWorkerAndItsHoldWithIt)
+{
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+    auto& ops = rig.core->operationManager();
+    ASSERT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(2)));
+
+    // The order PresenceModel emits on unplug: the card, then the reader.
+    rig.frontend->onWithdrawn(Agent::ObjectId(12));
+    rig.frontend->onWithdrawn(Agent::ObjectId(2));
+    dispatch_sync(rig.transport->loopQueue(), ^{
+                  }); // both withdraws have run
+
+    ops.setReaderHold(Agent::ObjectId(2), true);
+    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(2)))
+        << "the flag landed: a worker survived the reader that owned it";
+
+    ops.setReaderHold(Agent::ObjectId(1), true);
+    EXPECT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(1))) << "control: a live reader's worker takes the flag";
+    ops.setReaderHold(Agent::ObjectId(1), false);
 }

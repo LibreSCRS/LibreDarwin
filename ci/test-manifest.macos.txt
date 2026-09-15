@@ -1,3 +1,4 @@
+AgentCoreSeamsTest
 CscaImportSocketTest
 MacPrompterClientTest
 ManagePinOperationTest

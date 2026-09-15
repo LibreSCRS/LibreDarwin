@@ -6,6 +6,7 @@
 // loop. Mirrors LibreLinux's Card1/Manager1/Config1/Pkcs11_1 semantics against
 // the neutral LibreAgent::Core.
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
+#include <LibreSCRS/Darwin/backend/AgentCoreSeams.h> // isContactSlotOfDualInterfaceUnit (the hold gate)
 
 #include <LibreSCRS/Darwin/backend/SocketOperationChannel.h>
 #include <LibreSCRS/Darwin/backend/wire/AnonFd.h>
@@ -2078,7 +2079,21 @@ void SocketFrontend::onWithdrawn(A::ObjectId object)
 {
     m_transport.post([this, object] {
         m_pendingCards.erase(object.value());
-        m_readerNames.erase(object.value());
+        // A withdrawn READER takes its worker with it, as AgentFrontend's
+        // unexport does: queued ops finish CardRemoved, the thread stops (or
+        // is detached if wedged in a card call), and its power-hold flag dies
+        // with it. The cost on this loop is bounded, not zero: at most the
+        // 250 ms grace when an op is in flight, or one PC/SC disconnect on
+        // the gone reader when the worker is in its invalidate branch, and
+        // never a wait on a wedged op. Left alive, the
+        // orphan's idle sweep would keep re-acquiring a hold BY READER NAME,
+        // so a same-named unit plugged back in would be held by a worker no
+        // card-removed hook can reach. The next insert lazily spins a fresh
+        // worker. Only readers live in m_readerNames, so the erase count is
+        // the reader/card distinction.
+        if (m_readerNames.erase(object.value()) > 0) {
+            m_core.operationManager().removeReader(object);
+        }
         m_transport.withdraw(object);
     });
 }
@@ -2155,6 +2170,22 @@ void SocketFrontend::applyCardResolution(A::CardState card, std::uint32_t caps,
     // known synchronously, well before this held-session resolve.
     A::CardState refined{card.id, card.reader, caps, preAuth, cardType, card.atrHex};
     m_transport.publishCard(refined);
+
+    // Power hold: a card on the CONTACT slot of a dual-interface unit keeps its
+    // reader powered (a bare second session in the reader's worker, no secret,
+    // no traffic) so the same single-chip card's contactless twin stops flapping
+    // in and out of the CL slot. Classified from the transport's presence
+    // roster, the same lookup the prompt dialog uses; a single-interface reader
+    // is never held. Released by main.cpp's card-removed hook. Mirror of
+    // AgentFrontend::applyCardResolution.
+    if (isContactSlotOfDualInterfaceUnit(m_transport.presenceRoster(), std::to_string(card.id.value()))) {
+        m_core.operationManager().setReaderHold(card.reader, true);
+        std::string readerName;
+        if (const auto rn = m_readerNames.find(card.reader.value()); rn != m_readerNames.end()) {
+            readerName = rn->second;
+        }
+        log::infof("reader {}: holding the contact interface to quiet its contactless twin", readerName);
+    }
 }
 
 // --- config-changed / lease --------------------------------------------------

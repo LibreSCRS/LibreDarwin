@@ -18,6 +18,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -96,6 +97,25 @@ public:
     };
     [[nodiscard]] std::optional<ReaderCardInfo> readerCard(const std::string& readerHandle) const;
 
+    // The presence roster the reader-identity seams read (AgentCoreSeams.h):
+    // every published reader's PC/SC name, index-aligned with the per-insertion
+    // key of the card it holds -- the stringified card ObjectId that CardRouting
+    // and the CardKeyTracker use -- or empty for an empty slot. The key comes
+    // from the CARD objects (each names its reader), so it is present the moment
+    // publishCard returns and gone the moment the card is withdrawn, independent
+    // of the reader's HasCard/Card property flip that follows both.
+    //
+    // ANY thread: the one presence read that is not loop-affine, because the
+    // prompt gate stamps a dialog from a reader WORKER thread. It returns a copy
+    // of a snapshot the loop rebuilds on every presence change, under its own
+    // mutex, so a worker never walks the loop-owned maps.
+    struct PresenceRoster
+    {
+        std::vector<std::string> readerNames;
+        std::vector<std::string> cardKeys;
+    };
+    [[nodiscard]] PresenceRoster presenceRoster() const;
+
     // Send one CBOR message to a specific connection, optionally taking ownership
     // of fds to pass via SCM_RIGHTS. Loop-thread only (the sink runs there).
     void sendTo(std::uint64_t connId, const Agent::Wire::CborValue& message,
@@ -156,6 +176,10 @@ public:
     void onClientDisconnect(std::function<void(Agent::CallerToken)> handler) override;
 
 private:
+    // Rebuild the roster snapshot from m_readers / m_cards / m_cardRouting. Loop
+    // thread; called at the end of every presence mutation.
+    void rebuildRoster();
+
     struct OutFrame
     {
         std::vector<std::uint8_t> bytes;        // full framed bytes (header + body)
@@ -230,6 +254,11 @@ private:
     // Card routing (readerId/readerName/caps/preAuth), keyed by card wire handle.
     // Populated alongside m_cards in publishCard; consumed by cardRouting().
     std::map<std::string, CardRouting> m_cardRouting;
+    // The roster snapshot presenceRoster() copies out: rebuilt by the loop
+    // (rebuildRoster) after every publish / withdraw, read from any thread
+    // under m_rosterMutex.
+    mutable std::mutex m_rosterMutex;
+    PresenceRoster m_roster;
     // ObjectId -> handle for withdraw / updateProperties, and the reverse for the
     // request path (a request carries a wire handle; the seams need the ObjectId).
     std::map<std::uint64_t, std::string> m_idToHandle;
