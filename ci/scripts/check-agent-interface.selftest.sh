@@ -190,6 +190,44 @@ mkbase() { # <dir> <bool|enum>
       echo '}'
     } > "$1/LibreSCRS/Agent/backend/Authorizer.h"
 }
+# Every synthetic call site below stands on these declarations, and they are the
+# price of a compiler rule that refuses what it cannot compile. The fixtures
+# used to be text and nothing else -- `void f() { switch (a.authorize(x, y))
+# ... }` with no `a`, no `x` and no `y` anywhere -- which is fine for four rules
+# that read text and worthless to the fifth: every fixture was a unit R5 could
+# not compile. While an uncompiled unit read "ok" that cost nothing, and the
+# moment it stopped doing so, eleven CONTROLS went rc=2 for the same reason the
+# defect being fixed went unseen. A suite that proves a compiler rule has to
+# hand the compiler real code.
+#
+# Nothing here names authorize(): the textual rules read this file too, and a
+# prelude that mentioned the call would be judged as a call site of its own.
+fixture_prelude() {  # fixture_prelude <file>
+    cat > "$1" <<'PRELUDE'
+#include <cassert>
+#include <string_view>
+#include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>
+void expectBool(bool);
+#define EXPECT_TRUE(e)  expectBool(e)
+#define EXPECT_FALSE(e) expectBool(!(e))
+#define EXPECT_EQ(l, r) ((void)((l) == (r)))
+using namespace LibreSCRS;
+using Backend = Darwin::SecCodeAuthorizer;
+namespace {
+Backend a;
+std::string_view x;
+Agent::CallerToken y{};
+int connId = 0;
+bool ready = true;
+bool readyToSign();
+void record(Agent::AuthorizationOutcome);
+void log(Agent::AuthorizationOutcome);
+void recordDecision(int, Agent::AuthorizationOutcome);
+void g(Agent::AuthorizationOutcome);
+Agent::AuthorizationOutcome last = Agent::AuthorizationOutcome::Denied;
+}
+PRELUDE
+}
 mkderived() { # <root> <bool|enum|broken> <switch|bang|if|boolvar|expectfalse2|eq|none>
     local h="$1/agent/include/LibreSCRS/Darwin/backend"
     mkdir -p "$h" "$1/agent/src" "$1/agent/tests"
@@ -208,41 +246,46 @@ mkderived() { # <root> <bool|enum|broken> <switch|bang|if|boolvar|expectfalse2|e
       echo '};'
       echo '}'
     } > "$h/SecCodeAuthorizer.h"
+    fixture_prelude "$1/agent/src/caller.cpp"
     case "$3" in
-      switch)       echo 'void f() { switch (a.authorize(x, y)) { default: break; } }'   > "$1/agent/src/caller.cpp" ;;
-      bang)         echo 'void f() { if (!a.authorize(x, y)) { return; } }'              > "$1/agent/src/caller.cpp" ;;
-      if)           echo 'void f() { if (a.authorize(x, y)) { return; } }'               > "$1/agent/src/caller.cpp" ;;
-      boolvar)      echo 'void f() { const bool ok = a.authorize(x, y); (void)ok; }'     > "$1/agent/src/caller.cpp" ;;
+      switch)       echo 'void f() { switch (a.authorize(x, y)) { default: break; } }'   >> "$1/agent/src/caller.cpp" ;;
+      bang)         echo 'void f() { if (!a.authorize(x, y)) { return; } }'              >> "$1/agent/src/caller.cpp" ;;
+      if)           echo 'void f() { if (a.authorize(x, y)) { return; } }'               >> "$1/agent/src/caller.cpp" ;;
+      boolvar)      echo 'void f() { const bool ok = a.authorize(x, y); (void)ok; }'     >> "$1/agent/src/caller.cpp" ;;
       expectfalse2) { echo 'void f() { EXPECT_FALSE('
                       echo '        a.authorize(x, y)); }'
-                    }                                                                    > "$1/agent/src/caller.cpp" ;;
-      eq)           echo 'void f() { EXPECT_EQ(a.authorize(x, y), Agent::AuthorizationOutcome::Denied); }' > "$1/agent/src/caller.cpp" ;;
-      trailcomment) echo 'void f() { if (a.authorize(x, y)) { return; } }  // AuthorizationOutcome' > "$1/agent/src/caller.cpp" ;;
+                    }                                                                    >> "$1/agent/src/caller.cpp" ;;
+      eq)           echo 'void f() { EXPECT_EQ(a.authorize(x, y), Agent::AuthorizationOutcome::Denied); }' >> "$1/agent/src/caller.cpp" ;;
+      trailcomment) echo 'void f() { if (a.authorize(x, y)) { return; } }  // AuthorizationOutcome' >> "$1/agent/src/caller.cpp" ;;
       wrapped)      { echo 'void f() {'
                       echo '    const auto outcome = a.authorize(x,'
                       echo '                                     y);'
                       echo '    switch (outcome) { default: break; }'
                       echo '}'
-                    }                                                                    > "$1/agent/src/caller.cpp" ;;
-      ifauto)       echo 'void f() { if (auto ok = a.authorize(x, y); ok) { return; } }' > "$1/agent/src/caller.cpp" ;;
-      ternary)      echo 'void f() { const auto r = a.authorize(x, y) ? 1 : 0; (void)r; }' > "$1/agent/src/caller.cpp" ;;
-      none)         : > "$1/agent/src/caller.cpp" ;;
+                    }                                                                    >> "$1/agent/src/caller.cpp" ;;
+      ifauto)       echo 'void f() { if (auto ok = a.authorize(x, y); ok) { return; } }' >> "$1/agent/src/caller.cpp" ;;
+      ternary)      echo 'void f() { const auto r = a.authorize(x, y) ? 1 : 0; (void)r; }' >> "$1/agent/src/caller.cpp" ;;
+      none)         : ;;
     esac
 }
 # The out-of-line definition: a .cpp is never on R1's include path, and on this
 # host the Darwin one cannot be compiled at all.
 mkdefinition() { # <root> <bool|enum>
     mkdir -p "$1/agent/src"
+    fixture_prelude "$1/agent/src/def.cpp"
+    echo 'namespace LibreSCRS::Darwin {' >> "$1/agent/src/def.cpp"
     if [ "$2" = bool ]; then
-        echo 'bool SecCodeAuthorizer::authorize(std::string_view a, const Agent::CallerToken& c) { return false; }' > "$1/agent/src/def.cpp"
+        echo 'bool SecCodeAuthorizer::authorize(std::string_view, const Agent::CallerToken&) { return false; }' >> "$1/agent/src/def.cpp"
     else
-        echo 'Agent::AuthorizationOutcome SecCodeAuthorizer::authorize(std::string_view a, const Agent::CallerToken& c) { return Agent::AuthorizationOutcome::Denied; }' > "$1/agent/src/def.cpp"
+        echo 'Agent::AuthorizationOutcome SecCodeAuthorizer::authorize(std::string_view, const Agent::CallerToken&) { return Agent::AuthorizationOutcome::Denied; }' >> "$1/agent/src/def.cpp"
     fi
+    echo '}' >> "$1/agent/src/def.cpp"
 }
 # The second subclass: this repository has one, a test double under agent/tests.
 # R1 compiles the production header and never learns it exists.
 mkdouble() { # <root> <bool|enum>
     mkdir -p "$1/agent/tests"
+    fixture_prelude "$1/agent/tests/double.cpp"
     { echo 'struct DenyAllAuthorizer final : Agent::Authorizer {'
       if [ "$2" = bool ]; then
         echo '    [[nodiscard]] bool authorize(std::string_view, const Agent::CallerToken&) override { return false; }'
@@ -250,7 +293,7 @@ mkdouble() { # <root> <bool|enum>
         echo '    [[nodiscard]] Agent::AuthorizationOutcome authorize(std::string_view, const Agent::CallerToken&) override { return Agent::AuthorizationOutcome::Denied; }'
       fi
       echo '};'
-    } > "$1/agent/tests/double.cpp"
+    } >> "$1/agent/tests/double.cpp"
 }
 check() { # <label> <want-rc> <root> <la-include>
     local label="$1" want="$2" rc
@@ -340,8 +383,8 @@ check "outcome bound, then negated in the next statement (R1)" 1 "$WORK/c18" "$W
 # follows the name instead. The two controls matter as much as the reds: a rule
 # that went off on a bound outcome would forbid the shape the repaired code
 # uses.
-mkderived "$WORK/c19" enum switch
-cat > "$WORK/c19/agent/src/caller.cpp" <<'EOF'
+mkderived "$WORK/c19" enum none
+cat >> "$WORK/c19/agent/src/caller.cpp" <<'EOF'
 void f()
 {
     const auto outcome = a.authorize(x, y);
@@ -352,8 +395,8 @@ void f()
 EOF
 check "outcome bound, negated in a file no compiler reads (R4)" 1 "$WORK/c19" "$WORK/la-enum"
 
-mkderived "$WORK/c20" enum switch
-cat > "$WORK/c20/agent/src/caller.cpp" <<'EOF'
+mkderived "$WORK/c20" enum none
+cat >> "$WORK/c20/agent/src/caller.cpp" <<'EOF'
 void f()
 {
     const auto outcome = a.authorize(x, y);
@@ -363,8 +406,8 @@ void f()
 EOF
 check "outcome bound, EXPECT_TRUE'd two statements later (R4)" 1 "$WORK/c20" "$WORK/la-enum"
 
-mkderived "$WORK/c21" enum switch
-cat > "$WORK/c21/agent/src/caller.cpp" <<'EOF'
+mkderived "$WORK/c21" enum none
+cat >> "$WORK/c21/agent/src/caller.cpp" <<'EOF'
 void f()
 {
     const auto outcome = a.authorize(x, y);
@@ -377,18 +420,25 @@ void f()
 EOF
 check "CONTROL: outcome bound, switched on and compared" 0 "$WORK/c21" "$WORK/la-enum"
 
-mkderived "$WORK/c22" enum switch
-cat > "$WORK/c22/agent/src/caller.cpp" <<'EOF'
+mkderived "$WORK/c22" enum none
+cat >> "$WORK/c22/agent/src/caller.cpp" <<'EOF'
 void f()
 {
-    auto outcome = a.authorize(x, y);
-    log(outcome);
+    {
+        auto outcome = a.authorize(x, y);
+        log(outcome);
+    }
     bool outcome = readyToSign();
     if (!outcome) {
         return;
     }
 }
 EOF
+# The two names are in nested scopes because this fixture is compiled now, and
+# one block declaring `outcome` twice is ill-formed for a reason that has
+# nothing to do with the contract. R4 knows nothing of scope -- that is stated
+# in the gate's header and is exactly what this case pins -- so to the rule
+# under test these are still one name rebound away from the outcome.
 check "CONTROL: the name reassigned away from the outcome" 0 "$WORK/c22" "$WORK/la-enum"
 
 # Twenty-four through thirty are R4's polarity. Each of the five reds below was
@@ -398,12 +448,12 @@ check "CONTROL: the name reassigned away from the outcome" 0 "$WORK/c22" "$WORK/
 # the other half: a rule that is red by default has to be green on the shapes
 # correct code uses, or it gets worked around rather than read.
 r4_fixture() {  # r4_fixture <root> <body>
-    mkderived "$1" enum switch
+    mkderived "$1" enum none
     { echo 'void f()'
       echo '{'
       printf '%s\n' "$2"
       echo '}'
-    } > "$1/agent/src/caller.cpp"
+    } >> "$1/agent/src/caller.cpp"
 }
 r4_fixture "$WORK/c24" '    const auto outcome = a.authorize(x, y);
     if (outcome == false) {
@@ -430,8 +480,8 @@ r4_fixture "$WORK/c28" '    const auto outcome = a.authorize(x, y);
     return outcome;'
 check "outcome bound, returned from a void function (R4)" 1 "$WORK/c28" "$WORK/la-enum"
 
-mkderived "$WORK/c29" enum switch
-cat > "$WORK/c29/agent/src/caller.cpp" <<'EOF'
+mkderived "$WORK/c29" enum none
+cat >> "$WORK/c29/agent/src/caller.cpp" <<'EOF'
 Agent::AuthorizationOutcome forwardTo(Backend& a)
 {
     const auto outcome = a.authorize(x, y);
@@ -440,8 +490,8 @@ Agent::AuthorizationOutcome forwardTo(Backend& a)
 EOF
 check "CONTROL: the outcome returned by a function declared to return it" 0 "$WORK/c29" "$WORK/la-enum"
 
-mkderived "$WORK/c30" enum switch
-cat > "$WORK/c30/agent/src/caller.cpp" <<'EOF'
+mkderived "$WORK/c30" enum none
+cat >> "$WORK/c30/agent/src/caller.cpp" <<'EOF'
 void f()
 {
     const auto outcome = a.authorize(x, y);
@@ -664,15 +714,15 @@ fi
 # assembled a physical line at a time and the binding then merged with its use
 # into one statement that named the type. All three are ill-formed.
 mkderived "$WORK/c40" enum none
-echo 'void f() { if (a.authorize(x, y)) { last = Agent::AuthorizationOutcome::Denied; return; } }' > "$WORK/c40/agent/src/caller.cpp"
+echo 'void f() { if (a.authorize(x, y)) { last = Agent::AuthorizationOutcome::Denied; return; } }' >> "$WORK/c40/agent/src/caller.cpp"
 check "the call as the whole condition, with the type named beside it" 1 "$WORK/c40" "$WORK/la-enum"
 
 mkderived "$WORK/c41" enum none
-echo 'void f() { const auto outcome = a.authorize(x, y); if (outcome) { last = Agent::AuthorizationOutcome::Denied; return; } }' > "$WORK/c41/agent/src/caller.cpp"
+echo 'void f() { const auto outcome = a.authorize(x, y); if (outcome) { last = Agent::AuthorizationOutcome::Denied; return; } }' >> "$WORK/c41/agent/src/caller.cpp"
 check "the bound name as the whole condition, on one line with the type" 1 "$WORK/c41" "$WORK/la-enum"
 
 mkderived "$WORK/c42" enum none
-echo 'void f() { const auto outcome = a.authorize(x, y); while (outcome) { last = Agent::AuthorizationOutcome::Denied; } }' > "$WORK/c42/agent/src/caller.cpp"
+echo 'void f() { const auto outcome = a.authorize(x, y); while (outcome) { last = Agent::AuthorizationOutcome::Denied; } }' >> "$WORK/c42/agent/src/caller.cpp"
 check "the bound name as a while condition, on one line with the type" 1 "$WORK/c42" "$WORK/la-enum"
 
 # Forty-three: the green the three above must not cost. A comparison against an
@@ -683,24 +733,64 @@ mkderived "$WORK/c43" enum none
 { echo 'void f() { if (a.authorize(x, y) == Agent::AuthorizationOutcome::Granted) { return; } }'
   echo 'void g() { const auto outcome = a.authorize(x, y); if (outcome != Agent::AuthorizationOutcome::Granted) { return; } }'
   echo 'void h() { if (auto outcome = a.authorize(x, y); outcome == Agent::AuthorizationOutcome::Denied) { return; } }'
-} > "$WORK/c43/agent/src/caller.cpp"
+} >> "$WORK/c43/agent/src/caller.cpp"
 check "CONTROL: comparisons against an enumerator, in a condition and after a binding" 0 "$WORK/c43" "$WORK/la-enum"
 
-# Forty-four: the compiler rule's reach. A unit that names authorize() and
-# cannot be compiled here -- a missing header, an extension this compiler has
-# not got -- is NOT a refusal: the textual rules still read it, and a rule that
-# went yellow whenever a sibling checkout was absent is a rule somebody switches
-# off. It has to SAY so, though, or "N of K" is the only honest verdict left
-# unprinted.
+# Forty-four: the compiler rule's reach, which is a REFUSAL. A unit that names
+# authorize() and cannot be compiled here -- a missing header, an extension this
+# compiler has not got -- was counted, named, and then reported under "R5 ok" at
+# rc=0, on the grounds that the textual rules still read it. They do, and for
+# the two shapes the gate's own header hands to the compiler they read it and
+# pardon it: case 60 below is that unit with a real defect in it, and every rule
+# printed ok. So the count is in the exit code now. It still has to NAME the
+# unit -- a refusal that does not say what went unmeasured is a refusal nobody
+# can clear -- and it must not be confused with the contract being broken, which
+# is rc=1 and a different message.
 mkderived "$WORK/c44" enum switch
 { echo '#include <this/header/does/not/exist.h>'
   echo 'void f() { switch (a.authorize(x, y)) { default: break; } }'
 } > "$WORK/c44/agent/src/unreachable.cpp"
 REPO_ROOT="$WORK/c44" bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
-if [ "$rc" = 0 ] && grep -q 'out of reach' "$WORK/out.txt" && grep -q 'agent/src/unreachable.cpp' "$WORK/out.txt"; then
-    echo "  ok    a unit the compiler cannot reach is counted and named, not refused (rc=$rc)"; pass=$((pass+1))
+if [ "$rc" = 2 ] && grep -q 'out of reach' "$WORK/out.txt" && grep -q 'agent/src/unreachable.cpp' "$WORK/out.txt" \
+   && grep -q 'LIBRESCRS_EXTRA_INCLUDE' "$WORK/out.txt" \
+   && ! grep -q 'belongs to another platform SDK' "$WORK/out.txt" \
+   && ! grep -q 'does not compile against the authorize() contract' "$WORK/out.txt"; then
+    echo "  ok    a unit the compiler cannot reach is named and refused, not passed (rc=$rc)"; pass=$((pass+1))
 else
-    echo "  FAIL  a unit the compiler cannot reach: want rc=0 naming it out of reach, got rc=$rc"
+    echo "  FAIL  a unit the compiler cannot reach: want rc=2 naming it and the remedy, got rc=$rc"
+    sed 's/^/        /' "$WORK/out.txt"; fail=$((fail+1))
+fi
+
+# Sixty: what that refusal is FOR, and the case that had to be red before it was
+# written. The unit out of reach here carries the one shape the gate's header
+# says no textual rule can judge -- the outcome bound to a name and passed as an
+# argument to a call taking bool -- so R2, R3 and R4 pardon it by construction
+# and only a compiler can see it. Measured against the previous revision of the
+# gate: R1-R5 all "ok", "2 of 3 ... 1 out of reach", rc=0, over a translation
+# unit that compiles nowhere. This is the shape of the defect that was live in
+# this repository's own CI, where the two unreachable units held 8 of the 9 real
+# call sites.
+mkderived "$WORK/c60" enum switch
+{ echo '#include <this/header/does/not/exist.h>'
+  echo '#include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>'
+  echo 'namespace LibreSCRS::Darwin {'
+  echo 'void sinkBool(bool);'
+  echo 'void f(SecCodeAuthorizer& z) { const auto outcome = z.authorize("x", {}); sinkBool(outcome); }'
+  echo '}'
+} > "$WORK/c60/agent/src/unreachable.cpp"
+REPO_ROOT="$WORK/c60" bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
+# The verdict LINE is asserted as well as the exit code, for the reason case 45
+# records: a rule that prints "R5 ok" on a run it takes red leaves a log whose
+# verdict lines all read ok. And the contract must NOT be blamed -- nothing
+# compiled this unit, so nothing can say its call site is ill-formed, however
+# ill-formed it is.
+if [ "$rc" = 2 ] && grep -q 'agent/src/unreachable.cpp' "$WORK/out.txt" \
+   && grep -q 'R5 INCOMPLETE' "$WORK/out.txt" && ! grep -q 'R5 ok' "$WORK/out.txt" \
+   && grep -q 'LIBRESCRS_EXTRA_INCLUDE' "$WORK/out.txt" \
+   && ! grep -q 'does not compile against the authorize() contract' "$WORK/out.txt"; then
+    echo "  ok    a boolean use hiding in an unreachable unit is refused, not passed (rc=$rc)"; pass=$((pass+1))
+else
+    echo "  FAIL  a boolean use hiding in an unreachable unit: want rc=2, INCOMPLETE, no contract blame; got rc=$rc"
     sed 's/^/        /' "$WORK/out.txt"; fail=$((fail+1))
 fi
 
@@ -719,7 +809,7 @@ mk_argpardon() {  # <root>
       echo 'void sink(bool);'
       echo 'void f(SecCodeAuthorizer& a) { const auto outcome = a.authorize("x", {}); sink(outcome); }'
       echo '}'
-    } > "$1/agent/src/caller.cpp"
+    } >> "$1/agent/src/caller.cpp"
 }
 mk_argpardon "$WORK/c45"
 REPO_ROOT="$WORK/c45" bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
@@ -744,17 +834,17 @@ fi
 # written with `auto` read rc=1, and both are ill-formed. A verdict that turns
 # on how the declaration is spelled is not a verdict about the code.
 mkderived "$WORK/c46" enum none
-echo 'void f() { if (Agent::AuthorizationOutcome o = a.authorize(x, y); o) { return; } }' > "$WORK/c46/agent/src/caller.cpp"
+echo 'void f() { if (Agent::AuthorizationOutcome o = a.authorize(x, y); o) { return; } }' >> "$WORK/c46/agent/src/caller.cpp"
 check "an init-statement condition, the type spelled out" 1 "$WORK/c46" "$WORK/la-enum"
 
 mkderived "$WORK/c47" enum none
-echo 'void f() { if (Agent::AuthorizationOutcome o = a.authorize(x, y); !o) { return; } }' > "$WORK/c47/agent/src/caller.cpp"
+echo 'void f() { if (Agent::AuthorizationOutcome o = a.authorize(x, y); !o) { return; } }' >> "$WORK/c47/agent/src/caller.cpp"
 check "an init-statement condition, negated, the type spelled out" 1 "$WORK/c47" "$WORK/la-enum"
 
 mkderived "$WORK/c48" enum none
 { echo 'void f() { if (Agent::AuthorizationOutcome o = a.authorize(x, y); o == Agent::AuthorizationOutcome::Granted) { return; } }'
   echo 'void g() { if (auto o = a.authorize(x, y); o != Agent::AuthorizationOutcome::Granted) { return; } }'
-} > "$WORK/c48/agent/src/caller.cpp"
+} >> "$WORK/c48/agent/src/caller.cpp"
 check "CONTROL: an init-statement compared against an enumerator, both spellings" 0 "$WORK/c48" "$WORK/la-enum"
 
 # Forty-nine and fifty: the file-kind rule, which the widening from agent/ to
@@ -831,14 +921,18 @@ mkdir -p "$WORK/c51-extra/Foreign"
   echo 'namespace LibreSCRS::Darwin {'
   echo 'void f(SecCodeAuthorizer& a) { switch (a.authorize("x", {})) { default: break; } }'
   echo '}'
-} > "$WORK/c51/agent/src/caller.cpp"
+} >> "$WORK/c51/agent/src/caller.cpp"
 REPO_ROOT="$WORK/c51" LIBRESCRS_EXTRA_INCLUDE="$WORK/c51-extra" bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
-if [ "$rc" = 0 ] && grep -q 'outside this checkout' "$WORK/out.txt" \
+# rc=2, not rc=1: the unit went unmeasured, which is a refusal, and the point of
+# the case is that it is not charged to this repository as a broken contract.
+# The two verdicts are distinguished by the exit code and by the message, so a
+# reader is sent to the foreign header rather than to a call site here.
+if [ "$rc" = 2 ] && grep -q 'outside this checkout' "$WORK/out.txt" \
    && grep -q 'Foreign/Probe.h' "$WORK/out.txt" \
    && ! grep -q 'does not compile against the authorize() contract' "$WORK/out.txt"; then
-    echo "  ok    an error in a foreign include root is out of reach, and is named as such (rc=$rc)"; pass=$((pass+1))
+    echo "  ok    an error in a foreign include root is named as such, not charged here (rc=$rc)"; pass=$((pass+1))
 else
-    echo "  FAIL  an error in a foreign include root: want rc=0 naming the foreign header, got rc=$rc"
+    echo "  FAIL  an error in a foreign include root: want rc=2 naming the foreign header, got rc=$rc"
     sed 's/^/        /' "$WORK/out.txt"; fail=$((fail+1))
 fi
 
@@ -849,35 +943,35 @@ fi
 # none of them compiles.
 mkderived "$WORK/c52" enum none
 echo 'void f() { Agent::AuthorizationOutcome o = a.authorize(x, y) ? Agent::AuthorizationOutcome::Denied : Agent::AuthorizationOutcome::Granted; (void)o; }' \
-    > "$WORK/c52/agent/src/caller.cpp"
+    >> "$WORK/c52/agent/src/caller.cpp"
 check "the call as the condition of a ternary, the type named twice beside it" 1 "$WORK/c52" "$WORK/la-enum"
 
 mkderived "$WORK/c53" enum none
 echo 'void f() { for (Agent::AuthorizationOutcome g = Agent::AuthorizationOutcome::Granted; a.authorize(x, y); ) { (void)g; break; } }' \
-    > "$WORK/c53/agent/src/caller.cpp"
+    >> "$WORK/c53/agent/src/caller.cpp"
 check "the call in the condition slot of a for, the type named in the init" 1 "$WORK/c53" "$WORK/la-enum"
 
 mkderived "$WORK/c54" enum none
 echo 'void f() { bool ready = true; if (a.authorize(x, y) && ready) g(Agent::AuthorizationOutcome::Denied); }' \
-    > "$WORK/c54/agent/src/caller.cpp"
+    >> "$WORK/c54/agent/src/caller.cpp"
 check "the call as an operand of &&, the type named on the same statement" 1 "$WORK/c54" "$WORK/la-enum"
 
 mkderived "$WORK/c55" enum none
 { echo 'void f() { for (Agent::AuthorizationOutcome o = a.authorize(x, y); o == Agent::AuthorizationOutcome::Undecided; o = a.authorize(x, y)) { break; } }'
   echo 'void g() { int n = (a.authorize(x, y) == Agent::AuthorizationOutcome::Granted) ? 1 : 0; (void)n; }'
-} > "$WORK/c55/agent/src/caller.cpp"
+} >> "$WORK/c55/agent/src/caller.cpp"
 check "CONTROL: comparisons against an enumerator in a for and in a ternary" 0 "$WORK/c55" "$WORK/la-enum"
 
 mkderived "$WORK/c56" enum none
 { echo 'void f() { const auto outcome = a.authorize(x, y);'
   echo '    for (Agent::AuthorizationOutcome g = Agent::AuthorizationOutcome::Granted; outcome; ) { (void)g; break; } }'
-} > "$WORK/c56/agent/src/caller.cpp"
+} >> "$WORK/c56/agent/src/caller.cpp"
 check "the bound name in the condition slot of a for" 1 "$WORK/c56" "$WORK/la-enum"
 
 mkderived "$WORK/c57" enum none
 { echo 'void f() { const auto outcome = a.authorize(x, y);'
   echo '    Agent::AuthorizationOutcome eff = outcome ? Agent::AuthorizationOutcome::Denied : Agent::AuthorizationOutcome::Granted; (void)eff; }'
-} > "$WORK/c57/agent/src/caller.cpp"
+} >> "$WORK/c57/agent/src/caller.cpp"
 check "the bound name as the condition of a ternary" 1 "$WORK/c57" "$WORK/la-enum"
 
 # Fifty-eight and fifty-nine: the same two verdicts under CLANG, which is the
@@ -916,6 +1010,52 @@ else
     echo "  note  clang++ is not installed here, so the two clang-wording cases were not measured"
 fi
 
+
+# Sixty-one: one run carrying BOTH verdicts. A unit R5 reached and rejected on
+# the contract is rc=1 and names a line; a unit it never compiled is named too,
+# and used to be named with no way to act on it -- the FAILED branch printed the
+# list and no remedy at all, so a reader looking at "out of reach" in a red log
+# had nothing to do about it. rc stays 1: a broken contract is the stronger
+# verdict, and a refusal that overwrote it would hide the line to go and fix.
+mk_argpardon "$WORK/c61"
+{ echo '#include <this/header/does/not/exist.h>'
+  echo 'void f() { switch (a.authorize(x, y)) { default: break; } }'
+} > "$WORK/c61/agent/src/unreachable.cpp"
+REPO_ROOT="$WORK/c61" bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
+if [ "$rc" = 1 ] && grep -q 'R5 FAILED' "$WORK/out.txt" \
+   && grep -q 'agent/src/unreachable.cpp' "$WORK/out.txt" \
+   && grep -q 'LIBRESCRS_EXTRA_INCLUDE' "$WORK/out.txt"; then
+    echo "  ok    a broken unit and an unreachable one in one run: rc=1, and the remedy is still printed (rc=$rc)"; pass=$((pass+1))
+else
+    echo "  FAIL  a broken unit beside an unreachable one: want rc=1 naming both and the remedy, got rc=$rc"
+    sed 's/^/        /' "$WORK/out.txt"; fail=$((fail+1))
+fi
+
+# Sixty-two: a header no include root can supply, because it belongs to another
+# platform's SDK. Two of this repository's five units reach
+# `<dispatch/dispatch.h>` through the Darwin socket transport, and the hosted
+# Linux image has no package providing it at all -- so on that runner they are
+# out of reach permanently, and telling their reader to set
+# LIBRESCRS_EXTRA_INCLUDE sends them hunting for a directory that exists nowhere
+# on the box. Counted and refused exactly as any other unreachable unit; what
+# differs is the sentence.
+#
+# The fixture names a header under a platform root that exists on NO host --
+# `dispatch/` is real on a Mac, `dispatch/no-such-header-here.h` is not -- so
+# the case measures the classification rather than the machine it runs on.
+mkderived "$WORK/c62" enum switch
+{ echo '#include <dispatch/no-such-header-here.h>'
+  echo 'void f() { switch (a.authorize(x, y)) { default: break; } }'
+} > "$WORK/c62/agent/src/platform.cpp"
+REPO_ROOT="$WORK/c62" bash "$GATE" "$WORK/la-enum" > "$WORK/out.txt" 2>&1; rc=$?
+if [ "$rc" = 2 ] && grep -q 'agent/src/platform.cpp' "$WORK/out.txt" \
+   && grep -q 'belongs to another platform SDK' "$WORK/out.txt" \
+   && grep -q "Run this check on a host that has that SDK" "$WORK/out.txt"; then
+    echo "  ok    a platform header is named as one, with a remedy an include root cannot give (rc=$rc)"; pass=$((pass+1))
+else
+    echo "  FAIL  a platform header: want rc=2 naming the SDK and its own remedy, got rc=$rc"
+    sed 's/^/        /' "$WORK/out.txt"; fail=$((fail+1))
+fi
 
 # ---------------------------------------------------------------------------
 # Portability of the gate itself. All three cases below are RED against the

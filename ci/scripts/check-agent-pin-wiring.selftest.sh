@@ -807,6 +807,97 @@ mkdir -p "$d/ci/scripts"
 mkexc "$d" 'ci.yml:drift:agent_trunk  measures the agent trunk on purpose; builds nothing'
 run "case_42 CONTROL: the exempt job runs a gate script that only names builders" 0 "$d"
 
+# case_83 -- the same escape written without a file extension. The rule that
+# follows a `run:` line into a script of this repository matched
+# `.sh|.bash|.py`, so a tracked runner called `Scripts/assemble-release` was
+# opened by nothing: the job named no builder on its own lines, used no local
+# action, and ran a script the gate declined to recognise as one. It was covered
+# by accident until the dependency checkout stopped counting as a build input --
+# an exempt job of exactly this shape was reddened by the checkout beside it, not
+# by what it ran. An extensionless candidate now counts when it is executable
+# and starts with a shebang.
+d=$(mkcase case_83)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  headers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ steps.p.outputs.ref }}
+  ship:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        id: agent_ship
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: main
+      - name: Assemble
+        run: ./Scripts/assemble-release
+Y
+mkdir -p "$d/Scripts"
+printf '#!/usr/bin/env bash
+cmake --build build -j4
+' > "$d/Scripts/assemble-release"
+chmod +x "$d/Scripts/assemble-release"
+mkexc "$d" 'ci.yml:ship:agent_ship  the release build tracks the agent trunk on purpose'
+run_expect "case_83 the builders in a tracked runner with no extension" 1 "$d" \
+    'runs a script of this repository that builds' \
+    'Scripts/assemble-release'
+
+# case_84 -- the green that case must not cost. The same extensionless token,
+# resolving to a tracked file that is NOT a script: no executable bit, no
+# shebang. Judged as a script it would be judged by a grep over whatever bytes
+# it holds, and a data file that happens to spell `ninja` would redden the one
+# job the exemption exists for.
+d=$(mkcase case_84)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  headers:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ steps.p.outputs.ref }}
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        id: agent_trunk
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: main
+      - name: Report what the release notes will say
+        run: cat docs/release-recipe
+Y
+mkdir -p "$d/docs"
+printf 'the release is assembled with ninja and ctest, by hand, on a Mac
+' > "$d/docs/release-recipe"
+mkexc "$d" 'ci.yml:drift:agent_trunk  measures the agent trunk on purpose; builds nothing'
+run_expect "case_84 CONTROL: an extensionless data file is not a script" 0 "$d" \
+    '!::error'
+
 # case_43 -- the same escape one composite action deep. `run:` was followed one
 # level; `uses: ./<path>` was not, and moving steps into a local action is the
 # cheaper refactor of the two. Measured on the real workflow: the release job's
@@ -856,8 +947,11 @@ mkexc "$d" 'ci.yml:ship:agent_ship  the release build tracks the agent trunk on 
 run "case_43 the builders moved into a local composite action" 1 "$d"
 
 # case_44 -- the same shape one level further: the action names no builder but
-# checks this repository's dependency out. INPUTRE asks that of a job; it has to
-# ask it of the action too, or the inputs move with the builders.
+# carries the prefix this repository's dependency build installs to. INPUTRE
+# asks that of a job; it has to ask it of the action too, or the inputs move
+# with the builders. The action used to carry the LibreMiddleware CHECKOUT
+# instead, which is no longer an input at all -- see case_80, and INPUTRE's own
+# comment for why a copy of somebody's headers is not a build.
 d=$(mkcase case_44)
 cat > "$d/.github/workflows/ci.yml" <<'Y'
 name: ci
@@ -893,10 +987,10 @@ name: deps
 runs:
   using: composite
   steps:
-    - uses: actions/checkout@v4
-      with:
-        repository: LibreSCRS/LibreMiddleware
-        path: LibreMiddleware
+    - shell: bash
+      env:
+        LM_PREFIX: ${{ github.workspace }}/lm-prefix
+      run: ./Scripts/assemble-release
 Y
 mkexc "$d" 'ci.yml:ship:agent_ship  the release build tracks the agent trunk on purpose'
 run "case_44 a local composite action carrying this repository's build inputs" 1 "$d"
@@ -1044,7 +1138,7 @@ d=$(quoted_builder_case case_48 "'./.github/actions/assemble'")
 run "case_48 the local action named as a single-quoted scalar" 1 "$d"
 
 # case_49 -- the script indirection moved INSIDE the action. The job is judged
-# three ways and the action was judged by two of them, so the same builders
+# four ways and the action was judged by two of them, so the same builders
 # escaped by moving one step sideways: measured, this fixture read rc=0 while
 # the identical script named on a job `run:` line read rc=1.
 d=$(mkcase case_49)
@@ -2124,6 +2218,60 @@ run_expect "case_79 an exempt step id borrowed inside a local action" 1 "$d" \
     '::error file=\.github/actions/probe/action\.yml,line=[0-9]+::ref is .main.' \
     '!is carried by' \
     'agent-checkouts=3 pinned-refs=1 named-trunk-refs=1'
+
+# case_80 -- the green case_44 gave up, and the one the interface gate needs. A
+# job that checks LibreMiddleware out for its HEADERS and compiles them with
+# -fsyntax-only builds nothing: nothing is linked, nothing is installed, no
+# artefact leaves the job. Counting the checkout as a build input reddened that
+# job for doing exactly the measuring its exemption is written for -- measured,
+# `carries this repository's build inputs: MIDDLEWARE_REF: main` over a job
+# whose only compiler call links nothing. The builders are still asked four
+# ways; this case is the one shape that has none of them.
+d=$(mkcase case_80)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ steps.p.outputs.ref }}
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      MIDDLEWARE_REF: main
+    steps:
+      - uses: actions/checkout@v4
+        id: agent_trunk
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: main
+      - uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreMiddleware
+          ref: ${{ env.MIDDLEWARE_REF }}
+          path: LibreMiddleware
+      - name: Compile the headers and judge nothing else
+        run: c++ -std=c++23 -fsyntax-only -I LibreMiddleware/include probe.cpp
+Y
+mkexc "$d" 'ci.yml:drift:agent_trunk  measures the agent trunk on purpose; compiles headers and builds nothing'
+# rc alone would pass on a run that printed a build-input error and then found
+# a pinned checkout elsewhere: this is the control for a rule that must print
+# NOTHING about this job, so it asserts the absence and the counters too.
+run_expect "case_80 CONTROL: an exempt job that only compiles headers" 0 "$d" \
+    '!::error' \
+    'SKIP: \.github/workflows/ci\.yml' \
+    'agent-checkouts=2 pinned-refs=1 named-trunk-refs=1'
 
 if [ "$fails" -eq 0 ]; then
     echo "check-agent-pin-wiring selftest: all cases passed ($cases)"

@@ -90,8 +90,10 @@
 #       repository ships is followed one level, and what that script does counts
 #       as what the job does. And a job can be written without a builder but not
 #       without its INPUTS, so INPUTRE asks the third way: an exempt job may not
-#       check this repository's dependencies out, name the prefix they install
-#       to or the ref they track, or take an artefact from another job.
+#       name the prefix this repository's dependencies install to, or take an
+#       artefact from another job. Checking those dependencies out is NOT one of
+#       them -- see INPUTRE below -- because compiling headers is what the
+#       exempt job does.
 #       Fourth: a job can move its steps into a LOCAL COMPOSITE ACTION and name
 #       none of it, which is cheaper than the script above and was not followed
 #       -- measured, the release job with its checkout, its cmake calls and its
@@ -257,15 +259,17 @@
 # this gate cannot read, so such a checkout is refused and counted in
 # unreadable-checkouts instead of being judged by the expression standing in
 # for it.
-# Four more doors, all R6's, all named rather than closed. First, a step that
-# reads the pin and then takes a branch anyway -- `pin=$(< ...libreagent.pin)`
-# on one line and `git -C LibreAgent checkout main` on the next -- is counted
-# as pinned: the read is the only evidence a shell fetch offers, and following
-# the variable from the read to the checkout argument is past what a textual
-# rule can do. It leaves a variable nothing uses, which is not a shape this
-# project writes -- and being counted as pinned, such a step also satisfies
-# R4's last clause, the one that wants at least one agent checkout still wired
-# to the pin. The same holds one remove: a step that CONSUMES
+# Five more doors, all named rather than closed. The first four are R6's,
+# about how a fetch is spelled; the fifth is R5's, about what an EXEMPT job
+# may hide. First, a step that reads the pin and then takes a branch anyway --
+# `pin=$(< ...libreagent.pin)` on one line and `git -C LibreAgent checkout
+# main` on the next -- is counted as pinned: the read is the only evidence a
+# shell fetch offers, and following the variable from the read to the checkout
+# argument is past what a textual rule can do. It leaves a variable nothing
+# uses, which is not a shape this project writes -- and being counted as
+# pinned, such a step also satisfies R4's last clause, the one that wants at
+# least one agent checkout still wired to the pin. The same holds one remove:
+# a step that CONSUMES
 # `${{ steps.<id>.outputs.* }}` from a reading step ANYWHERE in its body counts
 # as pinned even if the fetch beside it uses something else, on exactly the
 # terms the read itself does and for the same reason.
@@ -279,6 +283,16 @@
 # Third, a `cd` is followed only inside ONE step: the runner gives each step its
 # own shell and its own working directory, so a `cd` in an earlier step does not
 # carry, and neither does one inside a script this gate does not open.
+# Fourth, the builder questions R5 asks of an exempt job follow a `run:` line
+# into a script of this repository, and "a script" means a file that resolves
+# here and either carries a .sh/.bash/.py extension or is executable with a
+# shebang. A COMPILED runner -- an extensionless binary, a Makefile driven by
+# something else, a script without the executable bit -- is opened by none of
+# them, and since a dependency checkout beside it is no longer counted as a
+# build input (see INPUTRE), such a job can hold an agent-trunk exemption while
+# building. It is named here rather than answered with a list of file kinds,
+# which is the same enumeration this file distrusts everywhere else; what still
+# catches it is the prefix a build installs to and an artefact it publishes.
 # And a shell fetch cannot be EXEMPTED: an exemption addresses
 # <workflow>:<job>:<step id> and is matched against `repository:` checkouts, so
 # a listed address that only a fetch carries is a stale entry and fails. A job
@@ -339,11 +353,23 @@ BUILDRE='(cmake[[:space:]]+(--build|--install|-B)|(^|[^A-Za-z0-9_-])(ctest|xcode
 # in a job that really does build ten lines further down.
 INSTALLRE='(brew|apt|apt-get|yum|dnf|apk|pip|pip3|npm|gem|choco)[[:space:]]+(-[^[:space:]]+[[:space:]]+)*install'
 # What a building job CONSUMES. A job can be written to build without naming a
-# builder -- put the builders in a script -- but not without its inputs: this
-# repository's own dependency checkout, the prefix that build installs to, the
-# ref it tracks, or an artefact another job produced. A drift job needs none of
-# them.
-INPUTRE='(LM_PREFIX|MIDDLEWARE_REF|[Ll]ibre[Ss][Cc][Rr][Ss]/[Ll]ibre[Mm]iddleware|download-artifact)'
+# builder -- put the builders in a script -- but not without its inputs: the
+# prefix that build installs to, or an artefact another job produced. A drift
+# job needs neither.
+#
+# The dependency CHECKOUT is not on that list, and was: a checkout is a copy
+# of somebody's source, and what makes it a build input is the builder that
+# reads it or the prefix that build leaves behind. Both of those are already
+# asked -- the builders four ways -- the job's own lines, one level into a
+# script this repository ships, every local action the job reaches, and the
+# scripts named inside those actions; the prefix right here. What the checkout
+# alone proved was that headers were fetched, and the interface gate exists to
+# compile headers: it takes LibreMiddleware's include/ and runs the compiler
+# with -fsyntax-only, which reads no object file, writes none and links
+# nothing. Counting that as a build turned the one job this exemption is
+# written for red for doing the measuring it is exempt to do, and the answer
+# to that is not a second exemption file.
+INPUTRE='(LM_PREFIX|download-artifact)'
 
 # One level of indirection, for the same reason: a `run:` line naming a script
 # this repository ships is followed, and what the script does counts as what the
@@ -359,7 +385,18 @@ script_builders_lines() {  # numbered lines on stdin -> "<lineno>: <script> runs
     local ln text cand rest hit
     while IFS=: read -r ln text; do
         [ -n "$ln" ] || continue
-        for cand in $(printf '%s\n' "$text" | grep -oE '[A-Za-z0-9_./-]+\.(sh|bash|py)' || true); do
+        # Path-like tokens, with or without an extension. The list used to be
+        # `.sh|.bash|.py`, and a tracked runner named without one --
+        # `./Scripts/assemble-release` -- was reached by none of the three
+        # builder questions. That was harmless while a job carrying the
+        # dependency checkout beside it was red for the checkout alone; once
+        # that stopped being an input, an extensionless runner was the whole of
+        # the escape. An extensionless candidate has to look like a script:
+        # executable, and starting with a shebang. What is still open is named
+        # in the doors paragraph above.
+        for cand in $(printf '%s\n' "$text" \
+                      | grep -oE '[A-Za-z0-9_./-]+\.(sh|bash|py)|\.?/?[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)+' \
+                      || true); do
             rest=${cand#./}
             # The run: line names the script as the JOB sees it, which may carry
             # the path this repository is checked out under. Leading components
@@ -368,6 +405,14 @@ script_builders_lines() {  # numbered lines on stdin -> "<lineno>: <script> runs
                 case "$rest" in */*) rest=${rest#*/} ;; *) rest="" ;; esac
             done
             [ -n "$rest" ] || continue
+            case "$rest" in
+                *.sh|*.bash|*.py) ;;
+                *)  # An extensionless file counts only if it is a script: the
+                    # executable bit and a shebang. A compiled binary read as
+                    # text would be judged by a grep over its bytes.
+                    [ -x "$rest" ] || continue
+                    head -c 2 "$rest" 2>/dev/null | grep -q '#!' || continue ;;
+            esac
             hit=$(numbered_code_lines "$rest" | grep -vE "$INSTALLRE" | grep -Em1 "$BUILDRE" || true)
             if [ -n "$hit" ]; then
                 printf '%s: %s runs %s\n' "$ln" "$rest" "${hit#*:}"
@@ -1015,9 +1060,9 @@ for f in "${files[@]}"; do
             # R5 -- and this job builds nothing. An exemption is granted to a
             # job that measures the agent trunk, not to one that ships against
             # it: the pinned count is repository-wide, so a gate job holds it
-            # above zero while the release build takes a branch. Asked three
-            # ways, because naming the builders is the easiest of the three to
-            # stop doing.
+            # above zero while the release build takes a branch. Asked four
+            # ways, because naming the builders is the easiest of them to stop
+            # doing: the four branches below, in order.
             exempt_why=""
             exempt_hit=$(job_lines "$f" "$jobname" | grep -vE "$INSTALLRE" | grep -Em1 "$BUILDRE" || true)
             [ -n "$exempt_hit" ] && exempt_why="builds:${exempt_hit#*:}"

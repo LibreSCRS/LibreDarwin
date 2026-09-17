@@ -19,11 +19,15 @@
 # is satisfied by any gate job that reads headers, and the job that ships can be
 # written an exemption of its own.
 #
-# It is asked three ways, because naming the builders is the easiest of the
-# three to stop doing: the job's own lines, one level into any script of this
-# repository the job runs, and the INPUTS a build needs -- the dependency
-# checkout, the prefix it installs to, the ref it tracks, an artefact from
-# another job. A job that measures drift needs none of them.
+# It is asked four ways, because naming the builders is the easiest of them to
+# stop doing: the job's own lines, one level into any script of this repository
+# the job runs, every local composite action the job reaches (and the scripts
+# named inside those), and the INPUTS a build needs -- the prefix it installs
+# to, an artefact from another job. A job that measures drift needs
+# neither. Checking a dependency out is not one of them: the drift job takes
+# LibreMiddleware's headers and compiles them with -fsyntax-only, which links
+# nothing, and what makes a checkout a build input is the builder that reads it
+# or the prefix the build leaves behind.
 #
 # The address, not the id alone. A step id is unique only inside its job, so an
 # exemption keyed on the name follows the name: give the building job's checkout

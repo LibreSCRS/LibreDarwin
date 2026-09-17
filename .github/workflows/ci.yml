@@ -21,6 +21,17 @@ on:
   # else has no way to be checked before it lands.
   workflow_dispatch:
 
+# Git ref of LibreMiddleware, for every job that needs it: the macOS job builds
+# and installs it, and the two interface jobs take its headers to compile
+# against. ONE declaration, at workflow level, because it has to be the SAME ref
+# in all three -- a gate that compiles headers the release build does not use is
+# a gate answering a question nobody asked, and three job-level copies of one
+# branch name is how that drift starts. Track the trunk during the development
+# cycle (as LibreAgent/LibreCelik/LibreMac do); the 5.0 pin in CMakeLists.txt
+# enforces the required version independently of this ref.
+env:
+  MIDDLEWARE_REF: main
+
 jobs:
   format-check:
     # The format gate needs neither Xcode nor LibreMiddleware, so it runs on
@@ -177,10 +188,22 @@ jobs:
     # this job would take this job's verdict down with it and hide whether the
     # repository has followed the trunk at all.
     #
-    # Ubuntu: the check needs a C++ compiler and nothing Apple, so it also
-    # answers while the macOS job is unavailable.
-    timeout-minutes: 10
-    runs-on: ubuntu-latest
+    # macOS, and NOT because the check is expensive: two of the five translation
+    # units it judges include the Darwin backend, whose transport header takes
+    # <dispatch/dispatch.h> from the Apple SDK. No Ubuntu package provides that
+    # header -- so on a Linux runner the check can only name those two units and
+    # refuse, every time, which is a required job that can never pass. On macOS
+    # all five compile, against the same AppleClang the gate's own fixtures were
+    # written and measured against. This job used to say it needed "nothing
+    # Apple" and that it answered while the macOS build was unavailable; neither
+    # was ever true of the whole file set.
+    #
+    # It still builds nothing: R5 is -fsyntax-only, so the runner is here for
+    # its SDK and its compiler, not for a build. Which hosts reach all five, and
+    # what a Linux host is told instead, is recorded ONCE, in the threat model
+    # at the top of ci/scripts/check-agent-interface.sh.
+    timeout-minutes: 15
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -193,12 +216,36 @@ jobs:
           ref: main
           path: LibreAgent
 
+      - name: Checkout LibreMiddleware (headers only)
+        # HEADERS ONLY. Nothing here builds LibreMiddleware, and no submodule is
+        # fetched: R5 runs the compiler with -fsyntax-only, which links nothing,
+        # and every header the two socket units need is a tracked file under
+        # include/ -- none of them is written by CMake, so an install tree buys
+        # nothing a checkout does not already have.
+        #
+        # Without this the job compiled 3 of the 5 translation units that name
+        # authorize() and the 2 it skipped carried 8 of the 9 call sites. The
+        # check refuses to judge on that now, so the checkout is what keeps this
+        # job green rather than an optimisation.
+        uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreMiddleware
+          ref: ${{ env.MIDDLEWARE_REF }}
+          path: LibreMiddleware
+
       - name: Install gtest headers
         # Headers only -- the check compiles with -fsyntax-only and links
         # nothing. The authorizer's own test is one of the translation units the
         # check compiles, and without these it refuses to judge rather than
         # quietly measuring one header.
-        run: sudo apt-get update && sudo apt-get install -y libgtest-dev
+        #
+        # The macOS image does not ship googletest, so this fetches a bottle; if
+        # a future image does ship it, brew reports it as already installed and
+        # exits 0, so the step is a no-op either way. `brew --prefix googletest`
+        # below is what says where the headers landed -- the prefix differs
+        # between the arm64 and x86_64 images, so it is asked rather than
+        # written down.
+        run: brew install googletest
 
       - name: Prove the interface gate still fails when it should
         # Synthetic pairs, so the suite does not pass or fail with the defect it
@@ -211,9 +258,15 @@ jobs:
         # sentence: if the agent turns out to predate the outcome type, this
         # job is told to publish that revision rather than to raise a pin it
         # never reads.
+        #
+        # Two include roots, colon-separated, which is the form the gate
+        # documents and splits on: LibreMiddleware's headers for the socket
+        # units, gtest's for the authorizer's own test. On macOS neither is in a
+        # default system include path, so both have to be named.
         run: |
           cd LibreDarwin
-          ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgent/include" trunk
+          LIBRESCRS_EXTRA_INCLUDE="$GITHUB_WORKSPACE/LibreMiddleware/include:$(brew --prefix googletest)/include" \
+              ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgent/include" trunk
 
   agent-interface-pin:
     # The same check against cmake/libreagent.pin -- the revision this
@@ -231,9 +284,13 @@ jobs:
     #
     # Failing here rather than inside the macOS build is the whole point: the
     # same headers fail the same way in build-macos, an hour in, naming no
-    # cause.
-    timeout-minutes: 10
-    runs-on: ubuntu-latest
+    # cause. This job is minutes and builds nothing.
+    #
+    # macos-15 for the same reason as the job above: two of the five units take
+    # <dispatch/dispatch.h> from the Apple SDK, which no Ubuntu package
+    # provides.
+    timeout-minutes: 15
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -261,8 +318,18 @@ jobs:
           ref: ${{ steps.agent_pin_interface.outputs.ref }}
           path: LibreAgentPinned
 
+      - name: Checkout LibreMiddleware (headers only)
+        # Headers only, no build, no submodules -- see the job above.
+        uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreMiddleware
+          ref: ${{ env.MIDDLEWARE_REF }}
+          path: LibreMiddleware
+
       - name: Install gtest headers
-        run: sudo apt-get update && sudo apt-get install -y libgtest-dev
+        # Headers only, and a no-op if the image ever ships it -- see the job
+        # above.
+        run: brew install googletest
 
       - name: Darwin authorizer compiles against the revision this repository declares
         # The gate's own message names which side is stale. This adds the one
@@ -270,17 +337,22 @@ jobs:
         # pinned side to stop being stale.
         #
         # Only on rc=1. The gate exits 2 to say it is REFUSING TO JUDGE -- no
-        # compiler, no headers, a named translation unit gone -- and blaming the
-        # pin for that would name a cause it just declined to name, which is how
-        # a gate ends up distrusted and then deleted. Both exits stay red.
+        # compiler, no headers, a named translation unit gone, a unit it could
+        # not compile -- and blaming the pin for that would name a cause it just
+        # declined to name, which is how a gate ends up distrusted and then
+        # deleted. Asserting the pin is FINE would be just as wrong: a header
+        # this repository includes and the pinned LibreAgent does not carry
+        # reads as `file not found` and lands in exactly that rc=2. So the
+        # message sends the reader to the gate's own list. Both exits stay red.
         run: |
           cd LibreDarwin
           rc=0
-          ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgentPinned/include" pin || rc=$?
+          LIBRESCRS_EXTRA_INCLUDE="$GITHUB_WORKSPACE/LibreMiddleware/include:$(brew --prefix googletest)/include" \
+              ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgentPinned/include" pin || rc=$?
           if [ "$rc" -eq 1 ]; then
             echo "::error file=cmake/libreagent.pin::this repository does not build against the LibreAgent revision it declares. Publish the agent revision these headers need, move this pin to it, and re-run; the pin may name only a revision that exists on the remote, so moving it first would break every checkout that reads it."
           elif [ "$rc" -ne 0 ]; then
-            echo "::error::the interface check refused to judge the pinned revision (rc=$rc); its own output above names why. This says nothing about the pin."
+            echo "::error::the interface check refused to judge the pinned revision (rc=$rc); its own output above names why, unit by unit. A header missing from the pinned side is named there too, so read that list before concluding anything about the pin."
           fi
           exit "$rc"
 
@@ -294,10 +366,8 @@ jobs:
       # Where LibreMiddleware installs and where LibreDarwin (+ the FetchContent
       # LibreAgent) find it via find_package(LibreMiddleware 5.0 CONFIG).
       LM_PREFIX: ${{ github.workspace }}/lm-prefix
-      # Git ref of LibreMiddleware to build against — track its trunk during the
-      # development cycle (as LibreAgent/LibreCelik/LibreMac do). The 5.0 pin in
-      # CMakeLists.txt enforces the required version independently of this ref.
-      MIDDLEWARE_REF: main
+      # MIDDLEWARE_REF is declared once at workflow level, above: this job and
+      # the two interface jobs must take LibreMiddleware at the same ref.
       # LibreAgent ref: READ FROM THE PIN, not a branch name.
       #
       # This was `main`, and the pin in cmake/FindOrUseLibreAgent.cmake was

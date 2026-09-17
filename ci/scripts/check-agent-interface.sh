@@ -67,8 +67,14 @@
 #       conversion to bool, so a compiler rejects every shape R2, R3 and R4 try
 #       to enumerate -- and the ones they accept by mistake too. What stops it
 #       being the whole gate is reach: two of the units that name the call need
-#       LibreMiddleware's headers and Apple blocks. It judges what it reaches,
-#       says how many that was, and leaves the rest to the rules above.
+#       LibreMiddleware's headers and Apple blocks. So it judges what it
+#       reaches, says how many that was, and REFUSES TO JUDGE -- exit 2 -- when
+#       that is not all of them. It printed "3 of 5" under the word ok and
+#       rc=0 instead, leaving the rest "to the rules above": the two shapes
+#       named at the end of this header are pardoned by R2, R3 and R4 by
+#       construction, so a unit out of reach is judged by nothing at all and the
+#       whole gate reads green over it. A count nobody compares between runs is
+#       not a measurement; the exit code is.
 #       A failure is THIS contract's when the FIRST error -- with the notes
 #       hanging off it, and not the source line echoed under the caret -- names
 #       AuthorizationOutcome, and when that first error stands inside this
@@ -145,18 +151,36 @@
 # writes authorize() calls in today. R2, R3 and R4 read source text with
 # comments stripped, so they cannot see what a value actually converts to and
 # do not try to -- a shape none of the three enumerates is judged only by R5,
-# the compiler, and R5 judges only the units it can reach. Known door, measured
-# on this repository's own workflow: the job CI actually runs checks the
-# interface out WITHOUT a LibreMiddleware sibling, so R5 there compiles 3 of
-# the 5 translation units that name authorize() and leaves the other 2 --
-# agent/src/backend/SocketFrontend.cpp and its test, together 8 of the 9 real
-# call sites -- "out of reach", counted rather than silently dropped, but
-# judged by nothing at all. A call in one of those two files that binds the
-# outcome to a name and passes that name as an argument to another call (one of
-# the two shapes R3/R4 accept above) is therefore unjudged end to end in the
-# configuration this repository's own CI runs, not merely pending an Apple
-# host: rc=0, R1-R5 all "ok". Reachable only by checking the same job out
-# alongside LibreMiddleware, which changes what "the CI configuration" means.
+# the compiler. That is why R5 refuses rather than reporting a fraction. The
+# door it closes was measured on this repository's own workflow: the job CI ran
+# checked this repository out WITHOUT a LibreMiddleware beside it, so
+# R5 there compiled 3 of the 5 translation units that name authorize() and left
+# the other 2 -- agent/src/backend/SocketFrontend.cpp and its rig, together 8 of
+# the 9 real call sites -- "out of reach" at rc=0. A call in one of those two
+# files that binds the outcome to a name and passes that name as an argument to
+# another call (one of the two shapes R3/R4 accept above) was unjudged end to
+# end in the configuration this repository's own CI ran, not merely pending an
+# Apple host: rc=0, R1-R5 all "ok".
+#
+# WHERE ALL FIVE CAN BE COMPILED -- this is the only place that says it, and
+# every other comment in this repository defers here.
+#
+# On macOS, with LibreMiddleware's include/ and gtest's headers on
+# LIBRESCRS_EXTRA_INCLUDE (colon-separated). Measured on macOS 15 / AppleClang
+# 21 against both the agent trunk and the pin: five of five, rc=0. That is what
+# both agent-interface jobs run, on macos-15, which is why they can be green at
+# all; the same result was measured with GCC 16 as `c++` (no blocks) and a
+# clang++ beside it, five of five through the retry below.
+#
+# On Linux: THREE of five, and a refusal. Two of the units reach
+# `<dispatch/dispatch.h>` through
+# agent/include/LibreSCRS/Darwin/backend/SocketTransport.h, and ubuntu-24.04
+# ships no package providing that header at all -- measured 2026-09-17 against
+# the distribution's index, see PLATFORMRE below. Those two are named unit by
+# unit, classified as a platform header rather than as headers missing from the
+# path, and given the only remedy there is: run where that SDK is. Anyone
+# running this gate on a Linux workstation gets that answer, which is the true
+# one; CI does not run it there.
 #
 # R1 needs one Darwin-only type, audit_token_t from <bsm/libbsm.h>. On a Mac the
 # real header is used. Elsewhere a stand-in is generated below, in a temporary
@@ -168,8 +192,9 @@
 #   1  a rule is broken; the offending declaration or call sites are printed
 #   2  refusing to judge -- no compiler, no LibreAgent headers, no gtest
 #      headers, a named translation unit missing, a text rule that could not be
-#      run, or R1's own compile failing for a reason that is not the authorize()
-#      contract. A gate that
+#      run, R1's own compile failing for a reason that is not the authorize()
+#      contract, or a translation unit naming the call that R5 could not
+#      compile: what nothing judged is not a pass. A gate that
 #      reports the defect it was built for whenever anything at all goes wrong
 #      is a gate that will one day be "fixed" by deleting it.
 set -uo pipefail
@@ -194,6 +219,20 @@ case "$LA_ORIGIN" in
     *) echo "FATAL: '$LA_ORIGIN' is not a LibreAgent provenance — pass 'pin', 'trunk', or nothing" >&2; exit 2 ;;
 esac
 CXX_BIN="${CXX:-c++}"
+
+# Apple's libc++ ships <stop_token>, std::jthread and <expected> behind
+# -fexperimental-library, and this repository's CMakeLists adds that flag
+# unconditionally for AppleClang -- so a gate that compiles the same headers
+# without it is not compiling what the build compiles. Two of the five units
+# reach std::jthread through the agent core, and on the Xcode the hosted macOS
+# runner carries they would be reported as out of reach for a reason that is
+# not about this contract at all. Asked of the compiler, not of the platform:
+# a clang that is not Apple's does not gate them and rejects the flag.
+apple_libcxx() {  # apple_libcxx <compiler> -> 0 when it is Apple's clang
+    "$1" --version 2>/dev/null | grep -q '^Apple clang'
+}
+expl=()
+apple_libcxx "$CXX_BIN" && expl=(-fexperimental-library)
 
 HDR="agent/include/LibreSCRS/Darwin/backend/SecCodeAuthorizer.h"
 BASE="$LA_INCLUDE/LibreSCRS/Agent/backend/Authorizer.h"
@@ -358,7 +397,7 @@ done
 : > "$SCRATCH/r1.log"
 r1=0
 for t in "${tus[@]}"; do
-    "$CXX_BIN" -std=c++23 -fsyntax-only "${shim_inc[@]}" \
+    "$CXX_BIN" -std=c++23 "${expl[@]}" -fsyntax-only "${shim_inc[@]}" \
         -I agent/include -isystem "$LA_INCLUDE" "${extra_inc[@]}" "$t" >> "$SCRATCH/r1.log" 2>&1 || r1=1
 done
 # Both spellings: GCC says `gtest/gtest.h: No such file or directory`, clang says
@@ -401,6 +440,37 @@ fi
 STALERE='(AuthorizationOutcome. in namespace|no type named .AuthorizationOutcome|AuthorizationOutcome. is not a member)'
 BLOCKSRE="(expected primary-expression before .\\^. token|blocks support disabled|blocks are not enabled)"
 ENVRE="(No such file or directory|file not found|$BLOCKSRE)"
+
+# A missing header that NO include root on this machine can supply, because it
+# belongs to another operating system's SDK. The distinction is not decoration:
+# the two sit in the same "out of reach" bucket and exit 2 alike, but their
+# remedies have nothing in common. An ordinary missing header is answered by
+# LIBRESCRS_EXTRA_INCLUDE; `<dispatch/dispatch.h>` on a Linux runner is not
+# answered by any path, and printing the include-root remedy there sends the
+# reader to look for a directory that does not exist anywhere on the box.
+#
+# Measured 2026-09-17 against the distribution's own index: ubuntu-24.04 has no
+# package providing `dispatch/dispatch.h` at all -- `libdispatch-dev` is "not
+# available in this suite", the only noble package whose name carries
+# `libdispatch` is a Perl module, and a file-contents search for that path over
+# noble/amd64 returns nothing. So the two units that reach it through
+# agent/include/LibreSCRS/Darwin/backend/SocketTransport.h cannot be compiled on
+# that image by any arrangement of include roots.
+#
+# This IS a list, and a list can be out-spelled -- but read what a miss costs
+# here: the unit is counted, refused and named either way, and all that changes
+# is which remedy sentence is printed. A list that can only pick the wrong
+# SENTENCE is in the one place a list is safe. A new platform root is added here
+# deliberately, having read this.
+PLATFORMRE='^(dispatch|CoreFoundation|CoreServices|Foundation|Security|IOKit|xpc|os|mach|bsm|objc)/'
+# The header the first error says is missing, in either compiler's words: gcc
+# writes `X: No such file or directory`, clang writes `'X' file not found`.
+missing_header() {  # missing_header <log> -> the header name, or ""
+    grep -m1 -E "(No such file or directory|file not found)" "$1" 2>/dev/null \
+        | sed -e "s/.*'\([^']*\)' file not found.*/\1/" \
+              -e 's/.*: \([^ :]*\): No such file or directory.*/\1/' \
+        | grep -E '^[A-Za-z0-9_.+/-]+$' || true
+}
 
 # The first error the compiler reported, with the notes attached to it -- its
 # own message lines and nothing else. Both compilers echo the offending SOURCE
@@ -1059,14 +1129,21 @@ fi
 # What stops it being the whole of this gate is reach, not power: of the units
 # that name the call, the socket frontend and its test include LibreMiddleware's
 # headers and Apple blocks, so they compile here only when those headers are on
-# the path and the compiler understands `^{ }`. Measured on a Linux host with
-# clang and a sibling LibreMiddleware checkout: every one of them passes
-# -fsyntax-only, with the bsm stand-in above as the only stub. With a compiler
-# that has no blocks, or with no LibreMiddleware headers to hand: three of five.
+# the path and the compiler understands `^{ }` -- and, since they also include
+# `<dispatch/dispatch.h>`, only where that header exists at all. The Linux host
+# this was first measured on had one; the hosted image CI runs on does not.
+# Which hosts reach all five is recorded in ONE place, the threat model at the
+# top of this file; do not restate it here.
 #
-# So this rule judges what it can reach and PRINTS how many that was. A unit it
-# cannot reach is not a refusal: R2-R4 still read it, and a rule that went
-# yellow whenever a sibling checkout was absent is a rule somebody switches off.
+# So this rule judges what it can reach, PRINTS how many that was, and refuses
+# to judge -- rc=2 -- when that is not all of them. It used to print the
+# fraction under "R5 ok" and leave the remainder to R2-R4, on the grounds that
+# going yellow whenever a sibling checkout was absent is a rule somebody
+# switches off. Measured, the remainder was not covered: the two shapes this
+# file's header hands to the compiler are pardoned by R2, R3 and R4 by
+# construction, and the two units CI could not reach hold 8 of the 9 call
+# sites. The answer to "somebody switches it off" is to give CI the headers,
+# which is what the workflow now does, not to call an unmeasured unit ok.
 # A unit it CAN reach and that fails on the contract is rc=1 -- the strongest
 # verdict in this file, and the only one no spelling can answer.
 #
@@ -1091,6 +1168,8 @@ done < "$SCRATCH/sources.txt" > "$SCRATCH/r5-tus.txt"
 # `c++` is gcc and judged three of five, while a clang++ installed beside it
 # judges all five -- and the durable record blamed a missing sibling checkout
 # that was in fact found. Which compiler produced the verdict is printed.
+# Measured again with GCC 16 as `c++` and the LibreMiddleware headers on the
+# path: all five, "clang++ where g++-16 has no blocks" on the verdict line.
 BLOCKS_CXX=""
 if [ "${#blocks[@]}" -gt 0 ]; then
     BLOCKS_CXX="$CXX_BIN"
@@ -1104,14 +1183,27 @@ else
     done
 fi
 
+expl_alt=()
+if [ -n "$BLOCKS_CXX" ] && [ "$BLOCKS_CXX" != "$CXX_BIN" ]; then
+    apple_libcxx "$BLOCKS_CXX" && expl_alt=(-fexperimental-library)
+fi
+
 r5_try() {  # r5_try <compiler> [flags...] — compiles $t, log in $SCRATCH/r5.log
     local cc="$1"; shift
-    "$cc" -std=c++23 "$@" -fsyntax-only "${shim_inc[@]}" "${defs[@]}" \
+    # The libc++ flag belongs to the compiler actually running, which on the
+    # retry below is not $CXX_BIN.
+    local -a libcxx=()
+    if [ "$cc" = "$CXX_BIN" ]; then
+        libcxx=("${expl[@]}")
+    else
+        libcxx=("${expl_alt[@]}")
+    fi
+    "$cc" -std=c++23 "${libcxx[@]}" "$@" -fsyntax-only "${shim_inc[@]}" "${defs[@]}" \
         -I agent/include -I agent/src -I agent/tests -isystem "$LA_INCLUDE" "${extra_inc[@]}" \
         "$t" > "$SCRATCH/r5.log" 2>&1
 }
 
-r5_total=0; r5_compiled=0; r5_unreached=0; r5_broken=0; r5_alt=0; r5_unclear=0
+r5_total=0; r5_compiled=0; r5_unreached=0; r5_broken=0; r5_alt=0; r5_unclear=0; r5_platform=0
 : > "$SCRATCH/r5-unreached.txt"
 while IFS= read -r t; do
     [ -n "$t" ] || continue
@@ -1120,11 +1212,30 @@ while IFS= read -r t; do
     case "$t" in agent/tests/*) defs=(-DLIBRESCRS_INTERNAL_BUILD) ;; esac
 
     r5_ok=0
+    # Which binary produced the log every line below quotes. Without it the
+    # verdict names $CXX_BIN while the diagnostics come from the retry, which is
+    # the ORDINARY path wherever `c++` has no blocks and a clang++ sits beside
+    # it -- every hosted Linux runner. "Which compiler produced the verdict is
+    # printed" was a promise the file did not keep.
+    r5_cc="$CXX_BIN"
     if r5_try "$CXX_BIN" "${blocks[@]}"; then
         r5_ok=1
-    elif [ -n "$BLOCKS_CXX" ] && [ "$BLOCKS_CXX" != "$CXX_BIN" ] \
-         && grep -qE "$BLOCKSRE" "$SCRATCH/r5.log"; then
-        r5_alt=1
+    elif [ -n "$BLOCKS_CXX" ] && [ "$BLOCKS_CXX" != "$CXX_BIN" ]; then
+        # The retry is not conditioned on the diagnostic saying "blocks". It was
+        # -- BLOCKSRE, a list of three spellings -- and the list is one compiler
+        # release behind: measured on GCC 16, `void (^b)(void) = ^{ };` reports
+        # `expected primary-expression before 'void'`, which names neither the
+        # caret nor blocks and matches none of the three. A retry that never
+        # fires leaves the unit unjudged, and since that is now a REFUSAL the
+        # cost of a missed spelling is a red gate rather than a quiet "3 of 5".
+        # A second -fsyntax-only run of a unit that already failed is cheap, and
+        # the compiler that has the extension is a better witness than a regex
+        # over the one that has not. Whatever the retry reports is what the
+        # classification below reads.
+        # r5_alt marks that the alternate was USED, not that it succeeded: the
+        # verdict line names whose diagnostics the reader is about to read, and
+        # on the run where both compilers fail those are the alternate's.
+        r5_alt=1; r5_cc="$BLOCKS_CXX"
         r5_try "$BLOCKS_CXX" -fblocks && r5_ok=1
     fi
     if [ "$r5_ok" = 1 ]; then
@@ -1137,23 +1248,31 @@ while IFS= read -r t; do
         # fails after that fails for the same reason, and naming a call site
         # here would send the reader to fix code that is correct.
         r5_unreached=$((r5_unreached + 1))
-        printf '        %s -- the LibreAgent revision under test predates the outcome type; R1 above says so\n' "$t" \
+        printf '        %s (%s) -- the LibreAgent revision under test predates the outcome type; R1 above says so\n' "$t" "$r5_cc" \
             >> "$SCRATCH/r5-unreached.txt"
     elif errfile=$(first_error_file "$SCRATCH/r5.log"); foreign_error "$errfile"; then
         # The first error is in a header this repository does not own. Whatever
         # it says, it is not a verdict about a call site here.
         r5_unreached=$((r5_unreached + 1))
-        printf '        %s -- the first error stands in %s, outside this checkout\n' "$t" "$errfile" \
+        printf '        %s (%s) -- the first error stands in %s, outside this checkout\n' "$t" "$r5_cc" "$errfile" \
             >> "$SCRATCH/r5-unreached.txt"
     elif contract_diag "$SCRATCH/r5.log"; then
         r5_broken=$((r5_broken + 1))
-        echo "::error file=$t::this translation unit does not compile against the authorize() contract — a scoped enum has no conversion to bool, and no spelling makes one"
+        echo "::error file=$t::this translation unit does not compile against the authorize() contract — a scoped enum has no conversion to bool, and no spelling makes one (reported by $r5_cc)"
         grep -E '(error|note):' "$SCRATCH/r5.log" | head -10
         rc=1
     elif grep -qE "$ENVRE" "$SCRATCH/r5.log"; then
         r5_unreached=$((r5_unreached + 1))
-        printf '        %s -- out of reach: %s\n' "$t" "$(first_error_text "$SCRATCH/r5.log")" \
-            >> "$SCRATCH/r5-unreached.txt"
+        r5_miss=$(missing_header "$SCRATCH/r5.log")
+        if [ -n "$r5_miss" ] && printf '%s' "$r5_miss" | grep -qE "$PLATFORMRE"; then
+            # Not "headers not on the path": there is no path. See PLATFORMRE.
+            r5_platform=$((r5_platform + 1))
+            printf '        %s (%s) -- out of reach: <%s> belongs to another platform SDK, which this host does not have and no include root can supply\n' \
+                "$t" "$r5_cc" "$r5_miss" >> "$SCRATCH/r5-unreached.txt"
+        else
+            printf '        %s (%s) -- out of reach: %s\n' "$t" "$r5_cc" "$(first_error_text "$SCRATCH/r5.log")" \
+                >> "$SCRATCH/r5-unreached.txt"
+        fi
     else
         # The compiler opened this unit and rejected it, and the rejection is
         # neither this contract's nor the environment's. That is a hole in the
@@ -1164,8 +1283,8 @@ while IFS= read -r t; do
         # read rather than deduced from a number nobody kept.
         r5_unclear=$((r5_unclear + 1))
         r5_unreached=$((r5_unreached + 1))
-        printf '        %s -- NOT JUDGED, and not for a reason this rule recognises: %s\n' \
-            "$t" "$(first_error_text "$SCRATCH/r5.log")" >> "$SCRATCH/r5-unreached.txt"
+        printf '        %s (%s) -- NOT JUDGED, and not for a reason this rule recognises: %s\n' \
+            "$t" "$r5_cc" "$(first_error_text "$SCRATCH/r5.log")" >> "$SCRATCH/r5-unreached.txt"
     fi
 done < "$SCRATCH/r5-tus.txt"
 
@@ -1174,24 +1293,56 @@ done < "$SCRATCH/r5-tus.txt"
 # failure and sets rc=1 leaves a log whose verdict lines all read ok over a red
 # gate. Every other rule here prints no ok line when it has an ::error to
 # report, and these lines are the only record of what was judged.
+# The remedy, written once: both the refusal below and the FAILED branch beside
+# it list units nothing compiled, and a list of unjudged units with no way to
+# judge them is a report the reader cannot act on. The FAILED branch printed the
+# list and no remedy at all.
+r5_remedy="Put the headers those units need on the path with LIBRESCRS_EXTRA_INCLUDE (colon-separated include roots — LibreMiddleware's include/ is what the socket frontend and its rig need), and fix any failure listed above that is not a missing header."
+# A platform header has no include-root answer, so it gets its own sentence
+# rather than the one above with a shrug attached.
+[ "$r5_platform" -gt 0 ] && r5_remedy="$r5_remedy $r5_platform of them stopped on a header belonging to another platform's SDK, named above: no include root supplies it. Run this check on a host that has that SDK — the platform this repository targets — or install a package that provides the header there."
 r5_reach_note=""
-[ "$r5_unreached" -gt 0 ] && r5_reach_note="; $r5_unreached out of reach and left to R2-R4"
+[ "$r5_unreached" -gt 0 ] && r5_reach_note="; a further $r5_unreached were not compiled at all"
 r5_with="${extra_named:+ with $extra_named}"
 [ "$r5_alt" = 1 ] && r5_with="${r5_with:+$r5_with,} $BLOCKS_CXX where $CXX_BIN has no blocks"
 r5_with="${r5_with:+ ($(echo "$r5_with" | sed 's/^ //'))}"
 if [ "$r5_broken" -gt 0 ]; then
     echo "  R5 FAILED — $r5_broken of $((r5_broken + r5_compiled)) translation unit(s) judged here do not compile against the authorize() contract$r5_with$r5_reach_note"
-    [ "$r5_unreached" -gt 0 ] && cat "$SCRATCH/r5-unreached.txt"
+    if [ "$r5_unreached" -gt 0 ]; then
+        cat "$SCRATCH/r5-unreached.txt"
+        echo "  note    nothing judged those $r5_unreached unit(s): $r5_remedy"
+    fi
 elif [ "$r5_total" -eq 0 ]; then
     echo "  R5 ok   — no source in this tree names authorize(), so there is nothing for a compiler to judge"
 elif [ "$r5_unreached" -eq 0 ]; then
     echo "  R5 ok   — all $r5_total translation unit(s) naming authorize() compile against $LA_INCLUDE$r5_with"
-elif [ "$r5_unclear" -gt 0 ]; then
-    echo "  R5 INCOMPLETE — $r5_compiled of $r5_total translation unit(s) naming authorize() were compiled here$r5_with; $r5_unreached left to R2-R4, of which $r5_unclear failed for a reason this rule cannot attribute:"
-    cat "$SCRATCH/r5-unreached.txt"
 else
-    echo "  R5 ok   — $r5_compiled of $r5_total translation unit(s) naming authorize() were compiled here$r5_with; $r5_unreached out of reach and left to R2-R4:"
+    # A unit this rule could not open is a unit NOTHING judged. "Left to R2-R4"
+    # was the sentence that made this look survivable, and it is not true of the
+    # two shapes this file's header names as the compiler's alone: the outcome
+    # passed as an argument to a call, and `return <name>;`. Both are pardoned
+    # by R2, R3 and R4 BY CONSTRUCTION, so for a unit out of reach the whole
+    # chain reads ok over code that compiles nowhere. Measured on this
+    # repository's own workflow: the agent-interface job checked the repository
+    # out with no LibreMiddleware beside it, R5 compiled 3 of the 5 units and
+    # the 2 it skipped carry 8 of the 9 real call sites -- "3 of 5" printed
+    # under the word ok, rc=0. So reach is a refusal now, and the coverage is in
+    # the exit code rather than in a number nobody compares between runs.
+    #
+    # The two reasons stay apart because the remedies do: a unit out of reach
+    # needs its headers put on the path, while one that failed for a reason this
+    # rule cannot attribute needs that failure fixed first and would go on
+    # hiding this contract afterwards.
+    if [ "$r5_unclear" -gt 0 ]; then
+        echo "  R5 INCOMPLETE — $r5_compiled of $r5_total translation unit(s) naming authorize() were compiled here$r5_with; $r5_unreached were not, of which $r5_unclear failed for a reason this rule cannot attribute:"
+    else
+        echo "  R5 INCOMPLETE — $r5_compiled of $r5_total translation unit(s) naming authorize() were compiled here$r5_with; $r5_unreached out of reach:"
+    fi
     cat "$SCRATCH/r5-unreached.txt"
+    echo "::error::refusing to judge: $r5_unreached of $r5_total translation unit(s) naming authorize() were not compiled — they are named above. The shapes only a compiler sees are pardoned by R2-R4, so an uncompiled unit is judged by nothing at all. $r5_remedy"
+    # rc=1 wins: a broken contract is the stronger verdict and names a line to
+    # go and look at, where this names only what was not measured.
+    [ "$rc" -eq 0 ] && rc=2
 fi
 
 exit "$rc"
