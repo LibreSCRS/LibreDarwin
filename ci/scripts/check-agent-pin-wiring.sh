@@ -29,6 +29,8 @@
 #       the mention is the defect whatever follows it.
 #   R3  a workflow that checks out LibreSCRS/LibreAgent with actions/checkout
 #       reads the pin file (a fetch written in the shell instead is R6) --
+#       the checkout counting for the job that RUNS it, which for a step of a
+#       local composite action is the job whose `uses: ./...` reaches it --
 #       an actual read (a `<` redirect or `cat`) on a line that is not a
 #       comment, with any trailing comment cut off first. The checkout counts
 #       in every spelling GitHub accepts: owner/repo resolve case-insensitively
@@ -39,12 +41,25 @@
 #       classify, and fails for that reason rather than being skipped.
 #   R4  that checkout USES the read: its `ref:` is `${{ steps.<id>.outputs.* }}`
 #       (quoted or bare) and <id> is a step in the same job that performs the
-#       read. One shape is exempt, and only by name: a job that checks the
+#       read -- and in the same FILE, because that is where GitHub resolves the
+#       `steps` context: inside a composite action it holds that action's own
+#       steps and nothing of the job's. A checkout written in an action, naming
+#       a resolve step of the calling job, was scored pinned while at runtime
+#       the expression is empty and actions/checkout takes the default branch.
+#       Where an action takes the ref as an INPUT -- `ref: ${{ inputs.<name> }}`
+#       -- the value judged is the one the step using the action passes in its
+#       `with:`, in the workflow's id space, since that is where it is written
+#       and the only place it can be fixed. That is followed one level; an input
+#       nobody sets there is refused rather than read as if it were the ref.
+#       One shape is exempt, and only by name: a job that checks the
 #       agent out on purpose at a ref the pin does not name, because measuring
 #       drift is its whole point. Such a step is listed in
 #       ci/agent-ref-exceptions.txt WITH a reason, by ADDRESS -- <workflow
 #       file>:<job>:<step id> -- and R3 and R4 then do not apply to it. The
-#       address is the rule. A step id alone is unique only inside its job, so
+#       address is the rule, and it addresses a step written in that workflow
+#       file: a step id inside a composite action belongs to the action's own id
+#       space, and an amnesty that reached it pardoned a checkout nobody
+#       listed. A step id alone is unique only inside its job, so
 #       an exemption keyed on the id travels: rename the building job's checkout
 #       step to the exempt id, drop its `ref:` back to a branch, and every rule
 #       here goes quiet without the exemption file being touched. Measured, it
@@ -211,27 +226,37 @@
 # give it a real pin file rather than leaving it on `-`.
 #
 # Threat model. This gate catches an honest regression: a checkout, a shell
-# fetch or move, or a build step written directly in a job's own `steps:`, in the
-# ordinary shapes this repository's workflows and its siblings' are written in
-# today, that stops reading the pin or stops using what it read. It reads YAML
-# as text, one `steps:` block at a time, so it cannot see what a job assembles
-# out of other files and does not try to, except for the one case R5 opens on
-# purpose: a LOCAL composite
-# action a job EXEMPTED in ci/agent-ref-exceptions.txt reaches through
-# `uses: ./...`, which is followed and judged recursively because that is
-# exactly the shape the exempt job is trusted not to abuse. Known door,
-# measured on this repository's own workflow: that following is done only for
-# an exempt job. R3/R4's own checkout count (`agent-checkouts` in the summary
-# line below) reads a job's literal `steps:` and nothing a `uses: ./...` in it
-# points at. Moving a NON-exempt job's OWN LibreSCRS/LibreAgent checkout --
-# `build-macos`'s, the one this gate exists to keep pinned -- behind a local
-# composite action makes that checkout invisible to the count: measured,
-# `agent-checkouts` silently drops from 3 to 2, rc=0, no `::error` at all. The
-# checkout is still real and still unpinned from this gate's point of view; it
-# is simply not counted, because the recursive action-reading this gate has
-# only extends to jobs already named as exempt. `agent-checkouts` counts the
-# `repository:` checkouts of a job's literal `steps:` PLUS R6's shell fetches
-# and moves, and nothing else.
+# fetch or move, or a build step a job runs, in the ordinary shapes this
+# repository's workflows and its siblings' are written in today, that stops
+# reading the pin or stops using what it read. It reads YAML as text, one
+# `steps:` block at a time, so it cannot see what a job assembles out of other
+# files -- with one exception, which is every job's now: a LOCAL composite
+# action reached through `uses: ./...` is opened and its steps are read as steps
+# of the job that uses it, recursively, each action file once. R5 opened them
+# for a job EXEMPTED in ci/agent-ref-exceptions.txt, to judge what that job
+# builds. R3 and R4 open them for every job, to count what it checks out,
+# because the count read a job's literal `steps:` and nothing a `uses: ./...`
+# in it pointed at: measured on this repository's own workflow, moving a
+# NON-exempt job's own LibreSCRS/LibreAgent checkout -- `build-macos`'s, the one
+# this gate exists to keep pinned -- into .github/actions/fetch-agent/action.yml
+# with `ref: main` dropped `agent-checkouts` from 3 to 2, rc=0, no `::error` at
+# all, while the job that ships took the trunk. GitHub runs that checkout in the
+# using job's workspace; it is that job's checkout and it is counted and judged
+# there, at the action file's own line. `agent-checkouts` counts the
+# `repository:` checkouts of a job's steps, wherever the file they are written
+# in lives, PLUS R6's shell fetches and moves, and nothing else.
+# What is still not read is what no `steps:` block spells out: a `uses: ./...`
+# that resolves to no action file here (GitHub cannot run it either, so it is a
+# job that fails rather than a checkout that hides -- R5 refuses it outright for
+# an exempt job), an action whose kind has no steps at all (node, docker; R5
+# refuses that for an exempt job too), and a reusable workflow called with
+# `uses: ./.github/workflows/<x>.yml`, whose jobs are its own and are scanned
+# when that file is one of the workflow files. And one value, named rather than
+# guessed: an action input the using step does not set -- the action's own
+# default, or an input handed on through a nested action's `with:` -- is a ref
+# this gate cannot read, so such a checkout is refused and counted in
+# unreadable-checkouts instead of being judged by the expression standing in
+# for it.
 # Four more doors, all R6's, all named rather than closed. First, a step that
 # reads the pin and then takes a branch anyway -- `pin=$(< ...libreagent.pin)`
 # on one line and `git -C LibreAgent checkout main` on the next -- is counted
@@ -553,7 +578,10 @@ readre="(<|cat)[[:space:]]*[^[:space:]]*$pinbase"
 # a `git clone` / `gh repo clone` / `git fetch` naming the agent in the step's
 # own shell (0 if none) -- R6's shape, which is not a `uses:` at all -- and the
 # step outputs (`${{ steps.<id>.outputs.* }}`) that step's body consumes, so a
-# shell fetch can be wired through a resolve step the way a checkout is.
+# shell fetch can be wired through a resolve step the way a checkout is. Last
+# comes the file the step was read from, which is the workflow for a job's own
+# steps and the action file for the steps of a local composite action it uses:
+# an error has to point at the line somebody has to edit.
 # Steps are the list items directly under a `steps:` key -- the list's own
 # indentation delimits them, so a `- name:` deeper inside a run block or a
 # matrix include is not mistaken for one. A `steps:` key starts a new job.
@@ -574,7 +602,7 @@ scan_steps() {  # scan_steps <file>
         return v
     }
     function flush() {
-        if (instep) printf "%d\037%s\037%d\037%d\037%s\037%d\037%d\037%d\037%s\037%s\037%s\n", job, id, reads, agentline, ref, exprline, flowline, cloneline, outrefs, jobname, clonekind
+        if (instep) printf "%d\037%s\037%d\037%d\037%s\037%d\037%d\037%d\037%s\037%s\037%s\037%s\n", job, id, reads, agentline, ref, exprline, flowline, cloneline, outrefs, jobname, clonekind, FILENAME
         instep = 0; id = ""; reads = 0; agentline = 0; ref = ""; exprline = 0; flowline = 0; cloneline = 0; outrefs = ""; cont = ""; clonekind = ""; curdir = ""
     }
     BEGIN { insteps = 0; stepind = -1; instep = 0; job = 0; jobname = ""; cloneline = 0; outrefs = ""; cont = ""; clonekind = ""; curdir = "" }
@@ -694,6 +722,131 @@ scan_steps() {  # scan_steps <file>
     END { flush() }' "$1"
 }
 
+# What the step that uses an action passes for one of its inputs. A composite
+# action written the ordinary way takes the ref as an input -- `ref:
+# ${{ inputs.ref }}` on its checkout, `with: ref: <value>` on the step that uses
+# it -- and the value is the thing R4 has to judge: the action file says only
+# which input carries it. Judged where it is written, that shape reddened every
+# parameterised action with a message naming a line nobody could fix (`ref is
+# '${{ inputs.ref }}', not the output of the step that reads the pin`).
+# The step is the list item the `uses:` line stands in: back up to the nearest
+# `- ` at or before it, then read forward while the lines are deeper than that
+# item, and take the key under `with:`. The whole file is kept because the
+# `with:` block may be written above the `uses:` line as easily as below it.
+uses_input() {  # uses_input <file> <uses line> <input name> -> "<lineno>:<value>"
+    awk -v ul="$2" -v want="$3" '
+    function unquote(v) {
+        if (v ~ /^"[^"]*"$/ || v ~ /^\047[^\047]*\047$/) v = substr(v, 2, length(v) - 2)
+        return v
+    }
+    { raw[NR] = $0 }
+    END {
+        start = 0
+        for (i = ul; i >= 1; i--) if (raw[i] ~ /^[[:space:]]*-[[:space:]]/) { start = i; break }
+        if (start == 0) exit
+        match(raw[start], /^[[:space:]]*/); si = RLENGTH
+        wind = -1
+        for (i = start + 1; i <= NR; i++) {
+            line = raw[i]
+            if (line ~ /^[[:space:]]*(#|$)/) continue
+            sub(/[[:space:]]#.*$/, "", line)
+            match(line, /^[[:space:]]*/); ind = RLENGTH
+            if (ind <= si) break
+            if (line ~ /^[[:space:]]*with:[[:space:]]*$/) { wind = ind; continue }
+            if (wind < 0 || ind <= wind) continue
+            key = line; sub(/^[[:space:]]*/, "", key); sub(/:.*$/, "", key)
+            if (key != want) continue
+            v = line; sub(/^[^:]*:[[:space:]]*/, "", v); sub(/[[:space:]]*$/, "", v)
+            printf "%d:%s\n", i, unquote(v)
+            exit
+        }
+    }' "$1"
+}
+
+# The steps of the local composite actions a JOB reaches, renumbered onto that
+# job. `uses: ./.github/actions/<x>` runs that action's steps in the using job's
+# workspace, so a `repository: LibreSCRS/LibreAgent` written inside
+# .github/actions/<x>/action.yml is a checkout of the job that uses it, and its
+# `ref:` is R4's business like any other. It was nobody's: the count R3 and R4
+# judge read a job's literal `steps:`, and following a local action was done
+# only for a job an exemption names. Measured on this repository's own workflow
+# with build-macos's agent checkout moved into a local action and run from
+# there: agent-checkouts dropped from 3 to 2, rc=0, no ::error at all, while the
+# job that ships took `main`.
+# The walk is R5's -- uses_value, resolve_local, each action file opened once so
+# a cycle ends -- applied to every job instead of to exempt jobs only. The steps
+# come back carrying the using job's number and name, because the R4 lookup
+# (`${{ steps.<id>.outputs.* }}` resolved among the steps of the same job) and
+# the exemption address (<workflow file>:<job>:<step id>) both speak of the job.
+# A `uses: ./...` that resolves to no action file here contributes no steps and
+# is left where the refusal for it already lives, in R5: GitHub cannot run such
+# a step either, so that is a job which fails outright rather than a checkout
+# which hides. And only a COMPOSITE action's steps are steps of the using job.
+# The kind is asked for two different reasons: a node or docker action has no
+# `steps:` to read (R5 refuses one for the exempt job it was written to
+# protect), and `uses: ./.github/workflows/<x>.yml` is not an action at all but
+# a reusable workflow, whose steps run in ITS OWN jobs -- read into the calling
+# job they would be counted twice, once here and once when that file is scanned
+# as the workflow it is. A workflow declares no `using:`, so asking settles both.
+# A job may USE the same action twice, and the two uses are two checkouts: a
+# parameterised action taking the ref as an input, used once with the step that
+# reads the pin and once with `ref: main`, is the ordinary way to write that.
+# The queue was deduplicated on the action PATH, so the second use contributed
+# no steps at all -- measured on a probe of exactly that shape:
+# `agent-checkouts=1 pinned-refs=1`, rc=0, over a checkout on `main`. The
+# job-level queue is keyed on the path AND the line of the `uses:` that reached
+# it, because that line is what carries the `with:` R4 reads; the walk INSIDE an
+# action stays keyed on the path alone, which is what ends a cycle.
+job_action_steps() {  # job_action_steps <file> <job number> <job name>
+    local f="$1" num="$2" job="$3" af next text cand seen=" " seenuse=" " ln uline ival
+    local id reads agentline ref exprline flowline cloneline outrefs clonekind sfile
+    local reffile refline
+    local -a queue=() qline=()
+    while IFS=: read -r ln text; do
+        cand=$(uses_value "$text")
+        case "$cand" in ./*) ;; *) continue ;; esac
+        af=$(resolve_local "$f" "$job" "$cand") || continue
+        case "$seenuse" in *" $af@$ln "*) continue ;; esac
+        seenuse="$seenuse$af@$ln "
+        # The path goes into the cycle set too, so the nested walk below does not
+        # queue an action this job already uses directly.
+        case "$seen" in *" $af "*) ;; *) seen="$seen$af " ;; esac
+        queue+=("$af"); qline+=("$ln")
+    done < <(job_lines "$f" "$job")
+    while [ "${#queue[@]}" -gt 0 ]; do
+        af=${queue[0]}; uline=${qline[0]}
+        queue=("${queue[@]:1}"); qline=("${qline[@]:1}")
+        [ "$(action_using "$af")" = composite ] || continue
+        while IFS=$'\037' read -r _ id reads agentline ref exprline flowline cloneline outrefs _ clonekind sfile; do
+            # Where the `ref:` this step carries is WRITTEN, which is where the
+            # expression in it is evaluated: the action file, unless the action
+            # takes the ref as an input and the step using it passes a value --
+            # then it is the workflow, at the line of that `with:` entry, and
+            # that is the value R4 judges and the line a maintainer edits.
+            # Only the first ring is resolved: an input handed on through a
+            # nested action's own `with:` is left as it stands and refused.
+            reffile=$sfile; refline=$agentline
+            if [ "$uline" != 0 ] && [[ $ref =~ ^\$\{\{[[:space:]]*inputs\.([A-Za-z_][A-Za-z0-9_-]*)[[:space:]]*\}\}$ ]]; then
+                ival=$(uses_input "$f" "$uline" "${BASH_REMATCH[1]}")
+                if [ -n "$ival" ]; then
+                    ref=${ival#*:}; refline=${ival%%:*}; reffile=$f
+                fi
+            fi
+            printf '%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\037%s\n' \
+                   "$num" "$id" "$reads" "$agentline" "$ref" "$exprline" "$flowline" "$cloneline" \
+                   "$outrefs" "$job" "$clonekind" "$sfile" "$reffile" "$refline"
+        done < <(scan_steps "$af")
+        while IFS=: read -r _ text; do
+            cand=$(uses_value "$text")
+            case "$cand" in ./*) ;; *) continue ;; esac
+            next=$(resolve_local "$f" "$job" "$cand") || continue
+            case "$seen" in *" $next "*) continue ;; esac
+            seen="$seen$next "
+            queue+=("$next"); qline+=(0)
+        done < <(numbered_code_lines "$af")
+    done
+}
+
 # The named exemptions: an ADDRESS -- <workflow file>:<job>:<step id> -- then a
 # reason. An entry without a reason is rejected: an exemption whose ground is not
 # written down is a pardon. A bare step id is not an address: an id is unique
@@ -738,22 +891,47 @@ trunk=0
 unreadable=0
 for f in "${files[@]}"; do
     mapfile -t steps < <(scan_steps "$f")
+    # And the steps every job runs out of a local composite action, which are
+    # steps of that job: a checkout is a checkout wherever the file it is
+    # written in lives. Collected before the readers pass below, so a resolve
+    # step inside an action wires the checkout beside it the same way a resolve
+    # step written in the job does.
+    unset seenjob
+    declare -A seenjob=()
+    for s in "${steps[@]}"; do
+        IFS=$'\037' read -r job _ _ _ _ _ _ _ _ jobname _ <<< "$s"
+        [ -n "$jobname" ] || continue
+        [ -z "${seenjob[$job]:-}" ] || continue
+        seenjob[$job]=1
+        mapfile -t -O "${#steps[@]}" steps < <(job_action_steps "$f" "$job" "$jobname")
+    done
+    # The steps that read the pin, keyed by the FILE they are written in as well
+    # as by the job: `${{ steps.<id>.outputs.* }}` inside a composite action is
+    # resolved against that action's own steps, and one written in the job
+    # against the job's. Keyed by job alone, a checkout inside an action whose
+    # ref named a resolve step of the CALLING job was scored pinned -- measured
+    # rc=0 on a workflow where that expression is empty at runtime and
+    # actions/checkout takes the agent's default branch.
     unset readers
     declare -A readers=()
     for s in "${steps[@]}"; do
-        IFS=$'\037' read -r job id reads _ _ _ _ _ _ _ _ <<< "$s"
-        [ "$reads" = 1 ] && [ -n "$id" ] && readers["$job/$id"]=1
+        IFS=$'\037' read -r job id reads _ _ _ _ _ _ _ _ sfile _ <<< "$s"
+        [ "$reads" = 1 ] && [ -n "$id" ] && readers["$sfile/$job/$id"]=1
     done
     for s in "${steps[@]}"; do
-        IFS=$'\037' read -r job id reads agentline ref exprline flowline cloneline outrefs jobname clonekind <<< "$s"
+        IFS=$'\037' read -r job id reads agentline ref exprline flowline cloneline outrefs jobname clonekind sfile reffile refline <<< "$s"
+        # A step read from a workflow carries its `ref:` where it stands; only
+        # an action's step can have it written somewhere else (see uses_input).
+        [ -n "$reffile" ] || reffile=$sfile
+        [ -n "$refline" ] || refline=$agentline
         if [ "$exprline" != 0 ]; then
-            echo "::error file=$f,line=$exprline::checks out a repository named by an expression; this gate" \
+            echo "::error file=$sfile,line=$exprline::checks out a repository named by an expression; this gate" \
                  "cannot tell whether that is LibreSCRS/LibreAgent, so name the repository literally"
             unreadable=$((unreadable + 1))
             rc=1
         fi
         if [ "$flowline" != 0 ]; then
-            echo "::error file=$f,line=$flowline::checks out LibreSCRS/LibreAgent (or an expression) inside a" \
+            echo "::error file=$sfile,line=$flowline::checks out LibreSCRS/LibreAgent (or an expression) inside a" \
                  "flow-style mapping; this gate reads one key per line, so spell the checkout out in block style"
             unreadable=$((unreadable + 1))
             rc=1
@@ -776,20 +954,20 @@ for f in "${files[@]}"; do
                 # step outputs this step consumes.
                 # shellcheck disable=SC2086
                 for src in $outrefs; do
-                    if [ -n "${readers["$job/$src"]:-}" ]; then
+                    if [ -n "${readers["$sfile/$job/$src"]:-}" ]; then
                         wired=1
                         break
                     fi
                 done
             fi
             if [ "$pinfile" = "-" ]; then
-                echo "::error file=$f,line=$cloneline::$what, but this repository was" \
+                echo "::error file=$sfile,line=$cloneline::$what, but this repository was" \
                      "declared pinless (-); give it a real pin file"
                 rc=1
             elif [ "$wired" = 1 ]; then
                 pinned=$((pinned + 1))
             else
-                echo "::error file=$f,line=$cloneline::$what in a run: block that neither" \
+                echo "::error file=$sfile,line=$cloneline::$what in a run: block that neither" \
                      "reads $pinfile nor uses the output of a step that does; the revision it lands on comes" \
                      "from somewhere this gate cannot see. Read the pin in this step, take a" \
                      "\${{ steps.<id>.outputs.* }} from the step that reads it, or write the checkout as" \
@@ -801,29 +979,37 @@ for f in "${files[@]}"; do
         [ "$agentline" != 0 ] || continue
         checkouts=$((checkouts + 1))
         if [ "$pinfile" = "-" ]; then
-            echo "::error file=$f,line=$agentline::checks out LibreSCRS/LibreAgent, but this repository was" \
+            echo "::error file=$sfile,line=$agentline::checks out LibreSCRS/LibreAgent, but this repository was" \
                  "declared pinless (-); give it a real pin file"
             rc=1
             continue
         fi
         if [ -z "$jobname" ]; then
-            echo "::error file=$f,line=$agentline::this checkout is not inside a job this gate can name, so no" \
+            echo "::error file=$sfile,line=$agentline::this checkout is not inside a job this gate can name, so no" \
                  "exemption can be addressed to it and none may be assumed"
             unreadable=$((unreadable + 1))
             rc=1
             continue
         fi
         addr="$(basename "$f"):$jobname:$id"
-        if [ -n "$id" ] && [ -n "${trunk_reason[$addr]:-}" ]; then
+        # And the step it names is one written in that workflow file. A step id
+        # inside a composite action lives in the action's own id space, so
+        # `id: agent_trunk` written there took an amnesty addressed to the
+        # workflow -- measured, a SKIP line for a checkout nobody pardoned.
+        if [ -n "$id" ] && [ "$sfile" = "$f" ] && [ -n "${trunk_reason[$addr]:-}" ]; then
             trunk_count[$addr]=$(( ${trunk_count[$addr]:-0} + 1 ))
-            trunk_where[$addr]="${trunk_where[$addr]:+${trunk_where[$addr]}, }$f:$agentline"
+            trunk_where[$addr]="${trunk_where[$addr]:+${trunk_where[$addr]}, }$sfile:$agentline"
             trunk=$((trunk + 1))
             if [ -z "$ref" ]; then
-                echo "::error file=$f,line=$agentline::step '$addr' is listed in $exceptions but names no ref:;" \
+                # $reffile/$refline, not the step's own line: when the ref
+                # comes through an action input the using step sets to an empty
+                # value, the line a maintainer has to edit is that `with:`
+                # entry in the workflow, not the `ref:` inside the action.
+                echo "::error file=$reffile,line=$refline::step '$addr' is listed in $exceptions but names no ref:;" \
                      "actions/checkout then takes the agent's default branch, which is not a ref anyone wrote down"
                 rc=1
             else
-                echo "SKIP: $f:$agentline checks out LibreSCRS/LibreAgent at '$ref' --" \
+                echo "SKIP: $sfile:$agentline checks out LibreSCRS/LibreAgent at '$ref' --" \
                      "step '$addr' is listed in $exceptions: ${trunk_reason[$addr]}"
             fi
             # R5 -- and this job builds nothing. An exemption is granted to a
@@ -858,27 +1044,41 @@ for f in "${files[@]}"; do
             fi
             continue
         fi
-        if ! numbered_code_lines "$f" | grep -Eq "$readre"; then
-            echo "::error file=$f,line=$agentline::checks out LibreSCRS/LibreAgent but never reads $pinfile;" \
+        # The read may be written where the checkout is: a local composite
+        # action that checks the agent out reads the pin in a step of its own.
+        if ! { numbered_code_lines "$f"; [ "$sfile" = "$f" ] || numbered_code_lines "$sfile"; } \
+             | grep -Eq "$readre"; then
+            echo "::error file=$sfile,line=$agentline::checks out LibreSCRS/LibreAgent but never reads $pinfile;" \
                  "the ref it uses comes from somewhere this gate cannot see"
             rc=1
             continue
         fi
         if [ -z "$ref" ]; then
-            echo "::error file=$f,line=$agentline::checks out LibreSCRS/LibreAgent with no ref:" \
+            # Reported where the ref is WRITTEN -- see the exempt branch above.
+            echo "::error file=$reffile,line=$refline::checks out LibreSCRS/LibreAgent with no ref:" \
                  "actions/checkout then takes the agent's default branch, the moving target the pin exists to remove"
             rc=1
         elif [[ $ref =~ ^\$\{\{[[:space:]]*steps\.([A-Za-z_][A-Za-z0-9_-]*)\.outputs\.[A-Za-z_][A-Za-z0-9_-]*[[:space:]]*\}\}$ ]]; then
             src=${BASH_REMATCH[1]}
-            if [ -n "${readers["$job/$src"]:-}" ]; then
+            if [ -n "${readers["$reffile/$job/$src"]:-}" ]; then
                 pinned=$((pinned + 1))
             else
-                echo "::error file=$f,line=$agentline::ref comes from step '$src', which does not read $pinfile" \
-                     "in this job; the checkout is wired to something other than the pin"
+                echo "::error file=$reffile,line=$refline::ref comes from step '$src', which does not read $pinfile" \
+                     "where this ref is written; the checkout is wired to something other than the pin"
                 rc=1
             fi
+        elif [[ $ref =~ ^\$\{\{[[:space:]]*inputs\. ]]; then
+            # An action input the using step does not set, or one handed on
+            # through a nested action. The value is real and this gate cannot
+            # read it, so it is refused where an unreadable checkout already is
+            # rather than judged as if the expression were the ref.
+            echo "::error file=$sfile,line=$agentline::ref is '$ref', an action input the step using this" \
+                 "action does not set; this gate follows an input one level, from the with: of the step that" \
+                 "uses the action, so pass the ref there or check the agent out in the job itself"
+            unreadable=$((unreadable + 1))
+            rc=1
         else
-            echo "::error file=$f,line=$agentline::ref is '$ref', not the output of the step that reads $pinfile"
+            echo "::error file=$reffile,line=$refline::ref is '$ref', not the output of the step that reads $pinfile"
             rc=1
         fi
     done

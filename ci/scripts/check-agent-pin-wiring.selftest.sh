@@ -98,6 +98,33 @@ must_contain() {  # must_contain <name> <file> <text>
     fi
 }
 
+# A case whose verdict is more than the exit code: these turn on WHICH file and
+# line the gate names, and a gate that reds for the wrong reason has the same rc
+# as one that reds for the right one. Every pattern must appear in the output;
+# one written `!<pattern>` must not. Counted as ONE case, because naming the
+# wrong line and returning the wrong code are the same defect here.
+run_expect() {  # run_expect <name> <expected-rc> <dir> [pattern|!pattern]...
+    local name=$1 want=$2 dir=$3; shift 3
+    local got pat ok=1
+    cases=$((cases + 1))
+    ( cd "$dir" && bash "$subject" .github/workflows ) > "$work/out" 2>&1
+    got=$?
+    [ "$got" -eq "$want" ] || ok=0
+    for pat in "$@"; do
+        case "$pat" in
+            '!'*) ! grep -qE -- "${pat#!}" "$work/out" || ok=0 ;;
+            *)    grep -qE -- "$pat" "$work/out" || ok=0 ;;
+        esac
+    done
+    if [ "$ok" -eq 1 ]; then
+        printf '  ok    %-56s rc=%s  %s\n' "$name" "$got" "$(grep -m1 '^workflows=' "$work/out" || true)"
+    else
+        printf '  FAIL  %-56s rc=%s want=%s\n' "$name" "$got" "$want"
+        sed 's/^/          /' "$work/out"
+        fails=$((fails + 1))
+    fi
+}
+
 mkexc() {  # mkexc <dir> <line>...
     local d=$1; shift
     mkdir -p "$d/ci"
@@ -1728,6 +1755,375 @@ d=$(mkcase case_73)
 sed 's|run: git -C LibreAgent fetch --tags --unshallow|run: \|\n          cd LibreAgent\n          git fetch origin main\n          git -c advice.detachedHead=false checkout main\n          cmake -S . -B la-build|' \
     "$work/case_60/.github/workflows/ci.yml" > "$d/.github/workflows/ci.yml"
 run "case_73 the move carries a git config setting" 1 "$d"
+
+# case_74 -- the checkout itself moved into a local composite action, in a job
+# that is NOT exempt. Everything above follows `uses: ./<path>` only for a job
+# an exemption names; the count R3 and R4 judge read a job's literal `steps:`,
+# so a `repository: LibreSCRS/LibreAgent` written inside
+# .github/actions/<x>/action.yml belonged to nobody. Measured on this
+# repository's own workflow with build-macos's agent checkout moved that way:
+# agent-checkouts silently dropped from 3 to 2, rc=0, no ::error at all, while
+# the job that ships built against `main`. GitHub runs that checkout in the
+# using job's workspace, so it is that job's checkout and its ref is R4's
+# business.
+# Both directions are in one fixture, because a rule that reddened on any local
+# action would pass the rc alone: build-macos hides a checkout on `main` and
+# must be reported, build-linux hides one wired to the pin through a resolve
+# step of the action's own and must not be. Hence the counters and the error
+# count, not just the exit code.
+d=$(mkcase case_74)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ steps.p.outputs.ref }}
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: ./.github/actions/fetch-agent
+      - run: cmake --build build -j4
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/fetch-agent-pinned
+      - run: cmake --build build -j4
+Y
+mkdir -p "$d/.github/actions/fetch-agent" "$d/.github/actions/fetch-agent-pinned"
+cat > "$d/.github/actions/fetch-agent/action.yml" <<'Y'
+name: fetch-agent
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: LibreSCRS/LibreAgent
+        ref: main
+Y
+cat > "$d/.github/actions/fetch-agent-pinned/action.yml" <<'Y'
+name: fetch-agent-pinned
+runs:
+  using: composite
+  steps:
+    - name: Resolve
+      id: p
+      shell: bash
+      run: |
+        pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+        echo "ref=$pin" >> "$GITHUB_OUTPUT"
+    - uses: actions/checkout@v4
+      with:
+        repository: LibreSCRS/LibreAgent
+        ref: ${{ steps.p.outputs.ref }}
+Y
+run_expect "case_74 a checkout hidden in a local composite action" 1 "$d" \
+    '::error file=\.github/actions/fetch-agent/action\.yml,line=[0-9]+::ref is .main.' \
+    'agent-checkouts=3 pinned-refs=2' \
+    '!::error file=\.github/actions/fetch-agent-pinned'
+
+# case_81 -- case_74's mirror, and the shape the fix for it left open: ONE job
+# using ONE parameterised action TWICE. That is how a workflow checks the agent
+# out at the pin for one purpose and at the trunk for another without writing
+# the checkout twice, and the two uses are two checkouts with two different
+# refs. The queue of actions a job reaches was deduplicated on the action PATH,
+# so the second use contributed no steps at all: measured on this shape,
+# `agent-checkouts=1 pinned-refs=1`, rc=0, over a checkout on `main` -- the same
+# silent drop case_74 exists for, one level of parameterisation further in. The
+# assertion names the line of the SECOND `with:`, because that is the value R4
+# judged and the line a maintainer edits.
+d=$(mkcase case_81)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/fetch-agent
+        with:
+          ref: ${{ steps.p.outputs.ref }}
+      - uses: ./.github/actions/fetch-agent
+        with:
+          ref: main
+Y
+mkdir -p "$d/.github/actions/fetch-agent"
+cat > "$d/.github/actions/fetch-agent/action.yml" <<'Y'
+name: fetch-agent
+inputs:
+  ref:
+    description: the agent revision to check out
+    default: main
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: LibreSCRS/LibreAgent
+        ref: ${{ inputs.ref }}
+Y
+# The line is looked up rather than written down: a fixture edit must not turn
+# this assertion into one that passes for the wrong reason.
+second_with=$(grep -n 'ref: main' "$d/.github/workflows/ci.yml" | tail -1 | cut -d: -f1)
+run_expect "case_81 one job using one parameterised action twice" 1 "$d" \
+    "::error file=\.github/workflows/ci\.yml,line=$second_with::ref is .main." \
+    'agent-checkouts=2 pinned-refs=1'
+
+# case_82 -- the empty ref, and WHERE it is reported. `with: ref:` with nothing
+# after it is a real spelling -- a variable that expanded to nothing, an input
+# left blank -- and actions/checkout then takes the agent's default branch, the
+# moving target the pin exists to remove. The rule caught it, and pointed at the
+# `ref: ${{ inputs.ref }}` line INSIDE the action, which is not the line anyone
+# can fix: the value is written in the workflow's `with:`. Every other verdict
+# on that value already reports the workflow line; this one did not.
+d=$(mkcase case_82)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/fetch-agent
+        with:
+          ref:
+Y
+mkdir -p "$d/.github/actions/fetch-agent"
+cat > "$d/.github/actions/fetch-agent/action.yml" <<'Y'
+name: fetch-agent
+inputs:
+  ref:
+    description: the agent revision to check out
+    default: main
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: LibreSCRS/LibreAgent
+        ref: ${{ inputs.ref }}
+Y
+empty_with=$(grep -n 'ref:$' "$d/.github/workflows/ci.yml" | tail -1 | cut -d: -f1)
+run_expect "case_82 an empty ref is reported where it is written" 1 "$d" \
+    "::error file=\.github/workflows/ci\.yml,line=$empty_with::checks out LibreSCRS/LibreAgent with no ref:" \
+    '!::error file=\.github/actions/fetch-agent/action\.yml'
+
+# case_75 -- the id space a `${{ steps.<id>.outputs.* }}` is resolved in is the
+# FILE it is written in, not the job the steps were counted onto. Inside a
+# composite action the `steps` context holds that action's own steps only, so a
+# checkout there naming a resolve step of the CALLING job resolves to nothing at
+# runtime and actions/checkout takes the agent's default branch. Keyed by job
+# alone this read agent-checkouts=1 pinned-refs=1 rc=0 -- a green over a
+# workflow that builds the trunk. The mirror is here too, in build-linux: a job
+# step consuming an id that exists only inside an action it uses.
+d=$(mkcase case_75)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  build-macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/fetch-agent
+  build-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: ./.github/actions/resolve-agent
+      - uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ steps.q.outputs.ref }}
+Y
+mkdir -p "$d/.github/actions/fetch-agent" "$d/.github/actions/resolve-agent"
+cat > "$d/.github/actions/fetch-agent/action.yml" <<'Y'
+name: fetch-agent
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: LibreSCRS/LibreAgent
+        ref: ${{ steps.p.outputs.ref }}
+Y
+cat > "$d/.github/actions/resolve-agent/action.yml" <<'Y'
+name: resolve-agent
+runs:
+  using: composite
+  steps:
+    - name: Resolve
+      id: q
+      shell: bash
+      run: |
+        pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+        echo "ref=$pin" >> "$GITHUB_OUTPUT"
+Y
+run_expect "case_75 a ref naming a resolve step of another file" 1 "$d" \
+    '::error file=\.github/actions/fetch-agent/action\.yml,line=[0-9]+::ref comes from step .p.' \
+    '::error file=\.github/workflows/ci\.yml,line=[0-9]+::ref comes from step .q.' \
+    'agent-checkouts=2 pinned-refs=0'
+
+# case_76 -- CONTROL: the way a composite action that checks the agent out is
+# actually written. The action takes the ref as an INPUT and the step using it
+# passes the resolve step's output; the action file says only which input
+# carries the value. Judged where it stands, every such action was red with a
+# message naming a line nobody could fix -- `ref is '${{ inputs.ref }}', not the
+# output of the step that reads cmake/libreagent.pin`. The input is followed one
+# level, to the `with:` of the step that uses the action, and the value found
+# there is what R4 judges.
+d=$(mkcase case_76)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/fetch-agent
+        with:
+          ref: ${{ steps.p.outputs.ref }}
+Y
+mkdir -p "$d/.github/actions/fetch-agent"
+cat > "$d/.github/actions/fetch-agent/action.yml" <<'Y'
+name: fetch-agent
+inputs:
+  ref:
+    description: the agent revision to check out
+    default: main
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      with:
+        repository: LibreSCRS/LibreAgent
+        ref: ${{ inputs.ref }}
+Y
+run_expect "case_76 CONTROL: the action takes the ref as an input" 0 "$d" \
+    'agent-checkouts=1 pinned-refs=1' '!::error'
+
+# case_77 -- and the same shape with the value that is wrong. The input is
+# followed to the `with:` of the using step, so the ref judged is `main` and the
+# line named is the one somebody has to edit -- in the workflow, not in the
+# action that merely passes the input on.
+d=$(mkcase case_77)
+sed 's|          ref: ${{ steps.p.outputs.ref }}|          ref: main|' \
+    "$work/case_76/.github/workflows/ci.yml" > "$d/.github/workflows/ci.yml"
+mkdir -p "$d/.github/actions/fetch-agent"
+cp "$work/case_76/.github/actions/fetch-agent/action.yml" "$d/.github/actions/fetch-agent/action.yml"
+must_contain "case_77a the fixture really passes a branch" \
+    "$d/.github/workflows/ci.yml" '          ref: main'
+run_expect "case_77 the action input passed a branch" 1 "$d" \
+    '::error file=\.github/workflows/ci\.yml,line=[0-9]+::ref is .main.' \
+    '!::error file=\.github/actions'
+
+# case_78 -- and the input the gate cannot follow: the using step passes nothing,
+# so the value is the action's own default, or -- one action further in -- an
+# input handed on by a nested `with:`. Judging the expression as if it were the
+# ref names a line that cannot be fixed as the message asks, so it is refused
+# where an unreadable checkout already is and counted with them.
+d=$(mkcase case_78)
+sed '/^        with:$/,/^          ref: /d' \
+    "$work/case_76/.github/workflows/ci.yml" > "$d/.github/workflows/ci.yml"
+mkdir -p "$d/.github/actions/fetch-agent"
+cp "$work/case_76/.github/actions/fetch-agent/action.yml" "$d/.github/actions/fetch-agent/action.yml"
+must_contain "case_78a the fixture really passes no input" \
+    "$d/.github/workflows/ci.yml" '      - uses: ./.github/actions/fetch-agent'
+run_expect "case_78 an action input the using step does not set" 1 "$d" \
+    '::error file=\.github/actions/fetch-agent/action\.yml,line=[0-9]+::ref is .\$\{\{ inputs\.ref \}\}., an action input' \
+    'unreadable-checkouts=1'
+
+# case_79 -- an exemption addresses a step written in the WORKFLOW file. A step
+# id inside a composite action lives in that action's id space, and the amnesty
+# `ci.yml:drift:agent_trunk` pardoned any step called agent_trunk the job could
+# reach: measured, a SKIP line for a checkout in .github/actions/probe nobody
+# listed, on `ref: main`, in a job whose own exempt checkout kept the entry from
+# reading stale. The listed step is still pardoned; the one in the action is
+# judged like any other.
+d=$(mkcase case_79)
+cat > "$d/.github/workflows/ci.yml" <<'Y'
+name: ci
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Resolve
+        id: p
+        run: |
+          pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
+          echo "ref=$pin" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: ${{ steps.p.outputs.ref }}
+  drift:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        id: agent_trunk
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: main
+      - uses: ./.github/actions/probe
+Y
+mkdir -p "$d/.github/actions/probe"
+cat > "$d/.github/actions/probe/action.yml" <<'Y'
+name: probe
+runs:
+  using: composite
+  steps:
+    - uses: actions/checkout@v4
+      id: agent_trunk
+      with:
+        repository: LibreSCRS/LibreAgent
+        ref: main
+    - shell: bash
+      run: diff -u a b
+Y
+mkexc "$d" 'ci.yml:drift:agent_trunk  measures the agent trunk on purpose; builds nothing'
+run_expect "case_79 an exempt step id borrowed inside a local action" 1 "$d" \
+    'SKIP: \.github/workflows/ci\.yml' \
+    '::error file=\.github/actions/probe/action\.yml,line=[0-9]+::ref is .main.' \
+    '!is carried by' \
+    'agent-checkouts=3 pinned-refs=1 named-trunk-refs=1'
 
 if [ "$fails" -eq 0 ]; then
     echo "check-agent-pin-wiring selftest: all cases passed ($cases)"
