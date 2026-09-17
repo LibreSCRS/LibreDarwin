@@ -406,6 +406,49 @@ TEST(SocketFrontend, SignAcceptsATsaUrlAlongsideTheAgentDecidesSentinel)
     EXPECT_EQ(errName(reply), "");
 }
 
+TEST(SocketFrontend, SignSniffsTheFormatWhenTheCallerDefersIt)
+{
+    // A deferred format is sniffed from the document, not validated as a
+    // format: a PDF resolves, and bytes no sniffer recognises are refused
+    // with the same out-of-vocabulary error as any other unresolvable
+    // signing parameter -- never "the document could not be read".
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    for (const char* sentinel : {"auto", ""}) {
+        const int fd = makeInputFile("%PDF-1.7");
+        ASSERT_GE(fd, 0);
+        const Agent::Wire::SignOpts opts{.format = sentinel, .level = "b-b", .packaging = "enveloped"};
+        const auto reply = rig.roundTrip(93, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+        ::close(fd);
+        EXPECT_EQ(errName(reply), "") << "sentinel: " << sentinel;
+    }
+    for (const char* sentinel : {"auto", ""}) {
+        const int fd = makeInputFile("zzzz");
+        ASSERT_GE(fd, 0);
+        const Agent::Wire::SignOpts opts{.format = sentinel, .level = "b-b", .packaging = "enveloped"};
+        const auto reply = rig.roundTrip(94, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+        ::close(fd);
+        EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter") << "sentinel: " << sentinel;
+    }
+}
+
+TEST(SocketFrontend, SignTakesTheFormatsDefaultPackagingWhenTheCallerDefersIt)
+{
+    // A deferred packaging is not judged as a packaging mode -- the sentinel
+    // is not a member of that closed vocabulary -- it takes the resolved
+    // format's own default instead.
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    for (const char* sentinel : {"auto", ""}) {
+        const int fd = makeInputFile("%PDF-1.7");
+        ASSERT_GE(fd, 0);
+        const Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = sentinel};
+        const auto reply = rig.roundTrip(95, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
+        ::close(fd);
+        EXPECT_EQ(errName(reply), "") << "sentinel: " << sentinel;
+    }
+}
+
 TEST(SocketFrontend, SignRejectsVisualSignatureOnANonPadesFormat)
 {
     Rig rig;
