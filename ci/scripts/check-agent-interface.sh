@@ -198,6 +198,14 @@
 #      reports the defect it was built for whenever anything at all goes wrong
 #      is a gate that will one day be "fixed" by deleting it.
 set -uo pipefail
+# macOS ships bash 3.2, and there an EMPTY array expanded as "${arr[@]}" under
+# `set -u` is an unbound variable and aborts the script -- so every array here
+# that can be empty (the optional compiler flags, the include roots, the shim)
+# is expanded as ${arr[@]+"${arr[@]}"}, which yields no words at all rather than
+# an error. Measured: the macOS runner has no newer bash, `#!/usr/bin/env bash`
+# resolves to /bin/bash 3.2.57, and the unguarded form took both interface jobs
+# down on the first line that compiles anything. This runs under the bash the
+# platform ships; it does not ask for another one.
 export LC_ALL=C   # the diagnostic text below is matched; a translated compiler
                   # prints "сукобљен повратни тип" and the match would silently miss.
 
@@ -397,8 +405,8 @@ done
 : > "$SCRATCH/r1.log"
 r1=0
 for t in "${tus[@]}"; do
-    "$CXX_BIN" -std=c++23 "${expl[@]}" -fsyntax-only "${shim_inc[@]}" \
-        -I agent/include -isystem "$LA_INCLUDE" "${extra_inc[@]}" "$t" >> "$SCRATCH/r1.log" 2>&1 || r1=1
+    "$CXX_BIN" -std=c++23 ${expl[@]+"${expl[@]}"} -fsyntax-only ${shim_inc[@]+"${shim_inc[@]}"} \
+        -I agent/include -isystem "$LA_INCLUDE" ${extra_inc[@]+"${extra_inc[@]}"} "$t" >> "$SCRATCH/r1.log" 2>&1 || r1=1
 done
 # Both spellings: GCC says `gtest/gtest.h: No such file or directory`, clang says
 # `'gtest/gtest.h' file not found`. Matching only GCC's meant that on macOS this
@@ -1194,12 +1202,14 @@ r5_try() {  # r5_try <compiler> [flags...] — compiles $t, log in $SCRATCH/r5.l
     # retry below is not $CXX_BIN.
     local -a libcxx=()
     if [ "$cc" = "$CXX_BIN" ]; then
-        libcxx=("${expl[@]}")
+        libcxx=(${expl[@]+"${expl[@]}"})
     else
-        libcxx=("${expl_alt[@]}")
+        libcxx=(${expl_alt[@]+"${expl_alt[@]}"})
     fi
-    "$cc" -std=c++23 "${libcxx[@]}" "$@" -fsyntax-only "${shim_inc[@]}" "${defs[@]}" \
-        -I agent/include -I agent/src -I agent/tests -isystem "$LA_INCLUDE" "${extra_inc[@]}" \
+    "$cc" -std=c++23 ${libcxx[@]+"${libcxx[@]}"} "$@" -fsyntax-only \
+        ${shim_inc[@]+"${shim_inc[@]}"} ${defs[@]+"${defs[@]}"} \
+        -I agent/include -I agent/src -I agent/tests -isystem "$LA_INCLUDE" \
+        ${extra_inc[@]+"${extra_inc[@]}"} \
         "$t" > "$SCRATCH/r5.log" 2>&1
 }
 
@@ -1218,7 +1228,7 @@ while IFS= read -r t; do
     # it -- every hosted Linux runner. "Which compiler produced the verdict is
     # printed" was a promise the file did not keep.
     r5_cc="$CXX_BIN"
-    if r5_try "$CXX_BIN" "${blocks[@]}"; then
+    if r5_try "$CXX_BIN" ${blocks[@]+"${blocks[@]}"}; then
         r5_ok=1
     elif [ -n "$BLOCKS_CXX" ] && [ "$BLOCKS_CXX" != "$CXX_BIN" ]; then
         # The retry is not conditioned on the diagnostic saying "blocks". It was
