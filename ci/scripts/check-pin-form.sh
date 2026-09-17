@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: LGPL-2.1-or-later
 # check-pin-form.sh -- the pin's form check must be able to accept a real pin.
 #
 # cmake/FindOrUseLibreAgent.cmake refuses a libreagent.pin that is not exactly
