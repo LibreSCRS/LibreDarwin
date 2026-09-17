@@ -259,8 +259,10 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
                                                                           const std::vector<std::uint8_t>& sniffSource,
                                                                           const A::Config::ConfigStore& config)
 {
-    std::string format = opts.format;
-    if (format == "auto" || format.empty()) {
+    std::string format;
+    if (const auto requestedFormat = sp::requestedFormatFrom(opts.format)) {
+        format = *requestedFormat;
+    } else {
         const auto sniffed = sp::sniffFormat(sniffSource);
         if (!sniffed) {
             return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
@@ -270,10 +272,7 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
     if (!sp::isKnownFormat(format)) {
         return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
     }
-    std::optional<std::string> requestedLevel;
-    if (!opts.level.empty() && opts.level != "auto") {
-        requestedLevel = opts.level;
-    }
+    const std::optional<std::string> requestedLevel = sp::requestedLevelFrom(opts.level);
     // A per-request tsaUrl counts: supplying a timestamp authority expresses
     // intent to timestamp, so a DEFAULTED baseline lifts to b-t instead of
     // resolving to b-b and then being rejected for carrying a tsaUrl at all.
@@ -285,10 +284,7 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
     if (!sp::isKnownLevel(level) || !sp::isImplementedSignLevel(level)) {
         return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
     }
-    std::string packaging = opts.packaging;
-    if (packaging == "auto" || packaging.empty()) {
-        packaging = sp::defaultPackagingFor(format);
-    }
+    const std::string packaging = sp::requestedPackagingFrom(opts.packaging).value_or(sp::defaultPackagingFor(format));
     if (!sp::isKnownPackaging(packaging)) {
         return std::unexpected(A::Wire::SyncError::UnsupportedSignatureParameter);
     }
