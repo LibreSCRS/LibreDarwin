@@ -51,7 +51,7 @@ git -C "$repo" rev-parse --show-toplevel >/dev/null 2>&1 \
 ALLOW="ci/gate-wiring-exceptions.txt"
 rc=0
 
-mapfile -t candidates < <(git ls-files -- 'ci/scripts/*' 'tools/*' 'packaging/ci/*' \
+mapfile -t candidates < <(git ls-files -- 'ci/scripts/*' 'tools/*' 'packaging/ci/*' 'packaging/arch/*' \
     | grep -E '\.(sh|py)$' | grep -v '\.selftest\.' | sort)
 [ "${#candidates[@]}" -eq 0 ] && { echo "FATAL: no candidate scripts found -- wrong root?" >&2; exit 2; }
 
