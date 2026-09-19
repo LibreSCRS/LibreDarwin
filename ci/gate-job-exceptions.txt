@@ -1,0 +1,10 @@
+# gate-job-exceptions.txt — gate steps that are deliberately NOT reached on push.
+#
+# Format:   <workflow>:<job>[:<step-number>]<two or more spaces><reason>
+#
+# workflow-step-order.py requires a row for every gate step whose job or step
+# condition cannot be shown to hold on push. Same discipline as
+# gate-wiring-exceptions.txt: an empty reason fails, a row naming a job that no
+# longer exists fails, and a row that excuses something needing no excuse fails.
+# The last one is what makes these rows disappear when the condition does.
+

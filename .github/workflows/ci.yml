@@ -180,6 +180,13 @@ jobs:
       - name: Run every self-test
         run: ./ci/scripts/run-selftests.sh
 
+      # A step can land in a job that does not run on push, or before the
+      # checkout that creates the directory its working-directory names, and
+      # nothing says so: the wiring check sees the name and the timeout check
+      # sees the bound. This reads the workflows as data and fails on both.
+      - name: Every step can run where it was placed
+        run: ./ci/scripts/workflow-step-order.py
+
   agent-interface:
     # The macOS job builds against cmake/libreagent.pin -- the agent interface as
     # it WAS. That is not the combination a release ships, and it stayed green
