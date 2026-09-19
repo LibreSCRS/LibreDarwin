@@ -230,7 +230,8 @@ private:
     void broadcast(const Agent::Wire::CborValue& event);
 
     // ObjectId <-> opaque wire handle. The handle is a stable per-insertion
-    // string ("reader/<n>" / "card/<n>"); NEVER a fingerprint.
+    // string ("obj/<n>"), the same shape for readers and cards; NEVER a
+    // fingerprint.
     [[nodiscard]] std::string handleFor(Agent::ObjectId id);
 
     dispatch_queue_t m_queue{nullptr};
