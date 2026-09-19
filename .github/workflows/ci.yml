@@ -8,7 +8,7 @@
 # sibling LibreAgent source (both components). The wire codec/framing/message-
 # model tests (incl. the CDDL contract guard and the CBOR fuzz gate) live in
 # LibreAgent's own CI now, not here. The hardware sign-smoke (SignHwSmokeTest)
-# GTEST_SKIP()s without LIBRESCRS_TEST_PIN, so an unattended CI run is green,
+# GTEST_SKIP()s without LIBRESCRS_HW, so an unattended CI run is green,
 # not failed.
 name: CI
 
@@ -489,7 +489,7 @@ jobs:
           done
 
       - name: Test
-        # The hardware SignHwSmokeTest auto-skips without LIBRESCRS_TEST_PIN, so
+        # The hardware SignHwSmokeTest auto-skips without LIBRESCRS_HW, so
         # this is green unattended. All wire/transport/frontend/lifecycle unit
         # tests run against fakes + a real bound socket (no PC/SC reader needed).
         working-directory: LibreDarwin
