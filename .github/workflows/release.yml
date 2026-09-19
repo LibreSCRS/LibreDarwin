@@ -127,6 +127,13 @@ jobs:
           VER: ${{ github.ref_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The `on:` filter above no longer accepts a v-prefixed tag, but the
+          # rehearsal path does: workflow_dispatch runs against whatever ref it
+          # is pointed at, filter or no filter. The agent publishes unprefixed
+          # tags only, so strip it here the way the notes step below already
+          # does, or a v5.0.0 rehearsal asks the agent for a tag that cannot
+          # exist and fails looking like a pin that was never bumped.
+          VER="${VER#v}"
           pin=$(tr -d '[:space:]' < cmake/libreagent.pin)
           tagsha=$(gh api repos/LibreSCRS/LibreAgent/git/ref/tags/"$VER" --jq '.object.sha')
           type=$(gh api repos/LibreSCRS/LibreAgent/git/ref/tags/"$VER" --jq '.object.type')
