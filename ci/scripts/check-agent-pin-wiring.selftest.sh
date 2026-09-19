@@ -20,6 +20,7 @@ subject=${1:-$here/check-agent-pin-wiring.sh}
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 fails=0
+red=0
 # Counted, not hand-written: a figure quoted from a note is a figure that has
 # stopped being measured.
 cases=0
@@ -28,6 +29,8 @@ GOOD=ca4f355f893822f8b875fd81cbd04e8422b26b93
 run() {  # run <name> <expected-rc> <dir> [pinfile-arg] [exceptions-arg]
     local name=$1 want=$2 dir=$3 pinarg=${4:-cmake/libreagent.pin} excarg=${5:-ci/agent-ref-exceptions.txt}
     cases=$((cases + 1))
+    # red-proved: the case in which the gate returned non-zero on a perturbed input.
+    if [ "$want" != 0 ]; then red=$((red + 1)); fi
     ( cd "$dir" && bash "$subject" .github/workflows "$pinarg" "$excarg" ) > "$work/out" 2>&1
     local got=$?
     if [ "$got" -eq "$want" ]; then
@@ -2275,7 +2278,9 @@ run_expect "case_80 CONTROL: an exempt job that only compiles headers" 0 "$d" \
 
 if [ "$fails" -eq 0 ]; then
     echo "check-agent-pin-wiring selftest: all cases passed ($cases)"
+    printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
     exit 0
 fi
 echo "check-agent-pin-wiring selftest: $fails of $cases case(s) failed"
+printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
 exit 1

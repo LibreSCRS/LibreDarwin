@@ -13,7 +13,12 @@ trap 'rm -rf "$tmp"' EXIT
 
 pass=0
 fail=0
+cases=0
+red=0
 check() { # name expected_rc actual_rc
+    cases=$((cases + 1))
+    # red-proved: the case in which the gate returned non-zero on a perturbed input.
+    if [ "$2" != 0 ]; then red=$((red + 1)); fi
     if [ "$2" = "$3" ]; then
         pass=$((pass + 1))
         printf '  ok    %s (rc=%s)\n' "$1" "$3"
@@ -77,4 +82,5 @@ python3 "$checker" "$tmp/empty" >/dev/null 2>&1
 check "missing compile_commands is an error" 2 $?
 
 printf '\n%s passed, %s failed\n' "$pass" "$fail"
+printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
 [ "$fail" -eq 0 ]

@@ -40,7 +40,12 @@ jobs:
     timeout-minutes: 15
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 because the self-test runner picks its set with
+      # `git ls-files`, and a shallow checkout is a known source of a
+      # different set here than locally.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Install clang-format-21
         run: |
@@ -167,6 +172,13 @@ jobs:
         # have really been written: the tag deciding unconditionally, and git
         # being ignored altogether.
         run: ./ci/scripts/check-version-stamp.selftest.sh
+
+      # Every self-test in this repository, by pathspec, and each one must
+      # report the cases it ran and how many proved the gate red. A self-test
+      # nothing runs proves as much as no self-test, and a runner that read only
+      # exit codes would accept `exit 0` as a body.
+      - name: Run every self-test
+        run: ./ci/scripts/run-selftests.sh
 
   agent-interface:
     # The macOS job builds against cmake/libreagent.pin -- the agent interface as

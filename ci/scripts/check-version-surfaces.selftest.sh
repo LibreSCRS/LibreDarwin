@@ -16,10 +16,15 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
 fails=0
+cases=0
+red=0
 out="$work/out"
 
 run() {   # run <name> <expected-rc> <dir> [VAR=VAL ...]
     name=$1; want=$2; dir=$3; shift 3
+    cases=$((cases + 1))
+    # red-proved: the case in which the gate returned non-zero on a perturbed input.
+    if [ "$want" != 0 ]; then red=$((red + 1)); fi
     ( cd "$dir" && env "$@" sh "$subject" ) > "$out" 2>&1
     got=$?
     if [ "$got" -eq "$want" ]; then
@@ -224,7 +229,9 @@ says "case_21 summary names how many were read from a template" '1 read the numb
 
 if [ "$fails" -eq 0 ]; then
     echo "check-version-surfaces selftest: all cases passed"
+    printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
     exit 0
 fi
 echo "check-version-surfaces selftest: $fails case(s) failed"
+printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
 exit 1

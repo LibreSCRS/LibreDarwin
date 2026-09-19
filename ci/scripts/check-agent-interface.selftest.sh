@@ -170,6 +170,7 @@ GATE="${1:-$(cd "$(dirname "$0")" && pwd)/check-agent-interface.sh}"
 WORK="$(mktemp -d /var/tmp/check-agent-interface-selftest.XXXXXX)"
 trap 'rm -rf "$WORK"' EXIT
 pass=0; fail=0
+cases=0; red=0
 
 mkbase() { # <dir> <bool|enum>
     mkdir -p "$1/LibreSCRS/Agent/backend"
@@ -297,6 +298,9 @@ mkdouble() { # <root> <bool|enum>
 }
 check() { # <label> <want-rc> <root> <la-include>
     local label="$1" want="$2" rc
+    cases=$((cases + 1))
+    # red-proved: the case in which the gate returned non-zero on a perturbed input.
+    if [ "$want" != 0 ]; then red=$((red + 1)); fi
     REPO_ROOT="$3" bash "$GATE" "$4" > "$WORK/out.txt" 2>&1; rc=$?
     if [ "$rc" = "$want" ]; then
         echo "  ok    $label (rc=$rc)"; pass=$((pass+1))
@@ -1147,4 +1151,5 @@ else
 fi
 
 echo "check-agent-interface.selftest: $pass passed, $fail failed"
+printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
 [ "$fail" -eq 0 ]

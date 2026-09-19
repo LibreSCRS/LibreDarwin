@@ -13,10 +13,15 @@ command -v cmake >/dev/null 2>&1 || { echo "no cmake on PATH -- cannot self-test
 work=$(mktemp -d "${TMPDIR:-/var/tmp}/check-pin-form-selftest.XXXXXX")
 trap 'rm -rf "$work"' EXIT
 fails=0
+cases=0
+red=0
 printf '%s\n' "ca4f355f893822f8b875fd81cbd04e8422b26b93" > "$work/pin"
 
 run() {  # run <name> <expected-rc> <cmake-file> [pin-file]
     local name=$1 want=$2 f=$3 p=${4:-$work/pin}
+    cases=$((cases + 1))
+    # red-proved: the case in which the gate returned non-zero on a perturbed input.
+    if [ "$want" != 0 ]; then red=$((red + 1)); fi
     bash "$subject" "$f" "$p" > "$work/out" 2>&1
     local got=$?
     if [ "$got" -eq "$want" ]; then
@@ -95,7 +100,9 @@ run "case_9 the shipped guard and the shipped pin" 0 \
 
 if [ "$fails" -eq 0 ]; then
     echo "check-pin-form selftest: all cases passed (9)"
+    printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
     exit 0
 fi
 echo "check-pin-form selftest: $fails case(s) failed"
+printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"
 exit 1
