@@ -12,6 +12,12 @@ namespace LibreSCRS::Darwin::wire {
 
 std::optional<UniqueFd> anonFdFromBytes(std::span<const std::uint8_t> bytes)
 {
+    // No memfd_create on Darwin: mkstemp into TMPDIR + immediate unlink is the
+    // anonymous-file equivalent (same technique as LibreAgent's client/qt/
+    // src/socket/MemfdSource.cpp, __APPLE__ branch) -- a regular-file fd that
+    // fully supports pread/SCM_RIGHTS. Cross-repo documentation only: this
+    // repository keeps no canonical-types registry, so no gate ties this
+    // comment to that file staying true.
     const char* tmpDir = std::getenv("TMPDIR");
     std::string tmpl = (tmpDir != nullptr && *tmpDir != '\0') ? std::string(tmpDir) : std::string("/tmp/");
     if (tmpl.back() != '/') {
