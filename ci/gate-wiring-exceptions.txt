@@ -4,3 +4,4 @@
 # scripts that are deliberately hand-run. One path per line, then the reason.
 # check-gates-wired.sh treats every line here as a reachability root, so what
 # these scripts call counts as run too. A path that stops being tracked fails.
+packaging/install-dev.sh  A dev harness that runs the agent standalone against a development App-Group container on a Mac; there is no host to run it against on a runner, and it installs into the developer's own container.
