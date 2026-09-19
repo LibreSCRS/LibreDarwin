@@ -124,8 +124,9 @@ public:
     // The current presence snapshot for a GetState reply. Loop-thread only.
     [[nodiscard]] Agent::Wire::StateReply currentState() const;
 
-    // Broadcast a Config1.Changed event to every subscribed connection (the
-    // frontend's emitConfigChanged path). Loop-thread only.
+    // Broadcast a Config1.Changed event to every connection (the frontend's
+    // emitConfigChanged path); there is no per-connection subscription
+    // filtering in this version. Loop-thread only.
     void broadcastConfigChanged(const std::string& key);
 
     // Broadcast an AgentQuiesced event (system sleep / screen lock / user switch /
