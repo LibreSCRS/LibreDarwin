@@ -11,10 +11,10 @@
 #
 # Why this exists: a self-tested, green script that no workflow ever names
 # measures nothing on every push, and nothing says so -- unwiring a gate
-# changes no output, so it is the cheapest thing in CI to lose. What this
-# gate protects here is ci/scripts/, the only one of those three directories
-# this repository ships, and every path ci/gate-wiring-exceptions.txt stands
-# down is recorded there with an owner and a reason.
+# changes no output, so it is the cheapest thing in CI to lose. Two scanners
+# shipped in this project self-tested and green with no workflow naming either,
+# which is the shape that hides it. Every path ci/gate-wiring-exceptions.txt
+# stands down is recorded there with a reason.
 #
 # Three shapes this gate had to be taught, each found by its own selftest:
 #  * Comment lines are stripped before the search, so naming a script inside a
