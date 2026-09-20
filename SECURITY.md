@@ -44,13 +44,14 @@ LibreSCRS releases ≥ 4.0 are cryptographically signed.
   `gpg --verify` / `git tag -v` workflow.
 - **Release artifacts.** LibreDarwin distributes no prebuilt binaries
   of its own: it is the macOS broker host, built from source by
-  whoever packages it, and the signed and notarized macOS artifact
-  belongs to the SwiftUI host (LibreMac) rather than to this
-  repository. The components that distribute binaries sign them via
-  Sigstore cosign keyless using GitHub Actions OIDC; see
-  <https://librescrs.github.io/security/> for that end-to-end
-  verification guide, including expected OIDC issuer and identity
-  values.
+  whoever packages it. A packaged macOS artifact would belong to the
+  SwiftUI host (LibreMac) rather than to this repository, and that
+  repository has not yet cut a signed release — see its own security
+  policy for the current state. Components that do distribute signed
+  binaries sign them via Sigstore cosign keyless using GitHub Actions
+  OIDC; see <https://librescrs.github.io/security/> for that
+  end-to-end verification guide, including expected OIDC issuer and
+  identity values.
 
 ## Supported versions
 
