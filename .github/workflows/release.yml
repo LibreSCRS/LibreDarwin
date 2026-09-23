@@ -106,6 +106,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           sparse-checkout: |
+            ci/release-assets.txt
+            ci/scripts/check-release-assets.sh
             CHANGELOG.md
             VERSION
             ci/scripts/check-release-lockstep.sh
@@ -165,6 +167,11 @@ jobs:
             echo "NOTES_ARG=--generate-notes" >> "$GITHUB_ENV"
           fi
 
+      - name: The staged asset set is the set this repository declares
+        # No path: this release uploads no asset, and the check holds the
+        # declaration to that -- an empty ci/release-assets.txt is the claim.
+        run: ci/scripts/check-release-assets.sh --staged
+
       - name: Create GitHub release
         # The ref name and repository move through the environment, never
         # inline into the script — a git ref may carry shell metacharacters
@@ -188,3 +195,12 @@ jobs:
               --verify-tag \
               $NOTES_ARG \
               $PRERELEASE_FLAG
+
+      - name: The published release is the set this repository declares
+        # The release this job just created, read back. A draft is judged too,
+        # and the check prints DRAFT=yes so the log is not taken for evidence
+        # about a published release.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: ci/scripts/check-release-assets.sh --published "$TAG"

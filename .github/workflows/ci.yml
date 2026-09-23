@@ -177,6 +177,15 @@ jobs:
       # report the cases it ran and how many proved the gate red. A self-test
       # nothing runs proves as much as no self-test, and a runner that read only
       # exit codes would accept `exit 0` as a body.
+      - name: The release-asset check can still fail
+        run: ./ci/scripts/check-release-assets.selftest.sh
+
+      - name: The release workflow checks its asset set before publishing
+        # Structural only: the job that runs gh release create runs the
+        # --staged check before it. Whether the set is right is measured on
+        # the tag, over the files themselves.
+        run: ./ci/scripts/check-release-assets.sh --wired
+
       - name: Run every self-test
         run: ./ci/scripts/run-selftests.sh
 
