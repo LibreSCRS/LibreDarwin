@@ -33,6 +33,13 @@ service an attacker can already achieve as the user of their own
 agent, and findings in vendored third-party code that belong to the
 upstream project instead.
 
+## Peer verification without a Developer ID
+
+Without a Developer ID signature the agent and prompter cannot verify
+who connects to them beyond same-user ownership of the socket; a
+process running as your user can raise the credential window.
+Developer-ID builds verify the peer's designated requirement.
+
 ## Release verification
 
 LibreSCRS releases ≥ 4.0 are cryptographically signed.

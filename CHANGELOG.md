@@ -14,6 +14,27 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased] — 5.0.0
 
+### Security
+
+- **The agent and the prompter no longer take configuration from their
+  environment.** `launchctl setenv` reaches every job the user's launchd
+  starts, so each variable they honoured was a switch any process running as
+  the user could flip. Gone: the socket paths (`LIBRESCRS_AGENT_SOCK`,
+  `LIBRESCRS_PROMPTER_SOCK`), the container (`LIBRESCRS_AGENT_CONTAINER`), the
+  two opt-outs that skipped peer verification
+  (`LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER`,
+  `LIBRESCRS_PROMPTER_ALLOW_UNVERIFIED_PEER`) and the override of the peer the
+  prompter expects (`LIBRESCRS_AGENT_SIGNING_ID`). The plugin directory, loaded
+  into the process that holds card secrets, is now a `--plugin-dir` argument
+  (`LIBRESCRS_PLUGIN_DIR` is gone); `packaging/install-dev.sh` passes it.
+  LibreMiddleware code running in the agent still reads variables of its own
+  (`LIBRESCRS_PKCS11_MODULE`, `LIBRESCRS_CERTIFICATES_DIR` among them).
+- Without a Developer ID signature the agent and prompter cannot verify who
+  connects to them beyond same-user ownership of the socket; a process running
+  as your user can raise the credential window. Developer-ID builds verify the
+  peer's designated requirement. `SECURITY.md` says so, and the code comments
+  no longer claim that the app-group entitlement binds a peer to a team.
+
 ### Added
 
 - A release workflow and a `KEYS` file. Until now this repository had neither,
@@ -24,6 +45,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The launchd job keeps an agent that exited cleanly stopped
+  (`KeepAlive` = `SuccessfulExit: false`, `ThrottleInterval` 10 s): stopping the
+  agent on purpose no longer starts it again at once. A crash is still
+  restarted.
 - **Dual-interface readers: the contact slot is kept powered while a card
   sits in it, where the platform reports both slots as one unit.** A
   dual-interface card in the contact slot of a reader such as the OMNIKEY 5422

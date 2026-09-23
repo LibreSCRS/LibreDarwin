@@ -17,7 +17,11 @@
 
   RunAtLoad + KeepAlive keep the agent up so it holds the CTK identity and
   observes card presence; it idles cheaply (the per-reader CardSessionHolder
-  releases PC/SC after ~45 s).
+  releases PC/SC after ~45 s). KeepAlive restarts it only after an exit that
+  was not clean: an agent stopped on purpose (SIGTERM, a clean quiesce, exit
+  status 0) stays stopped, where an unconditional KeepAlive would start it
+  again at once. A crash or a refused start is restarted, no sooner than
+  ThrottleInterval seconds after the last start.
 
   ProgramArguments points at the librescrs-agent inside the host bundle
   (Contents/MacOS). The dev harness (packaging/install-dev.sh) substitutes the
@@ -46,7 +50,13 @@
     <true/>
 
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
 
     <key>ProcessType</key>
     <string>Interactive</string>
