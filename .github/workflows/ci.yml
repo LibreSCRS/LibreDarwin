@@ -77,13 +77,18 @@ jobs:
         # that passed. Costs a second and builds nothing.
         run: ./ci/scripts/check-skip-reasons.sh
 
-      - name: The shipped binaries read no LIBRESCRS_ environment variable
+      - name: This repository's agent and prompter sources read no unrecorded environment variable
         # `launchctl setenv` reaches every job the user's launchd starts, so a
-        # variable the agent or the prompter honoured was a switch any process
-        # running as the user could flip: move a socket, skip the peer check,
-        # load another plugin directory into the process that holds the PIN.
-        # They are compiled in or passed as arguments now, and this keeps a new
-        # one from arriving unnoticed. Its self-test runs with the others below.
+        # variable the agent or the prompter sources honoured was a switch any
+        # process running as the user could flip: move a socket, skip the peer
+        # check, load another plugin directory into the process that holds the
+        # PIN. They are compiled in or passed as arguments now; every read that
+        # remains is recorded in ci/env-readers.txt with its reason, and a new
+        # one is red until it is. This reads THIS repository's sources only:
+        # the LibreMiddleware code linked into the agent process reads variables
+        # of its own (LIBRESCRS_PKCS11_MODULE, LIBRESCRS_CERTIFICATES_DIR and
+        # others), and a green step says nothing about those. Its self-test runs
+        # with the others below.
         run: ./ci/scripts/check-no-env-handles.sh
 
       - name: Changelog and version agree on the pending release

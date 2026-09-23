@@ -1,0 +1,13 @@
+# env-readers.txt — the environment reads the agent and prompter sources are
+# allowed, one per row. check-no-env-handles.sh fails on any read under
+# agent/src, agent/include or prompter/ that is not recorded here, and on any
+# row that no longer matches a read.
+#
+# Format:   <path>  <call, exactly as written>  <reason>
+#
+# A row is a decision that the variable carries no configuration an attacker
+# running as the user could use: it does not name a socket, a peer, a module
+# or a directory whose contents are trusted.
+
+agent/src/backend/AppGroupPaths.cpp  std::getenv("HOME")  Fallback for the real home when the passwd lookup fails; the container is derived from it, and the passwd home is tried first.
+agent/src/backend/wire/AnonFd.cpp  std::getenv("TMPDIR")  Directory for an anonymous file that is unlinked at once and passed as a descriptor; nothing is read back from the path.
