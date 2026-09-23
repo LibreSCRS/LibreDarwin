@@ -25,9 +25,6 @@ std::filesystem::path realHomeDir()
 
 std::filesystem::path appGroupContainerDir()
 {
-    if (const char* over = std::getenv("LIBRESCRS_AGENT_CONTAINER"); over != nullptr && *over != '\0') {
-        return std::filesystem::path(over);
-    }
     return realHomeDir() / "Library" / "Group Containers" / kAppGroup;
 }
 

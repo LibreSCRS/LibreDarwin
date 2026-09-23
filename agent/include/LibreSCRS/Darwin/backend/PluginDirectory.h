@@ -33,7 +33,7 @@ struct PluginDirCandidate
 {
     /// @brief The candidate locations, in the order they are probed.
     enum class Source : std::uint8_t {
-        Environment,     ///< `LIBRESCRS_PLUGIN_DIR`
+        Override,        ///< the agent's `--plugin-dir` argument
         BundleRelative,  ///< `<exe>/../PlugIns/librescrs` — the host bundle layout
         CompiledDefault, ///< the compiled-in install prefix; the terminal fallback
     };
@@ -63,18 +63,22 @@ struct PluginDirResolution
 };
 
 /// @brief The three inputs to the cascade, injected so it can be exercised
-///        without a real bundle on disk or a mutated environment.
+///        without a real bundle on disk or a real command line.
 struct PluginDirInputs
 {
-    /// @brief `LIBRESCRS_PLUGIN_DIR`; empty when unset.
-    std::string environment;
+    /// @brief The `--plugin-dir` argument; empty when not given.
+    ///
+    /// An argument and not an environment variable: `launchctl setenv` reaches
+    /// every job the user's launchd starts, and the directory named here is
+    /// loaded into the process that holds card secrets.
+    std::string override;
     /// @brief The running binary's own path; `nullopt` when it cannot be found.
     std::optional<std::filesystem::path> executable;
     /// @brief The compiled-in install prefix.
     std::filesystem::path compiledDefault;
 };
 
-/// @brief Run the cascade: environment override, then the bundled `PlugIns`
+/// @brief Run the cascade: the `--plugin-dir` override, then the bundled `PlugIns`
 ///        directory next to the executable if it exists, then the compiled-in
 ///        default.
 [[nodiscard]] PluginDirResolution resolvePluginDir(const PluginDirInputs& inputs);

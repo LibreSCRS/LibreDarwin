@@ -6,7 +6,7 @@
 // and zeroing the transfer buffer. The secret never transits a client.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
+#include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 
 #include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
@@ -206,13 +206,9 @@ MacPrompterClient::MacPrompterClient(std::string prompterSocketPath, PeerVerifie
     : m_socketPath(std::move(prompterSocketPath)), m_peerVerifier(std::move(peerVerifier))
 {
     if (!m_peerVerifier) {
-        // Default: the serving peer must BE the prompter — signing id bound to
-        // our Team ID via the App-Group entitlement (mirror of the prompter's
-        // accept-time check on the agent).
-        m_peerVerifier = [](int connectedFd) {
-            return verifyConnectedPeer(connectedFd, ExpectedPeerIdentity{.signingId = std::string(kPrompterSigningId),
-                                                                         .appGroup = std::string(kAppGroup)});
-        };
+        // Default: the serving peer must BE the prompter — the same verifier
+        // the composition root installs, so the two cannot disagree.
+        m_peerVerifier = makeDefaultPrompterVerifier();
     }
 }
 

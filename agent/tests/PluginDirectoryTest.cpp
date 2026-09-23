@@ -90,19 +90,19 @@ bool hasLevel(const std::vector<std::pair<Level, std::string>>& lines, Level wan
 
 // --- the cascade ---------------------------------------------------------
 
-TEST(PluginDirectory, EnvironmentOverrideWinsAndIsTheOnlyCandidate)
+TEST(PluginDirectory, ArgumentOverrideWinsAndIsTheOnlyCandidate)
 {
-    const auto resolution = resolvePluginDir(PluginDirInputs{.environment = "/opt/plugins",
+    const auto resolution = resolvePluginDir(PluginDirInputs{.override = "/opt/plugins",
                                                              .executable = fs::path("/Apps/X.app/Contents/MacOS/agent"),
                                                              .compiledDefault = "/usr/local/lib/librescrs/plugins"});
 
     EXPECT_EQ(resolution.dir, fs::path("/opt/plugins"));
     ASSERT_EQ(resolution.candidates.size(), 1U);
-    EXPECT_EQ(resolution.candidates.front().source, Source::Environment);
+    EXPECT_EQ(resolution.candidates.front().source, Source::Override);
     EXPECT_EQ(resolution.candidates.front().verdict, Verdict::Chosen);
 }
 
-TEST(PluginDirectory, BundleRelativeDirectoryIsTakenWhenTheEnvironmentIsUnset)
+TEST(PluginDirectory, BundleRelativeDirectoryIsTakenWhenNoOverrideIsGiven)
 {
     TempDir bundle("bundle");
     const fs::path macOsDir = bundle.path() / "Contents" / "MacOS";
@@ -110,13 +110,13 @@ TEST(PluginDirectory, BundleRelativeDirectoryIsTakenWhenTheEnvironmentIsUnset)
     fs::create_directories(macOsDir);
     fs::create_directories(plugIns);
 
-    const auto resolution = resolvePluginDir(PluginDirInputs{.environment = "",
+    const auto resolution = resolvePluginDir(PluginDirInputs{.override = "",
                                                              .executable = macOsDir / "librescrs-agent",
                                                              .compiledDefault = "/usr/local/lib/librescrs/plugins"});
 
     EXPECT_EQ(fs::canonical(resolution.dir), fs::canonical(plugIns));
     ASSERT_EQ(resolution.candidates.size(), 2U);
-    EXPECT_EQ(resolution.candidates[0].source, Source::Environment);
+    EXPECT_EQ(resolution.candidates[0].source, Source::Override);
     EXPECT_EQ(resolution.candidates[0].verdict, Verdict::Unset);
     EXPECT_EQ(resolution.candidates[1].source, Source::BundleRelative);
     EXPECT_EQ(resolution.candidates[1].verdict, Verdict::Chosen);
@@ -129,7 +129,7 @@ TEST(PluginDirectory, CompiledDefaultIsTheTerminalFallbackAndRecordsWhyTheOthers
     fs::create_directories(exe.parent_path());
 
     const auto resolution = resolvePluginDir(
-        PluginDirInputs{.environment = "", .executable = exe, .compiledDefault = "/usr/local/lib/librescrs/plugins"});
+        PluginDirInputs{.override = "", .executable = exe, .compiledDefault = "/usr/local/lib/librescrs/plugins"});
 
     EXPECT_EQ(resolution.dir, fs::path("/usr/local/lib/librescrs/plugins"));
     ASSERT_EQ(resolution.candidates.size(), 3U);
@@ -146,7 +146,7 @@ TEST(PluginDirectory, CompiledDefaultIsTheTerminalFallbackAndRecordsWhyTheOthers
 TEST(PluginDirectory, AnUnknownExecutablePathLeavesTheBundleCandidateUnset)
 {
     const auto resolution = resolvePluginDir(
-        PluginDirInputs{.environment = "", .executable = std::nullopt, .compiledDefault = "/usr/local/lib/x"});
+        PluginDirInputs{.override = "", .executable = std::nullopt, .compiledDefault = "/usr/local/lib/x"});
 
     EXPECT_EQ(resolution.dir, fs::path("/usr/local/lib/x"));
     ASSERT_EQ(resolution.candidates.size(), 3U);
@@ -157,9 +157,9 @@ TEST(PluginDirectory, AnUnknownExecutablePathLeavesTheBundleCandidateUnset)
 
 TEST(PluginDirectory, TheChosenDirectoryIsAlwaysTheLastCandidate)
 {
-    for (const std::string& env : {std::string("/opt/plugins"), std::string()}) {
+    for (const std::string& given : {std::string("/opt/plugins"), std::string()}) {
         const auto resolution = resolvePluginDir(
-            PluginDirInputs{.environment = env, .executable = std::nullopt, .compiledDefault = "/usr/local/lib/x"});
+            PluginDirInputs{.override = given, .executable = std::nullopt, .compiledDefault = "/usr/local/lib/x"});
         ASSERT_FALSE(resolution.candidates.empty());
         EXPECT_EQ(resolution.candidates.back().verdict, Verdict::Chosen);
         EXPECT_EQ(resolution.candidates.back().path, resolution.dir);
@@ -171,7 +171,7 @@ TEST(PluginDirectory, TheChosenDirectoryIsAlwaysTheLastCandidate)
 TEST(PluginDirectoryReport, ZeroPluginsIsAWarningNamingTheDirectory)
 {
     const auto resolution = resolvePluginDir(
-        PluginDirInputs{.environment = "", .executable = std::nullopt, .compiledDefault = "/usr/local/lib/librescrs"});
+        PluginDirInputs{.override = "", .executable = std::nullopt, .compiledDefault = "/usr/local/lib/librescrs"});
 
     const auto lines = pluginLoadReportLines(resolution, 0, {});
 
@@ -187,12 +187,12 @@ TEST(PluginDirectoryReport, NamesTheSourceThatWonAndThePathsThatLost)
     const fs::path exe = tree.path() / "build" / "librescrs-agent";
     fs::create_directories(exe.parent_path());
     const auto resolution = resolvePluginDir(
-        PluginDirInputs{.environment = "", .executable = exe, .compiledDefault = "/usr/local/lib/librescrs"});
+        PluginDirInputs{.override = "", .executable = exe, .compiledDefault = "/usr/local/lib/librescrs"});
 
     const std::string text = joined(pluginLoadReportLines(resolution, 0, {}));
 
-    EXPECT_NE(text.find("LIBRESCRS_PLUGIN_DIR"), std::string::npos)
-        << "the environment override has to be named as tried-and-unset:\n"
+    EXPECT_NE(text.find("--plugin-dir"), std::string::npos)
+        << "the argument override has to be named as tried-and-unset:\n"
         << text;
     EXPECT_NE(text.find("PlugIns"), std::string::npos) << "the bundle path that was looked for has to appear:\n"
                                                        << text;
@@ -201,7 +201,7 @@ TEST(PluginDirectoryReport, NamesTheSourceThatWonAndThePathsThatLost)
 TEST(PluginDirectoryReport, LoadedPluginsAreInformationalAndCounted)
 {
     const auto resolution = resolvePluginDir(
-        PluginDirInputs{.environment = "/opt/plugins", .executable = std::nullopt, .compiledDefault = "/unused"});
+        PluginDirInputs{.override = "/opt/plugins", .executable = std::nullopt, .compiledDefault = "/unused"});
     const std::vector<LoadOutcome> report{
         LoadOutcome{.soPath = "/opt/plugins/a.dylib", .pluginId = "a", .status = LoadOutcome::Status::Loaded},
         LoadOutcome{.soPath = "/opt/plugins/b.dylib", .pluginId = "b", .status = LoadOutcome::Status::Loaded}};
@@ -215,7 +215,7 @@ TEST(PluginDirectoryReport, LoadedPluginsAreInformationalAndCounted)
 TEST(PluginDirectoryReport, AFileThatFailedToLoadIsNamedWithItsDiagnostic)
 {
     const auto resolution = resolvePluginDir(
-        PluginDirInputs{.environment = "/opt/plugins", .executable = std::nullopt, .compiledDefault = "/unused"});
+        PluginDirInputs{.override = "/opt/plugins", .executable = std::nullopt, .compiledDefault = "/unused"});
     const std::vector<LoadOutcome> report{LoadOutcome{.soPath = "/opt/plugins/broken.dylib",
                                                       .pluginId = "",
                                                       .status = LoadOutcome::Status::AbiMismatch,
@@ -236,8 +236,8 @@ TEST(PluginDirectoryReport, AnEmptyDirectoryReachesTheLogAsAWarning)
     LibreSCRS::Agent::log::init(
         [&captured](Level level, std::string_view line) { captured.emplace_back(level, std::string(line)); });
 
-    const auto resolution = resolvePluginDir(PluginDirInputs{
-        .environment = empty.path().string(), .executable = std::nullopt, .compiledDefault = "/unused"});
+    const auto resolution = resolvePluginDir(
+        PluginDirInputs{.override = empty.path().string(), .executable = std::nullopt, .compiledDefault = "/unused"});
     const LibreSCRS::Plugin::CardPluginService service(resolution.dir);
     reportPluginLoad(resolution, service);
 
@@ -260,7 +260,7 @@ TEST(PluginDirectoryReport, AnUnloadableFileInTheDirectoryReachesTheLog)
         [&captured](Level level, std::string_view line) { captured.emplace_back(level, std::string(line)); });
 
     const auto resolution = resolvePluginDir(
-        PluginDirInputs{.environment = dir.path().string(), .executable = std::nullopt, .compiledDefault = "/unused"});
+        PluginDirInputs{.override = dir.path().string(), .executable = std::nullopt, .compiledDefault = "/unused"});
     const LibreSCRS::Plugin::CardPluginService service(resolution.dir);
     reportPluginLoad(resolution, service);
 

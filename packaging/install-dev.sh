@@ -18,7 +18,9 @@
 set -euo pipefail
 
 APP_GROUP="group.org.librescrs.LibreMac"
-CONTAINER="${LIBRESCRS_AGENT_CONTAINER:-$HOME/Library/Group Containers/$APP_GROUP}"
+# The agent resolves its container itself and takes no override, so this is
+# the one place it can be: the canonical App-Group container.
+CONTAINER="$HOME/Library/Group Containers/$APP_GROUP"
 SOCK="$CONTAINER/agent.sock"
 LABEL="org.librescrs.agent"
 BUILD_DIR="${BUILD_DIR:-build}"
@@ -28,9 +30,10 @@ AGENT_BIN="${AGENT_BIN:-$BUILD_DIR/agent/librescrs-agent}"
 # rebuild-all populates, because the agent's own compiled default points at a
 # system prefix a development machine does not have -- and an agent with no
 # plugins fails in the one way that leaves no trace: every card comes back
-# unusable and nothing says why.
+# unusable and nothing says why. Handed to the agent as --plugin-dir: it reads
+# no configuration from its environment.
 LM_PREFIX="${LM_PREFIX:-$(cd "$(dirname "$0")/../.." && pwd)/lm-prefix}"
-PLUGIN_DIR="${LIBRESCRS_PLUGIN_DIR:-$LM_PREFIX/lib/librescrs/plugins}"
+PLUGIN_DIR="${PLUGIN_DIR:-$LM_PREFIX/lib/librescrs/plugins}"
 LM_LIB="${LM_LIB:-$LM_PREFIX/lib}"
 
 die() { echo "error: $*" >&2; exit 1; }
@@ -49,7 +52,7 @@ case "${1:-run}" in
         ensure_container
         echo "librescrs-agent (dev) -> self-binds $SOCK"
         echo "stop with Ctrl-C (SIGINT); the agent unlinks the socket on clean exit."
-        exec "$AGENT_BIN"
+        exec "$AGENT_BIN" --plugin-dir "$PLUGIN_DIR"
         ;;
     launchd)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
@@ -66,10 +69,18 @@ case "${1:-run}" in
         # not start at all, and launchd answers a crash loop with a throttle, so
         # the report arrives ten seconds late and looks like something else.
         [ -d "$LM_LIB" ] || die "middleware lib dir does not exist: $LM_LIB (the agent will not start; build+install LibreMiddleware, or set LM_PREFIX)"
-        sed -e "s|@LIBRESCRS_AGENT_PROGRAM@|$ABS_BIN|g" \
-            -e "s|@LIBRESCRS_PLUGIN_DIR@|$PLUGIN_DIR|g" \
-            -e "s|@LIBRESCRS_LM_LIB@|$LM_LIB|g" \
+        # The template carries neither the plugin directory nor an environment,
+        # because a bundled agent needs neither. The plugin directory is an
+        # argument, which `launchctl setenv` cannot reach. DYLD_LIBRARY_PATH is
+        # the one variable a development build needs: it is linked with @rpath
+        # entries for @executable_path and ../Frameworks only, which find
+        # nothing next to an install prefix, and without it the agent dies
+        # before main on a missing LibreMiddleware library -- a crash loop
+        # launchd then throttles.
+        sed -e "s|<string>@LIBRESCRS_AGENT_PROGRAM@</string>|<string>$ABS_BIN</string><string>--plugin-dir</string><string>$PLUGIN_DIR</string>|g" \
             "$(dirname "$0")/launchd/$LABEL.plist" > "$DEST"
+        plutil -insert EnvironmentVariables -json "{\"DYLD_LIBRARY_PATH\":\"$LM_LIB\"}" "$DEST"
+        plutil -lint "$DEST" >/dev/null || die "generated plist does not parse: $DEST"
         echo "plugins: $PLUGIN_DIR"
         echo "lm libs: $LM_LIB"
         launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
@@ -84,7 +95,7 @@ case "${1:-run}" in
     smoke)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
         ensure_container
-        "$AGENT_BIN" &
+        "$AGENT_BIN" --plugin-dir "$PLUGIN_DIR" &
         AGENT_PID=$!
         trap 'kill "$AGENT_PID" 2>/dev/null || true' EXIT
         for _ in $(seq 1 20); do

@@ -44,7 +44,8 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/SystemLifecycle.mm
     src/backend/OsLogSink.cpp
     src/backend/ProcessHardening.cpp
-    src/backend/PluginDirectory.cpp)
+    src/backend/PluginDirectory.cpp
+    src/backend/PeerPolicy.cpp)
 target_include_directories(LibreDarwinAgentBackend PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE

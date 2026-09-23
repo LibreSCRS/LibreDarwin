@@ -77,6 +77,15 @@ jobs:
         # that passed. Costs a second and builds nothing.
         run: ./ci/scripts/check-skip-reasons.sh
 
+      - name: The shipped binaries read no LIBRESCRS_ environment variable
+        # `launchctl setenv` reaches every job the user's launchd starts, so a
+        # variable the agent or the prompter honoured was a switch any process
+        # running as the user could flip: move a socket, skip the peer check,
+        # load another plugin directory into the process that holds the PIN.
+        # They are compiled in or passed as arguments now, and this keeps a new
+        # one from arriving unnoticed. Its self-test runs with the others below.
+        run: ./ci/scripts/check-no-env-handles.sh
+
       - name: Changelog and version agree on the pending release
         # Run on every push with the version this tree is heading for, so the
         # agreement is proved weeks before the tag rather than first on a tag

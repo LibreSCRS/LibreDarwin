@@ -31,11 +31,10 @@ public:
     // any request is sent or any reply is trusted: a same-uid process that
     // unlinks and re-binds prompter.sock must not be able to feed the agent a
     // secret of its choosing (every wrong PIN presented to the card burns a
-    // retry counter). Empty (the default) verifies the prompter's code-signing
-    // identity — signing id + App-Group entitlement, the shared PeerCodeSigning
-    // gate, symmetric to the prompter authenticating the agent at accept.
-    // Tests (and the composition root's explicit development opt-out for
-    // unsigned local builds) inject a permissive one.
+    // retry counter). Empty (the default) is makeDefaultPrompterVerifier()
+    // (PeerPolicy.h): the prompter's signing id + App-Group entitlement, the
+    // shared PeerCodeSigning gate, symmetric to the prompter authenticating
+    // the agent at accept. Only tests inject a permissive one.
     using PeerVerifier = std::function<bool(int connectedFd)>;
 
     explicit MacPrompterClient(std::string prompterSocketPath, PeerVerifier peerVerifier = {});

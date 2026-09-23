@@ -27,8 +27,8 @@ constexpr std::string_view kTag = "card plugins";
 std::string_view sourceName(Source source)
 {
     switch (source) {
-    case Source::Environment:
-        return "LIBRESCRS_PLUGIN_DIR";
+    case Source::Override:
+        return "--plugin-dir";
     case Source::BundleRelative:
         return "the bundled plugin directory";
     case Source::CompiledDefault:
@@ -59,8 +59,8 @@ std::string_view statusName(LoadOutcome::Status status)
 std::string rejectionLine(const PluginDirCandidate& candidate)
 {
     switch (candidate.source) {
-    case Source::Environment:
-        return std::format("{}: LIBRESCRS_PLUGIN_DIR is not set", kTag);
+    case Source::Override:
+        return std::format("{}: --plugin-dir was not given", kTag);
     case Source::BundleRelative:
         return candidate.verdict == Verdict::Unset
                    ? std::format("{}: no bundled plugin directory — this binary's own path is unknown", kTag)
@@ -77,13 +77,13 @@ PluginDirResolution resolvePluginDir(const PluginDirInputs& inputs)
 {
     PluginDirResolution resolution;
 
-    if (!inputs.environment.empty()) {
-        resolution.dir = fs::path(inputs.environment);
+    if (!inputs.override.empty()) {
+        resolution.dir = fs::path(inputs.override);
         resolution.candidates.push_back(
-            {.source = Source::Environment, .path = resolution.dir, .verdict = Verdict::Chosen});
+            {.source = Source::Override, .path = resolution.dir, .verdict = Verdict::Chosen});
         return resolution;
     }
-    resolution.candidates.push_back({.source = Source::Environment, .path = {}, .verdict = Verdict::Unset});
+    resolution.candidates.push_back({.source = Source::Override, .path = {}, .verdict = Verdict::Unset});
 
     // The host bundle layout: Contents/MacOS/librescrs-agent alongside
     // Contents/PlugIns/librescrs. Normalised so the log names the directory that

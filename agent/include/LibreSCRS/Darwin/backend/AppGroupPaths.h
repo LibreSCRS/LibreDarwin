@@ -18,8 +18,9 @@ namespace LibreSCRS::Darwin {
 // resolve identically: the agent binds agent.sock + connects prompter.sock
 // here, and the prompter serves prompter.sock from the same place — any drift
 // in the group id or the sandbox-bypass rationale would silently split the two
-// binaries. LIBRESCRS_AGENT_CONTAINER lets dev/test point elsewhere (honored
-// by both, for the same no-drift reason).
+// binaries. There is no override: the location is where the host, the token
+// extension and both binaries meet, and a variable that moved it would move
+// the agent's sockets for anyone able to set the user's environment.
 [[nodiscard]] std::filesystem::path appGroupContainerDir();
 
 } // namespace LibreSCRS::Darwin

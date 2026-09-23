@@ -11,6 +11,7 @@
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
 #include <LibreSCRS/Darwin/backend/OsLogSink.h>
+#include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 #include <LibreSCRS/Darwin/backend/PluginDirectory.h>
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 #include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>
@@ -36,12 +37,13 @@
 #include <dispatch/dispatch.h>
 
 #include <csignal>
-#include <cstdlib>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
+#include <string_view>
 
 #ifndef LIBREDARWIN_VERSION_STR
 #define LIBREDARWIN_VERSION_STR "0.1.0"
@@ -57,15 +59,37 @@ namespace Agent = LibreSCRS::Agent;
 namespace Darwin = LibreSCRS::Darwin;
 namespace wire = LibreSCRS::Agent::Wire;
 
-std::string envOr(const char* key, const std::string& fallback)
+// The command line the agent accepts: `--plugin-dir <path>` and nothing else.
+// An argument rather than an environment variable, because `launchctl setenv`
+// reaches every job the user's launchd starts and the plugins named here are
+// loaded into the process that holds card secrets; ProgramArguments is written
+// by whoever installs the job.
+struct Arguments
 {
-    const char* v = std::getenv(key);
-    return (v != nullptr && *v != '\0') ? std::string(v) : fallback;
+    std::string pluginDir; // empty when not given
+};
+
+std::optional<Arguments> parseArguments(std::span<char* const> args)
+{
+    Arguments parsed;
+    for (std::size_t i = 1; i < args.size(); ++i) {
+        const std::string_view arg(args[i]);
+        if (arg != "--plugin-dir") {
+            Agent::log::errorf("unrecognised argument '{}' (usage: librescrs-agent [--plugin-dir <path>])", arg);
+            return std::nullopt;
+        }
+        if (i + 1 >= args.size() || *args[i + 1] == '\0') {
+            Agent::log::error("--plugin-dir needs a path (usage: librescrs-agent [--plugin-dir <path>])");
+            return std::nullopt;
+        }
+        parsed.pluginDir = args[++i];
+    }
+    return parsed;
 }
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
     // Deny debugger attach + core dumps BEFORE anything secret-bearing exists
     // (this process will hold plaintext CAN/PIN + live PACE/SM keys). Covers
@@ -84,6 +108,11 @@ int main()
         Agent::log::warn("process hardening incomplete (PT_DENY_ATTACH / RLIMIT_CORE=0 failed)");
     }
 
+    const auto arguments = parseArguments(std::span<char* const>(argv, static_cast<std::size_t>(argc)));
+    if (!arguments) {
+        return 2;
+    }
+
     // The App-Group container the sandboxed host + CTK extension can reach
     // (shared resolution with the prompter — AppGroupPaths).
     const fs::path container = Darwin::appGroupContainerDir();
@@ -93,12 +122,12 @@ int main()
         Agent::log::errorf("failed to create the App-Group container {}: {}", container.string(), ec.message());
         return 1;
     }
-    const std::string socketPath = envOr("LIBRESCRS_AGENT_SOCK", (container / "agent.sock").string());
-    const std::string prompterSocket = envOr("LIBRESCRS_PROMPTER_SOCK", (container / "prompter.sock").string());
+    const std::string socketPath = (container / "agent.sock").string();
+    const std::string prompterSocket = (container / "prompter.sock").string();
     const fs::path configFile = container / "config.json";
     const fs::path cacheRoot = container / "cache";
     const auto pluginDir =
-        Darwin::resolvePluginDir(Darwin::PluginDirInputs{.environment = envOr("LIBRESCRS_PLUGIN_DIR", std::string()),
+        Darwin::resolvePluginDir(Darwin::PluginDirInputs{.override = arguments->pluginDir,
                                                          .executable = Darwin::currentExecutablePath(),
                                                          .compiledDefault = LIBRESCRS_DEFAULT_PLUGIN_DIR});
 
@@ -145,16 +174,11 @@ int main()
             .allowedSigningIds = {},
             .requiredAppGroup = std::string(Darwin::kAppGroup),
         });
-    // The prompter client verifies the SERVING peer's code-signing identity by
-    // default (a re-bound prompter.sock must not be able to inject a secret the
-    // agent would burn a card retry counter on).
-    // LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER=1 is the explicit development
-    // opt-out for unsigned local builds; never set it in production.
-    LibreSCRS::Darwin::MacPrompterClient::PeerVerifier prompterVerifier; // empty => default verification
-    if (envOr("LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER", "") == "1") {
-        prompterVerifier = [](int) { return true; };
-    }
-    auto prompter = std::make_shared<LibreSCRS::Darwin::MacPrompterClient>(prompterSocket, std::move(prompterVerifier));
+    // The prompter client verifies the SERVING peer's code-signing identity (a
+    // re-bound prompter.sock must not be able to inject a secret the agent
+    // would burn a card retry counter on). There is no opt-out.
+    auto prompter =
+        std::make_shared<LibreSCRS::Darwin::MacPrompterClient>(prompterSocket, Darwin::makeDefaultPrompterVerifier());
     // The prompter helper outlives the agent that installed it, so this process
     // can come up beside windows a previous one raised -- windows it holds no id
     // for and nothing else will close. Clear them here, before anything below

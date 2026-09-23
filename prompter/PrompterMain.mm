@@ -12,52 +12,32 @@
 
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 #include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
+#include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 
 #import <AppKit/AppKit.h>
 
-#include <cstdlib>
 #include <memory>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace {
 
-// The default socket lives in the shared App-Group container, resolved by the
-// SAME helper the agent uses (AppGroupPaths — sandbox-bypass home + group id
-// in one place, so the two binaries cannot drift apart silently).
+// The socket lives in the shared App-Group container, resolved by the SAME
+// helper the agent uses (AppGroupPaths — sandbox-bypass home + group id in one
+// place, so the two binaries cannot drift apart silently).
 std::string prompterSocketPath()
 {
-    if (const char* env = std::getenv("LIBRESCRS_PROMPTER_SOCK")) {
-        return env;
-    }
     return (LibreSCRS::Darwin::appGroupContainerDir() / "prompter.sock").string();
 }
 
-// The connecting peer must be the agent. By DEFAULT the peer's code-signing
-// identity is verified: its SecTask signing identifier must match the agent's
-// (LIBRESCRS_AGENT_SIGNING_ID overrides the built-in expectation for
-// repackaged deployments) AND it must carry our App-Group entitlement, which
-// Apple provisions per Team ID — the shared PeerCodeSigning gate. The ONLY way
-// to skip verification is the explicit development opt-out
-// LIBRESCRS_PROMPTER_ALLOW_UNVERIFIED_PEER=1 (unsigned local builds; the 0600
-// socket still restricts connections to our uid). Never set it in production:
-// with it, any same-uid process can raise the PIN window and receive the
-// typed secret.
+// The connecting peer must be the agent: its SecTask signing identifier must
+// match the agent's and it must carry our App-Group entitlement — the shared
+// PeerCodeSigning gate (PeerPolicy.h). There is no opt-out and no override of
+// the expected identity: with one, any same-uid process could raise the PIN
+// window and receive the typed secret.
 LibreSCRS::Darwin::PrompterServer::PeerAuthorized makePeerAuth()
 {
-    if (const char* optOut = std::getenv("LIBRESCRS_PROMPTER_ALLOW_UNVERIFIED_PEER");
-        optOut != nullptr && std::string_view(optOut) == "1") {
-        return [](const LibreSCRS::Darwin::PeerCredentials&) {
-            return true; // development opt-out: any identifiable same-uid peer
-        };
-    }
-    LibreSCRS::Darwin::ExpectedPeerIdentity expected{.signingId = std::string(LibreSCRS::Darwin::kAgentSigningId),
-                                                     .appGroup = std::string(LibreSCRS::Darwin::kAppGroup)};
-    if (const char* env = std::getenv("LIBRESCRS_AGENT_SIGNING_ID"); env != nullptr && *env != '\0') {
-        expected.signingId = env;
-    }
-    return [expected](const LibreSCRS::Darwin::PeerCredentials& creds) -> bool {
+    return [expected = LibreSCRS::Darwin::expectedAgentIdentity()](const LibreSCRS::Darwin::PeerCredentials& creds) {
         return LibreSCRS::Darwin::matchesExpectedPeer(LibreSCRS::Darwin::resolvePeerCodeSigning(creds), expected);
     };
 }
