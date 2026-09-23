@@ -30,9 +30,19 @@ on:
   # against an existing signed tag (Run workflow -> pick the tag as the ref) to
   # exercise the whole chain, release notes included, without pushing a fresh
   # tag. github.ref_name is the tag name on that path too, so every step below
-  # behaves exactly as it does on a tag push; started against a branch instead,
-  # the signature check fails closed, which is the intended outcome.
+  # behaves exactly as it does on a tag push -- except publication: a rehearsal
+  # creates a DRAFT release unless the maintainer explicitly turns dry_run off.
+  # Started against a branch instead, the signature check fails closed, which is
+  # the intended outcome. A dispatch runs this file as it exists at the chosen
+  # ref, and `gh release create` refuses a tag that already has a release, draft
+  # or not, so the rehearsal is for a signed tag that carries this file and has
+  # not been released yet.
   workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Create the release as a draft (rehearsal)'
+        type: boolean
+        default: true
 
 # One run per tag at a time: a re-run racing a still-live earlier run would
 # hand gh release create an already-existing release and fail at the last step.
@@ -180,21 +190,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           REPO: ${{ github.repository }}
+          DRY_RUN: ${{ inputs.dry_run }}
         run: |
           # Mark X.Y.Z-{rc,beta,alpha,…} as pre-release; everything else stable.
           PRERELEASE_FLAG=""
           case "$TAG" in
               *-rc*|*-beta*|*-alpha*|*-pre*) PRERELEASE_FLAG="--prerelease" ;;
           esac
-          # NOTES_ARG must split into two argv entries and PRERELEASE_FLAG
-          # must disappear when empty — deliberately unquoted.
+          # A dispatch rehearsal publishes a DRAFT unless dry_run was
+          # explicitly turned off; a tag push never drafts. Without this the
+          # only way to exercise the chain is a tag that cannot be taken back.
+          DRAFT_FLAG=""
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] && [ "$DRY_RUN" != "false" ]; then
+              DRAFT_FLAG="--draft"
+              echo "::notice::dry_run rehearsal -- creating a draft release"
+          fi
+          # NOTES_ARG must split into two argv entries and PRERELEASE_FLAG and
+          # DRAFT_FLAG must disappear when empty — deliberately unquoted.
           # shellcheck disable=SC2086
           gh release create "$TAG" \
               --repo "$REPO" \
               --title "$TAG" \
               --verify-tag \
               $NOTES_ARG \
-              $PRERELEASE_FLAG
+              $PRERELEASE_FLAG \
+              $DRAFT_FLAG
 
       - name: The published release is the set this repository declares
         # The release this job just created, read back. A draft is judged too,
