@@ -121,8 +121,8 @@ TEST(SecCodeAuthorizer, RequiredAppGroupBindsTheAllowList)
     SecCodeAuthorizer::Policy policy;
     policy.trustTierSigningIds = {"org.librescrs.LibreMac"};
     policy.requiredAppGroup = "group.org.librescrs.LibreMac";
-    // Matching signing id but WITHOUT the app group -> denied (a self-signed
-    // binary could claim the id but not our Team-ID-bound group).
+    // Matching signing id but WITHOUT the app group -> denied. The rule, not a
+    // boundary: a self-signed binary can claim the group too.
     auto without = make(policy, SecCodeAuthorizer::PeerAuth{std::string("org.librescrs.LibreMac"), {}});
     EXPECT_EQ(without.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Denied);
     // With the app group -> allowed.

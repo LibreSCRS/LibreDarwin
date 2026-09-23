@@ -3,8 +3,9 @@
 //
 // The shared expected-peer policy both ends of the private prompter socket
 // enforce (and the SecCodeAuthorizer's allow-list builds on): signing-id match
-// alone is NEVER enough — the App-Group entitlement (Team-ID-bound) must also
-// be present, and an unsigned/unidentifiable peer always fails closed. The
+// alone is NEVER enough — the App-Group entitlement must also be present, and
+// an unsigned/unidentifiable peer always fails closed. Both are claimed by the
+// peer's own signature, so this is the policy, not an authentication. The
 // real SecTask resolution is exercised by the hardware gate (this test binary
 // has no meaningful code-signing identity).
 #include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
@@ -39,8 +40,8 @@ TEST(PeerCodeSigning, WrongSigningIdFailsEvenWithTheAppGroup)
 
 TEST(PeerCodeSigning, SigningIdAloneWithoutTheAppGroupFails)
 {
-    // A bare signing identifier is claimable by an ad-hoc-signed binary; the
-    // Team-ID-bound app group is what makes the match an authentication.
+    // The policy requires both claims. Neither authenticates: an ad-hoc-signed
+    // binary can claim the app group as easily as the signing identifier.
     PeerCodeSigning peer{std::string(kAgentSigningId), {}};
     EXPECT_FALSE(matchesExpectedPeer(peer, kExpectedAgent));
 }
