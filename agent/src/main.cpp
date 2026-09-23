@@ -82,6 +82,10 @@ std::optional<Arguments> parseArguments(std::span<char* const> args)
             Agent::log::error("--plugin-dir needs a path (usage: librescrs-agent [--plugin-dir <path>])");
             return std::nullopt;
         }
+        if (!parsed.pluginDir.empty()) {
+            Agent::log::error("--plugin-dir given twice (usage: librescrs-agent [--plugin-dir <path>])");
+            return std::nullopt;
+        }
         parsed.pluginDir = args[++i];
     }
     return parsed;
