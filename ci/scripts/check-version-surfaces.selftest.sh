@@ -227,6 +227,87 @@ rm "$d/pkg/metadata.json"
 run "case_21 summary counts the templated surface" 0 "$d"
 says "case_21 summary names how many were read from a template" '1 read the number'
 
+# --- packaging metadata ------------------------------------------------------
+# A package fixture: VERSION 5.0.0, a Debian changelog, an RPM spec, and a shell
+# helper the packaging scripts source to name what they build.
+pkgfixture() {   # pkgfixture <dir> <deb-version> <rpm-version> <helper-prints>
+    d=$1
+    mkdir -p "$d/ci" "$d/packaging/debian" "$d/packaging/rpm" "$d/scripts"
+    printf '5.0.0\n' > "$d/VERSION"
+    printf 'fixture (%s) unstable; urgency=medium\n\n  * entry\n\n -- A <a@b.c>  Mon, 01 Jan 2026 00:00:00 +0000\n' \
+        "$2" > "$d/packaging/debian/changelog"
+    printf 'Name:           fixture\nVersion:        %s\nRelease:        1%%{?dist}\n' "$3" \
+        > "$d/packaging/rpm/fixture.spec"
+    printf 'project_version() { printf %%s "%s"; }\n' "$4" > "$d/scripts/project-version.sh"
+    printf '# <kind> <path>\ndebian-changelog     packaging/debian/changelog\nrpm-spec-version     packaging/rpm/fixture.spec\nshell-version-helper scripts/project-version.sh\n' \
+        > "$d/ci/version-surfaces.txt"
+}
+
+# case_22 -- the Debian changelog names another upstream version: dpkg would
+# build a package labelled one version around a tree that says another.
+d=$work/case_22; pkgfixture "$d" 4.2.0-1 5.0.0 5.0.0
+run "case_22 debian changelog states another version" 1 "$d"
+says "case_22 the message names both versions" "packaging/debian/changelog (Debian version) states '4.2.0' but VERSION says '5.0.0'"
+says "case_22 the message names the generator" "regenerate packaging/debian/changelog with ci/scripts/changelog-to-debian.sh"
+
+# case_23 -- the same version with a Debian revision agrees: the revision is
+# the packaging's own counter, not the upstream version.
+d=$work/case_23; pkgfixture "$d" 5.0.0-1 5.0.0 5.0.0
+run "case_23 debian changelog 5.0.0-1 agrees with 5.0.0" 0 "$d"
+says "case_23 all three packaging surfaces were counted" 'all 3 version surface(s) state 5.0.0'
+
+# case_24 -- the RPM spec names another version.
+d=$work/case_24; pkgfixture "$d" 5.0.0-1 4.2.0 5.0.0
+run "case_24 rpm spec Version: states another version" 1 "$d"
+says "case_24 the message names the spec" "packaging/rpm/fixture.spec (Version:) states '4.2.0'"
+
+# case_25 -- the RPM spec agrees (covered by case_23 too, asserted on its own
+# so a kind that ignores the spec cannot hide behind the Debian row).
+d=$work/case_25; pkgfixture "$d" 5.0.0-1 5.0.0 5.0.0
+printf '# <kind> <path>\nrpm-spec-version     packaging/rpm/fixture.spec\n' > "$d/ci/version-surfaces.txt"
+run "case_25 rpm spec Version: agrees" 0 "$d"
+
+# case_26 -- the shell helper names the artefacts; an older number there is an
+# AppImage and a DMG labelled with the previous release.
+d=$work/case_26; pkgfixture "$d" 5.0.0-1 5.0.0 4.2.0
+run "case_26 shell helper prints an older version" 1 "$d"
+says "case_26 the message names the helper" "scripts/project-version.sh (project_version) states '4.2.0'"
+
+# case_27 -- a list naming none of these rows at all is the vacuum case for the
+# new kinds as much as for the old ones.
+d=$work/case_27; pkgfixture "$d" 5.0.0-1 5.0.0 5.0.0
+printf '# <kind> <path>\n' > "$d/ci/version-surfaces.txt"
+run "case_27 a packaging list with no rows is undecidable" 2 "$d"
+
+# case_28 -- the helper must be asked with an ABSOLUTE root, the way both of
+# its production callers ask it. Its guard compares the argument with git's
+# toplevel, so a relative "." never matches, the newest tag is skipped and the
+# VERSION file answers: the right number for the wrong reason. Here the tag
+# says 4.2.0 and VERSION 5.0.0, so only an absolute call sees the defect.
+d=$work/case_28; pkgfixture "$d" 5.0.0-1 5.0.0 5.0.0
+cat > "$d/scripts/project-version.sh" <<'SH'
+project_version() {
+    root="$1"; version=""
+    toplevel="$(git -C "$root" rev-parse --show-toplevel 2>/dev/null || true)"
+    if [ -n "$toplevel" ] && [ "$toplevel" = "$root" ]; then
+        version="$(git -C "$root" describe --tags --abbrev=0 2>/dev/null || true)"
+    fi
+    if [ -z "$version" ] && [ -r "$root/VERSION" ]; then
+        version="$(head -n1 "$root/VERSION" | tr -d '[:space:]')"
+    fi
+    printf '%s' "${version:-dev}"
+}
+SH
+printf '# <kind> <path>\nshell-version-helper scripts/project-version.sh\n' > "$d/ci/version-surfaces.txt"
+( cd "$d" && git init -q . && git add -A \
+    && git -c user.name=t -c user.email=t@t -c commit.gpgSign=false commit -q -m t \
+    && git -c tag.gpgSign=false tag 4.2.0 ) || { echo "  FAIL  case_28 could not build the git fixture"; fails=$((fails + 1)); }
+relative=$( cd "$d" && sh -c '. scripts/project-version.sh; project_version .' )
+[ "$relative" = 5.0.0 ] \
+    || { printf '  FAIL  %-58s (relative call printed %s)\n' "case_28 fixture: the relative call hides the tag" "$relative"; fails=$((fails + 1)); }
+run "case_28 the helper is judged through an absolute root" 1 "$d"
+says "case_28 the older tag is what it reports" "states '4.2.0'"
+
 if [ "$fails" -eq 0 ]; then
     echo "check-version-surfaces selftest: all cases passed"
     printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"

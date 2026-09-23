@@ -14,6 +14,11 @@
 # The surfaces are listed in ci/version-surfaces.txt so this script stays
 # byte-identical across repos, the way check-release-lockstep.sh is.
 #
+# Three kinds read packaging rather than the build: the Debian changelog and
+# the RPM spec, which label the packages, and a shell helper the packaging
+# scripts source to name the artefacts they build. Nothing else compared any
+# of them with VERSION.
+#
 # Two surface kinds accept a configure_file() template in place of a literal,
 # and they differ in how strict that acceptance is. plasma-metadata is listed
 # as the plain metadata.json; when that file is absent the script reads
@@ -191,6 +196,60 @@ check_yaml_short_version() {
     fi
 }
 
+# --- kind: debian-changelog -------------------------------------------------
+# The first entry of a Debian changelog names the version dpkg stamps on every
+# package built from the tree. Only the upstream part is compared: a leading
+# epoch ("1:") and the trailing Debian revision ("-1") belong to the packaging,
+# not to the release.
+check_debian_changelog() {
+    f=$1
+    [ -f "$f" ] || undecidable "$f does not exist"
+    got="$(head -n1 "$f" | sed -n 's/^[^ ]* (\([^)]*\)).*/\1/p')"
+    if [ -z "$got" ]; then
+        echo "::error::$f does not open with a '<source> (<version>) ...' entry."
+        FAIL=1
+        return
+    fi
+    got=${got#*:}
+    got=${got%-*}
+    report "$f (Debian version)" "$got"
+    # The file is generated, never edited by hand: say which generator.
+    [ "$got" = "$WANT" ] \
+        || echo "::error::regenerate $f with ci/scripts/changelog-to-debian.sh <source-package> $f"
+}
+
+# --- kind: rpm-spec-version --------------------------------------------------
+# The spec's Version: tag, which rpmbuild stamps on the package name.
+check_rpm_spec_version() {
+    f=$1
+    [ -f "$f" ] || undecidable "$f does not exist"
+    got="$(sed -n 's/^Version:[[:space:]]*\([^[:space:]]*\).*/\1/p' "$f" | head -n1)"
+    if [ -z "$got" ]; then
+        echo "::error::$f has no Version: tag."
+        FAIL=1
+    else
+        report "$f (Version:)" "$got"
+    fi
+}
+
+# --- kind: shell-version-helper ----------------------------------------------
+# A helper other scripts source to name the artefacts they build: it defines
+# project_version <root>. It is asked with the ABSOLUTE, physical root, as its
+# production callers ask it. That is not style: a helper that consults git only
+# when its argument equals git's toplevel never matches a relative ".", falls
+# through to the VERSION file, and prints the right number for the wrong
+# reason -- the check would then be measuring the guard, not the surface.
+check_shell_version_helper() {
+    f=$1
+    [ -f "$f" ] || undecidable "$f does not exist"
+    command -v bash >/dev/null 2>&1 || undecidable "no bash on PATH -- cannot run $f"
+    root="$(cd . && pwd -P)"
+    got="$(bash -c '. "$1" && project_version "$2"' _ "$root/$f" "$root" 2>"$WORK/helper.err")" \
+        || { sed 's/^/    /' "$WORK/helper.err" >&2; undecidable "$f could not be sourced, or project_version failed"; }
+    [ -n "$got" ] || undecidable "$f: project_version printed nothing"
+    report "$f (project_version)" "$got"
+}
+
 # Pre-scan for the surface that measures what the build stamps. A template is
 # only judgeable through that one, and the list is read in file order, so a
 # cmake-project row standing AFTER the rows it vouches for would otherwise be
@@ -213,6 +272,9 @@ while IFS= read -r line; do
         plasma-metadata)     check_plasma_metadata "$path" ;;
         plist-short-version) check_plist_short_version "$path" ;;
         yaml-short-version)  check_yaml_short_version "$path" ;;
+        debian-changelog)    check_debian_changelog "$path" ;;
+        rpm-spec-version)    check_rpm_spec_version "$path" ;;
+        shell-version-helper) check_shell_version_helper "$path" ;;
         *) undecidable "$SURFACE_LIST: unknown surface kind '$kind'" ;;
     esac
 done < "$SURFACE_LIST"
