@@ -24,16 +24,21 @@ namespace LibreSCRS::Darwin {
 // constructs it with empty allow-lists, so the posture below runs entirely on
 // its defaults.
 //
-// Posture: the three default actions (configure / sign /
-// pkcs11.login) are DEFAULT-ALLOW (the signing PIN is the human-presence proof;
-// the core rate-limiter caps abuse) unless a site allow-list is configured. The
-// trust tier (configure.trust) is allow-list-gated (empty list => denied to all;
-// trust config is then file-seeded only, mirroring the Linux DefaultAuthorizer
-// fallback). Unknown actions are denied. A peer that cannot be identified is
-// denied (fail closed). Where an allow-list applies, an optional required
-// app-group entitlement binds it to our Team ID (Apple provisions app groups per
-// Team ID), so a self-signed binary cannot claim a listed signing id + our group
-// -- stronger than a signing-identifier string alone.
+// Posture: the four default actions (configure / sign / pkcs11.login /
+// credentials.manage) are DEFAULT-ALLOW (the signing PIN is the human-presence
+// proof; the core rate-limiter caps abuse) unless a site allow-list is
+// configured. The trust tier (configure.trust) with an empty list adds no
+// narrowing: the boundary there is the device-owner confirmation the frontend
+// requires before it applies the write. Unknown actions are denied. A peer
+// that cannot be identified is denied (fail closed).
+//
+// What an allow-list proves, and what it does not: the signing identifier and
+// the app-group entitlement are both CLAIMED by the peer's own signature, and
+// an ad-hoc signed binary can claim both. Until the peer's designated
+// requirement is checked against our Team ID, an allow-list narrows honest
+// callers and stops no one who signs a binary to match. Every allow-list still
+// requires the app-group entitlement, and fails closed without it, because that
+// is the most the public SecTask path can ask for.
 //
 // The per-caller first-op rate limit is NOT here: it is the neutral core's RateLimiter,
 // keyed on the CallerToken the transport mints. This gate does identity only.
@@ -54,13 +59,15 @@ public:
     struct Policy
     {
         // Signing identifiers allowed to change TRUST-tier config
-        // (TsaUrls/TslSources). Empty => nobody (file-seeded trust only).
+        // (TsaUrls/TslSources). Empty => no narrowing; the device-owner
+        // confirmation the frontend requires is the boundary.
         std::vector<std::string> trustTierSigningIds;
         // Optional site allow-list for the DEFAULT actions. Empty => default-allow
         // (PIN-as-consent). Non-empty => restrict to these signing identifiers.
         std::vector<std::string> allowedSigningIds;
         // If set, every allow-list decision ALSO requires the peer to carry this
-        // app-group entitlement (Team-ID-bound). e.g. "group.org.librescrs.LibreMac".
+        // app-group entitlement -- claimed by the peer's signature, like the
+        // signing identifier. e.g. "group.org.librescrs.LibreMac".
         std::optional<std::string> requiredAppGroup;
     };
 

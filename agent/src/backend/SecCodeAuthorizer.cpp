@@ -51,17 +51,16 @@ Agent::AuthorizationOutcome SecCodeAuthorizer::authorize(std::string_view action
     }
     const PeerAuth peer = m_authResolver(*creds);
 
-    // A bare signing-identifier match is claimable by an ad-hoc-signed binary, so
-    // it is NOT an authentication boundary on its own. An allow-list is therefore
-    // honoured ONLY when it is also bound to the app-group entitlement (Apple
-    // provisions app groups per Team ID). If an allow-list is configured without a
-    // requiredAppGroup, the gate cannot be a real boundary -> fail closed.
-    // NOTE: the fully-robust bind is SecCode validity vs a designated
-    // requirement (anchor apple + Team OU), which needs the SPI
-    // SecCodeCreateWithAuditToken; the public SecTask path reports claimed identity
-    // only. The app-group requirement is the strongest PUBLIC-API hardening; a
-    // determined ad-hoc spoofer remains a documented residual (default posture —
-    // empty allow-list + PIN-as-consent — is unaffected).
+    // A signing-identifier match is claimable by an ad-hoc-signed binary, and so
+    // is the app-group entitlement: the SecTask path reports what the peer's own
+    // signature claims. An allow-list is honoured ONLY together with the
+    // app-group requirement, and one configured without a requiredAppGroup fails
+    // closed. What neither proves is who signed the peer. That takes SecCode
+    // validity against a designated requirement (anchor apple + our Team ID as
+    // the leaf OU); SecCodeCopyGuestWithAttributes with kSecGuestAttributeAudit
+    // is the public path to the peer's SecCode. Until that check exists a
+    // determined ad-hoc spoofer is a documented residual; the default posture --
+    // empty allow-lists, PIN-as-consent -- does not rest on it.
     const auto signingIdAllowed = [&](const std::vector<std::string>& list) {
         if (!m_policy.requiredAppGroup) {
             log::warnf("authz: denying {} - allow-list configured without a requiredAppGroup binding", actionId);
@@ -75,9 +74,10 @@ Agent::AuthorizationOutcome SecCodeAuthorizer::authorize(std::string_view action
         // An empty list means no narrowing is configured, NOT "deny
         // everything": the boundary for this tier is the human confirmation
         // the frontend requires before it applies the write. A configured list
-        // is an ADDITIONAL narrowing on top of that, for the day a Team ID
-        // exists. And-ing the two unconditionally would leave the tier sealed
-        // exactly as before, only after bothering the user first.
+        // is an ADDITIONAL narrowing on top of that, for the day the peer's
+        // designated requirement is checked against a Team ID. And-ing the two
+        // unconditionally would leave the tier sealed exactly as before, only
+        // after bothering the user first.
         if (m_policy.trustTierSigningIds.empty()) {
             return Agent::AuthorizationOutcome::Granted;
         }

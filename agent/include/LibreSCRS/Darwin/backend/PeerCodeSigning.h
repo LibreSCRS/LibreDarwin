@@ -21,10 +21,12 @@ struct PeerCodeSigning
 };
 
 // The identity ONE specific trusted peer must present: its code-signing
-// identifier plus an App-Group entitlement. Apple provisions app groups per
-// Team ID, so the group requirement binds the (claimable) signing identifier
-// to our Team ID — the strongest PUBLIC-API binding; the SecCode/designated-
-// requirement residual is documented in SecCodeAuthorizer.cpp.
+// identifier plus an App-Group entitlement. Both are CLAIMED by the peer's own
+// signature, and an ad-hoc signed binary can claim both; only the peer's
+// designated requirement checked against our Team ID says who signed it. Until
+// that check exists, a match keeps our binaries from talking to a stranger by
+// accident, not to one that signs itself to match (residual documented in
+// SecCodeAuthorizer.cpp).
 struct ExpectedPeerIdentity
 {
     std::string signingId;

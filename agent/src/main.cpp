@@ -165,8 +165,10 @@ int main(int argc, char** argv)
 
     // [2] Interface impls the core borrows: the SecCode identity gate + the
     // agent-owned prompter client. Default-allow posture (PIN-as-consent); the
-    // trust tier is allow-list-gated (empty => file-seeded trust only), bound to
-    // our app group so a self-signed peer cannot claim a listed signing id.
+    // trust tier rests on the device-owner confirmation the frontend requires,
+    // and the empty lists add no narrowing. The app group below is what an
+    // allow-list would also require -- claimable by a self-signed peer too, so
+    // it is hygiene, not a boundary (SecCodeAuthorizer.h says what it proves).
     LibreSCRS::Darwin::SecCodeAuthorizer authorizer(
         [&transport](const Agent::CallerToken& caller) { return transport->credentialsFor(caller); },
         LibreSCRS::Darwin::SecCodeAuthorizer::Policy{
