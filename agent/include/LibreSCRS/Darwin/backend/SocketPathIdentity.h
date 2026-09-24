@@ -41,4 +41,33 @@ struct SocketPathIdentity
     }
 };
 
+// The listening socket a fd refers to, by the kernel socket object fstat()
+// reports (st_ino of a socket names the socket, see above). Taken when a
+// server asks GCD to cancel its accept source and checked again when the
+// cancel handler runs: the listen fd must still be open, and still this
+// listener, at both points -- closing it anywhere but the cancel handler
+// breaks that, whether the handle was emptied or the number closed (and
+// perhaps reused for another socket) behind its back.
+struct ListenSocketObject
+{
+    int fd{-1};
+    ino_t ino{0};
+
+    [[nodiscard]] static std::optional<ListenSocketObject> of(int fd) noexcept
+    {
+        struct stat st{};
+        // (No SO_ACCEPTCONN probe: macOS getsockopt refuses it, ENOPROTOOPT.)
+        if (fd < 0 || ::fstat(fd, &st) != 0 || !S_ISSOCK(st.st_mode)) {
+            return std::nullopt;
+        }
+        return ListenSocketObject{fd, st.st_ino};
+    }
+
+    [[nodiscard]] bool stillHeldBy(int currentFd) const noexcept
+    {
+        const auto now = of(currentFd);
+        return currentFd == fd && now && now->ino == ino;
+    }
+};
+
 } // namespace LibreSCRS::Darwin

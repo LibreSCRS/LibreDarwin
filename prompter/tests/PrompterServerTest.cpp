@@ -29,6 +29,7 @@
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -816,6 +817,7 @@ TEST(PrompterServer, RebindsWhenTheSocketPathIsReplaced)
         warnings.push_back(line);
     });
     server.setPathGuardIntervalForTest(std::chrono::milliseconds(20));
+    const auto closedAtCancel = server.closedListenFdAtCancelForTest();
     ASSERT_TRUE(server.start().has_value());
 
     int replacements = 0;
@@ -859,7 +861,44 @@ TEST(PrompterServer, RebindsWhenTheSocketPathIsReplaced)
     EXPECT_GE(settled, 2);
     EXPECT_LE(settled, replacements);
     server.stop();
+    // Every re-bind and stop() cancelled an accept source; each cancel handler
+    // must have found the listen fd still open.
+    EXPECT_EQ(closedAtCancel->load(), 0u) << "the listen fd was closed outside its cancel handler";
     std::filesystem::remove(path);
+}
+
+// stop() removes the socket file only while it is still the one this process
+// bound, and its own cancel finds the listen fd still open.
+TEST(PrompterServer, StopUnlinksOnlyItsOwnSocketFile)
+{
+    const auto makeServer = [](const std::string& path) {
+        return std::make_unique<PrompterServer>(
+            path, rejectSingleProvider(), rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+            rejectResetHandler(), [](const PeerCredentials&) { return true; });
+    };
+    {
+        const std::string path = tmpSocketPath("psd");
+        auto server = makeServer(path);
+        ASSERT_TRUE(server->start().has_value());
+        server->stop();
+        EXPECT_FALSE(SocketPathIdentity::of(path).has_value()) << "stop() left its own socket file behind";
+        EXPECT_EQ(server->closedListenFdAtCancelForTest()->load(), 0u)
+            << "the listen fd was closed outside its cancel handler";
+    }
+    {
+        const std::string path = tmpSocketPath("psd");
+        auto server = makeServer(path); // production 10 s guard: no re-bind in time
+        ASSERT_TRUE(server->start().has_value());
+        const int impostor = bindImpostor(path);
+        const auto impostorId = SocketPathIdentity::of(path);
+        ASSERT_TRUE(impostorId.has_value());
+        server->stop();
+        EXPECT_TRUE(impostorId->stillNames(path)) << "stop() unlinked a socket file another process holds";
+        EXPECT_EQ(server->closedListenFdAtCancelForTest()->load(), 0u)
+            << "the listen fd was closed outside its cancel handler";
+        ::close(impostor);
+        std::filesystem::remove(path);
+    }
 }
 
 } // namespace

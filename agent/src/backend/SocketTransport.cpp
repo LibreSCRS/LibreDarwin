@@ -258,9 +258,7 @@ SocketTransport::~SocketTransport()
           m_pathGuardTimer = nullptr;
       }
       if (m_acceptSource != nullptr) {
-          dispatch_source_cancel(m_acceptSource); // its cancel handler closes the listen fd
-          dispatch_release(m_acceptSource);
-          m_acceptSource = nullptr;
+          cancelAcceptSource(); // its cancel handler closes the listen fd
       }
       for (auto& [id, conn] : m_connections) {
           if (conn->readSource != nullptr) {
@@ -283,7 +281,9 @@ SocketTransport::~SocketTransport()
     dispatch_release(m_acceptTeardown);
     m_acceptTeardown = nullptr;
 
-    if (m_ownsSocketFile && !m_socketPath.empty()) {
+    // Only the file this process bound: after a replacement that was not yet
+    // (or could not be) answered, the path is someone else's.
+    if (m_ownsSocketFile && m_listenIdentity && m_listenIdentity->stillNames(m_socketPath)) {
         ::unlink(m_socketPath.c_str());
     }
     dispatch_release(m_queue);
@@ -343,16 +343,31 @@ void SocketTransport::checkSocketPath()
     }
     log::warn("socket path was replaced; re-binding");
     m_rebindPending = true;
-    dispatch_source_cancel(m_acceptSource); // cancel handler: close, then bind again
+    cancelAcceptSource(); // cancel handler: close, then bind again
+}
+
+void SocketTransport::cancelAcceptSource()
+{
+    m_cancelledListener = ListenSocketObject::of(m_listenFd.get());
+    dispatch_source_cancel(m_acceptSource);
     dispatch_release(m_acceptSource);
     m_acceptSource = nullptr;
 }
 
 void SocketTransport::onAcceptSourceCancelled()
 {
+    // The fd must still be open, and still this listener, at both ends of the
+    // cancellation; anything else means it was closed outside this handler.
+    if (!m_cancelledListener || !m_cancelledListener->stillHeldBy(m_listenFd.get())) {
+        m_closedListenFdAtCancel->fetch_add(1, std::memory_order_relaxed);
+    }
+    m_cancelledListener.reset();
     m_listenFd.reset();
+    if (m_stopping) {
+        return; // keep the identity: teardown unlinks the path only if it is still ours
+    }
     m_listenIdentity.reset();
-    if (m_rebindPending && !m_stopping) {
+    if (m_rebindPending) {
         rebindListenSocket();
     }
 }

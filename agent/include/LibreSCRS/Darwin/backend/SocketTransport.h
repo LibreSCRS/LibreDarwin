@@ -12,6 +12,7 @@
 
 #include <dispatch/dispatch.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <deque>
@@ -179,6 +180,15 @@ public:
     // keeps 10 s). Takes effect at once, from any thread but the loop.
     void setPathGuardIntervalForTest(std::chrono::microseconds interval);
 
+    // Test hook: how many accept-source cancel handlers found the listen fd
+    // already closed (or no longer this listener). Must stay 0: the fd may
+    // close only inside that handler. Shared so a test can read it after the
+    // transport is destroyed (teardown cancels the source too).
+    [[nodiscard]] std::shared_ptr<const std::atomic<std::uint32_t>> closedListenFdAtCancelForTest() const noexcept
+    {
+        return m_closedListenFdAtCancel;
+    }
+
     // --- AgentTransport ----------------------------------------------------
     void publishReader(const Agent::ReaderState& reader) override;
     void publishCard(const Agent::CardState& card) override;
@@ -244,6 +254,7 @@ private:
     // the listen fd and binds again. Loop thread.
     void installPathGuard();
     void checkSocketPath();
+    void cancelAcceptSource();
     void onAcceptSourceCancelled();
     void rebindListenSocket();
     void onAcceptReady();
@@ -278,6 +289,11 @@ private:
     std::chrono::microseconds m_pathGuardInterval{std::chrono::seconds(10)};
     bool m_rebindPending{false}; // replacement seen; bind again until it succeeds
     bool m_stopping{false};      // destructor started: cancel handlers must not bind
+    // The listener as it was when its accept source's cancel was requested;
+    // nullopt there already means it had been closed early.
+    std::optional<ListenSocketObject> m_cancelledListener;
+    std::shared_ptr<std::atomic<std::uint32_t>> m_closedListenFdAtCancel{
+        std::make_shared<std::atomic<std::uint32_t>>(0)};
 
     RequestSink m_sink;
     bool m_loopQuiesced{false}; // set by quiesceLoop(); drops late posted blocks

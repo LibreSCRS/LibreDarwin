@@ -224,16 +224,31 @@ void PrompterServer::checkSocketPath()
     }
     warn("socket path was replaced; re-binding");
     m_rebindPending = true;
-    dispatch_source_cancel(m_acceptSource); // cancel handler: close, then bind again
+    cancelAcceptSource(); // cancel handler: close, then bind again
+}
+
+void PrompterServer::cancelAcceptSource()
+{
+    m_cancelledListener = ListenSocketObject::of(m_listen.get());
+    dispatch_source_cancel(m_acceptSource);
     dispatch_release(m_acceptSource);
     m_acceptSource = nullptr;
 }
 
 void PrompterServer::onAcceptSourceCancelled()
 {
+    // The fd must still be open, and still this listener, at both ends of the
+    // cancellation; anything else means it was closed outside this handler.
+    if (!m_cancelledListener || !m_cancelledListener->stillHeldBy(m_listen.get())) {
+        m_closedListenFdAtCancel->fetch_add(1, std::memory_order_relaxed);
+    }
+    m_cancelledListener.reset();
     m_listen.reset();
+    if (m_stopping) {
+        return; // keep the identity: stop() unlinks the path only if it is still ours
+    }
     m_listenIdentity.reset();
-    if (m_rebindPending && !m_stopping) {
+    if (m_rebindPending) {
         rebindListenSocket();
     }
 }
@@ -280,9 +295,7 @@ void PrompterServer::stop() noexcept
           m_pathGuardTimer = nullptr;
       }
       if (m_acceptSource != nullptr) {
-          dispatch_source_cancel(m_acceptSource);
-          dispatch_release(m_acceptSource);
-          m_acceptSource = nullptr;
+          cancelAcceptSource(); // its cancel handler closes the listen fd
       }
       for (auto& [id, conn] : m_connections) {
           if (conn->readSource != nullptr) {
@@ -294,9 +307,12 @@ void PrompterServer::stop() noexcept
       m_connections.clear();
     });
     dispatch_group_wait(m_acceptTeardown, DISPATCH_TIME_FOREVER);
-    if (!m_socketPath.empty()) {
+    // Only the file this process bound: after a replacement that was not yet
+    // (or could not be) answered, the path is someone else's.
+    if (m_listenIdentity && m_listenIdentity->stillNames(m_socketPath)) {
         ::unlink(m_socketPath.c_str());
     }
+    m_listenIdentity.reset();
 }
 
 void PrompterServer::onAcceptReady()

@@ -883,6 +883,7 @@ TEST(SocketTransport, RebindsWhenTheSocketPathIsReplaced)
     ASSERT_TRUE(created.has_value()) << (created ? "" : created.error());
     auto tr = std::move(*created);
     tr->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
+    const auto closedAtCancel = tr->closedListenFdAtCancelForTest();
 
     Latch<std::string> sink;
     tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
@@ -924,7 +925,38 @@ TEST(SocketTransport, RebindsWhenTheSocketPathIsReplaced)
     EXPECT_LE(settled, static_cast<std::size_t>(replacements));
 
     tr.reset();
+    // Every re-bind and the teardown cancelled an accept source; each cancel
+    // handler must have found the listen fd still open.
+    EXPECT_EQ(closedAtCancel->load(), 0u) << "the listen fd was closed outside its cancel handler";
     std::filesystem::remove(path);
+}
+
+// Shutdown removes the socket file only while it is still the one this
+// process bound: a path someone else holds by then is theirs to keep. And the
+// teardown's own cancel finds the listen fd still open.
+TEST(SocketTransport, ShutdownUnlinksOnlyItsOwnSocketFile)
+{
+    {
+        const std::string path = tmpSocketPath("sd");
+        auto tr = std::move(*SocketTransport::create(path));
+        const auto closedAtCancel = tr->closedListenFdAtCancelForTest();
+        tr.reset();
+        EXPECT_FALSE(SocketPathIdentity::of(path).has_value()) << "shutdown left its own socket file behind";
+        EXPECT_EQ(closedAtCancel->load(), 0u) << "the listen fd was closed outside its cancel handler";
+    }
+    {
+        const std::string path = tmpSocketPath("sd");
+        auto tr = std::move(*SocketTransport::create(path)); // production 10 s guard: no re-bind in time
+        const auto closedAtCancel = tr->closedListenFdAtCancelForTest();
+        const int impostor = bindImpostor(path);
+        const auto impostorId = SocketPathIdentity::of(path);
+        ASSERT_TRUE(impostorId.has_value());
+        tr.reset();
+        EXPECT_TRUE(impostorId->stillNames(path)) << "shutdown unlinked a socket file another process holds";
+        EXPECT_EQ(closedAtCancel->load(), 0u) << "the listen fd was closed outside its cancel handler";
+        ::close(impostor);
+        std::filesystem::remove(path);
+    }
 }
 
 // A launchd-activated socket is launchd's file: the agent must not bind over
