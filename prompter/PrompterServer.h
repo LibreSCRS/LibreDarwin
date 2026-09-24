@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
+#include <LibreSCRS/Darwin/backend/SocketPathIdentity.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
 #include <LibreSCRS/Agent/wire/FrameReassembler.h>
@@ -9,11 +10,13 @@
 
 #include <dispatch/dispatch.h>
 
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace LibreSCRS::Darwin {
@@ -93,6 +96,18 @@ public:
     // Idempotent; start() may be called again afterwards.
     void stop() noexcept;
 
+    // Where the server reports what it did on its own (a replaced socket path
+    // and the bind that answers it). Set before start(); unset = silent. The
+    // prompter links no logging facade, so its host supplies one.
+    void setWarn(std::function<void(const std::string&)> warn);
+
+    // Test hook: shorten the replaced-path guard's check interval (production
+    // keeps 10 s). Set before start().
+    void setPathGuardIntervalForTest(std::chrono::microseconds interval) noexcept
+    {
+        m_pathGuardInterval = interval;
+    }
+
 private:
     struct Connection
     {
@@ -109,6 +124,17 @@ private:
     void acceptOne(int connFd);
     void onReadReady(std::uint64_t connId);
     void closeConnection(std::uint64_t connId);
+    // Bind + listen the socket file and record its inode; loop thread or start().
+    [[nodiscard]] std::expected<void, std::string> bindListenSocket();
+    void installAcceptSource();
+    void installPathGuard();
+    // Replaced-path guard: on every accept and on a timer, compare what the
+    // path names with the inode we bound; on a mismatch cancel the accept
+    // source, whose cancel handler closes the listen fd and binds again.
+    void checkSocketPath();
+    void onAcceptSourceCancelled();
+    void rebindListenSocket();
+    void warn(const std::string& message) const;
 
     std::string m_socketPath;
     SecretProvider m_provider;
@@ -121,6 +147,16 @@ private:
     dispatch_queue_t m_queue{nullptr};  // serial: accept + reads + registry
     dispatch_queue_t m_worker{nullptr}; // concurrent: blocking provider calls
     dispatch_source_t m_acceptSource{nullptr};
+    // The listen fd is closed ONLY in the accept source's cancel handler;
+    // every installed accept source enters this group and its cancel handler
+    // leaves it, so stop() waits for the last handler before returning.
+    dispatch_group_t m_acceptTeardown{nullptr};
+    std::optional<SocketPathIdentity> m_listenIdentity; // nullopt while unbound
+    dispatch_source_t m_pathGuardTimer{nullptr};
+    std::chrono::microseconds m_pathGuardInterval{std::chrono::seconds(10)};
+    bool m_rebindPending{false}; // replacement seen; bind again until it succeeds
+    bool m_stopping{false};      // stop() started: cancel handlers must not bind
+    std::function<void(const std::string&)> m_warn;
     std::uint64_t m_nextConnId{1};
     std::map<std::uint64_t, std::unique_ptr<Connection>> m_connections;
     bool m_started{false};

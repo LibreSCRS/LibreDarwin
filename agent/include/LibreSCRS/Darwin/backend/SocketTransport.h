@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
+#include <LibreSCRS/Darwin/backend/SocketPathIdentity.h>
 #include <LibreSCRS/Agent/wire/FrameReassembler.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
@@ -59,6 +60,13 @@ public:
     // source are installed (driven by the process CFRunLoop / dispatch main).
     [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, std::string>
     create(std::string socketPath, std::optional<std::string> socketActivationName = std::nullopt);
+
+    // Serve an already-listening socket whose FILE this process does not own
+    // (the launchd-activated fd create() inherits). launchd owns that path, so
+    // no replaced-path guard is installed and the file is never unlinked here:
+    // binding a fresh socket over it would sever the activation.
+    [[nodiscard]] static std::unique_ptr<SocketTransport> adoptInherited(Agent::Wire::UniqueFd listenFd,
+                                                                         std::string socketPath);
 
     ~SocketTransport() override;
     SocketTransport(const SocketTransport&) = delete;
@@ -167,6 +175,10 @@ public:
         m_firstFrameTimeout = timeout;
     }
 
+    // Test hook: shorten the replaced-path guard's check interval (production
+    // keeps 10 s). Takes effect at once, from any thread but the loop.
+    void setPathGuardIntervalForTest(std::chrono::microseconds interval);
+
     // --- AgentTransport ----------------------------------------------------
     void publishReader(const Agent::ReaderState& reader) override;
     void publishCard(const Agent::CardState& card) override;
@@ -223,9 +235,17 @@ private:
     enum class SendState : std::uint8_t { Sent, WouldBlock, Error };
     [[nodiscard]] static SendState trySendFrame(int fd, OutFrame& f);
 
-    SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath,
-                    bool ownsSocketFile);
+    SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath, bool ownsSocketFile,
+                    std::optional<SocketPathIdentity> listenIdentity);
     void installAcceptSource();
+    // Replaced-path guard (own socket file only): on every accept and on a
+    // timer, compare what the path names with the inode this process bound.
+    // On a mismatch the accept source is cancelled; its cancel handler closes
+    // the listen fd and binds again. Loop thread.
+    void installPathGuard();
+    void checkSocketPath();
+    void onAcceptSourceCancelled();
+    void rebindListenSocket();
     void onAcceptReady();
     void acceptOne(int connFd);
     void onReadReady(std::uint64_t connId);
@@ -247,6 +267,17 @@ private:
     std::string m_socketPath;
     bool m_ownsSocketFile{false};
     dispatch_source_t m_acceptSource{nullptr};
+    // The listen fd is closed ONLY in the accept source's cancel handler
+    // (closing it first races GCD's kevent teardown). Every installed accept
+    // source enters this group and its cancel handler leaves it, so the
+    // destructor waits for the last handler before `this` goes away.
+    dispatch_group_t m_acceptTeardown{nullptr};
+    // Inode the path named right after our bind(); nullopt while unbound.
+    std::optional<SocketPathIdentity> m_listenIdentity;
+    dispatch_source_t m_pathGuardTimer{nullptr};
+    std::chrono::microseconds m_pathGuardInterval{std::chrono::seconds(10)};
+    bool m_rebindPending{false}; // replacement seen; bind again until it succeeds
+    bool m_stopping{false};      // destructor started: cancel handlers must not bind
 
     RequestSink m_sink;
     bool m_loopQuiesced{false}; // set by quiesceLoop(); drops late posted blocks

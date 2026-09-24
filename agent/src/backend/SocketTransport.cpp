@@ -62,7 +62,14 @@ void setNoSigPipe(int fd) noexcept
     ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 }
 
-std::expected<Agent::Wire::UniqueFd, std::string> bindContainerSocket(const std::string& path)
+// A freshly bound listener plus the inode its bind() created at the path.
+struct BoundSocket
+{
+    Agent::Wire::UniqueFd fd;
+    SocketPathIdentity identity;
+};
+
+std::expected<BoundSocket, std::string> bindContainerSocket(const std::string& path)
 {
     if (path.size() >= sizeof(sockaddr_un{}.sun_path)) {
         return std::unexpected(std::format("socket path exceeds sun_path limit ({} bytes)", path.size()));
@@ -92,11 +99,16 @@ std::expected<Agent::Wire::UniqueFd, std::string> bindContainerSocket(const std:
     if (bindRc != 0) {
         return std::unexpected(std::format("bind({}): {}", path, std::strerror(errno)));
     }
+    // Recorded at once, before anything else can replace the file.
+    const auto identity = SocketPathIdentity::of(path);
+    if (!identity) {
+        return std::unexpected(std::format("stat({}) after bind: {}", path, std::strerror(errno)));
+    }
     ::chmod(path.c_str(), 0600);
     if (::listen(fd, 16) != 0) {
         return std::unexpected(std::format("listen(): {}", std::strerror(errno)));
     }
-    return owned;
+    return BoundSocket{std::move(owned), *identity};
 }
 
 std::optional<Agent::Wire::UniqueFd> inheritActivatedSocket(const std::string& name)
@@ -114,8 +126,7 @@ std::optional<Agent::Wire::UniqueFd> inheritActivatedSocket(const std::string& n
         ::close(fds[i]);
     }
     free(fds);
-    makeNonBlockingCloexec(owned.get());
-    return owned;
+    return owned; // adoptInherited makes it non-blocking
 }
 
 } // namespace
@@ -175,36 +186,60 @@ SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
 std::expected<std::unique_ptr<SocketTransport>, std::string>
 SocketTransport::create(std::string socketPath, std::optional<std::string> socketActivationName)
 {
-    Agent::Wire::UniqueFd listenFd;
-    bool ownsSocketFile = true;
-
     if (socketActivationName) {
         if (auto activated = inheritActivatedSocket(*socketActivationName)) {
-            listenFd = std::move(*activated);
-            ownsSocketFile = false; // launchd owns the socket file
+            return adoptInherited(std::move(*activated), std::move(socketPath));
         }
     }
-    if (!listenFd) {
-        auto bound = bindContainerSocket(socketPath);
-        if (!bound) {
-            return std::unexpected(bound.error());
-        }
-        listenFd = std::move(*bound);
+    auto bound = bindContainerSocket(socketPath);
+    if (!bound) {
+        return std::unexpected(bound.error());
     }
 
     dispatch_queue_t queue = dispatch_queue_create("rs.librescrs.agent.transport", DISPATCH_QUEUE_SERIAL);
     // Private ctor; make_unique cannot see it.
     std::unique_ptr<SocketTransport> t(
-        new SocketTransport(queue, std::move(listenFd), std::move(socketPath), ownsSocketFile));
-    t->installAcceptSource();
+        new SocketTransport(queue, std::move(bound->fd), std::move(socketPath), true, bound->identity));
+    SocketTransport* raw = t.get();
+    dispatch_sync(raw->m_queue, ^{
+      raw->installAcceptSource();
+      raw->installPathGuard(); // our own file: watch it
+    });
+    return t;
+}
+
+std::unique_ptr<SocketTransport> SocketTransport::adoptInherited(Agent::Wire::UniqueFd listenFd, std::string socketPath)
+{
+    // The accept handler drains until EAGAIN; a blocking fd would park the loop.
+    makeNonBlockingCloexec(listenFd.get());
+    dispatch_queue_t queue = dispatch_queue_create("rs.librescrs.agent.transport", DISPATCH_QUEUE_SERIAL);
+    // launchd owns the file: no guard (see the header).
+    std::unique_ptr<SocketTransport> t(
+        new SocketTransport(queue, std::move(listenFd), std::move(socketPath), false, std::nullopt));
+    SocketTransport* raw = t.get();
+    dispatch_sync(raw->m_queue, ^{
+      raw->installAcceptSource();
+    });
     return t;
 }
 
 SocketTransport::SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath,
-                                 bool ownsSocketFile)
+                                 bool ownsSocketFile, std::optional<SocketPathIdentity> listenIdentity)
     : m_queue(queue), m_listenFd(std::move(listenFd)), m_socketPath(std::move(socketPath)),
-      m_ownsSocketFile(ownsSocketFile)
+      m_ownsSocketFile(ownsSocketFile), m_acceptTeardown(dispatch_group_create()), m_listenIdentity(listenIdentity)
 {}
+
+void SocketTransport::setPathGuardIntervalForTest(std::chrono::microseconds interval)
+{
+    dispatch_sync(m_queue, ^{
+      m_pathGuardInterval = interval;
+      if (m_pathGuardTimer != nullptr) {
+          const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(interval).count();
+          dispatch_source_set_timer(m_pathGuardTimer, dispatch_time(DISPATCH_TIME_NOW, ns),
+                                    static_cast<std::uint64_t>(ns), static_cast<std::uint64_t>(ns / 10));
+      }
+    });
+}
 
 SocketTransport::~SocketTransport()
 {
@@ -216,8 +251,14 @@ SocketTransport::~SocketTransport()
     // from within a loop handler (the daemon destroys after stopping the run
     // loop; tests destroy from the main thread) — that would deadlock.
     dispatch_sync(m_queue, ^{
+      m_stopping = true; // a pending accept-source cancel handler must not bind again
+      if (m_pathGuardTimer != nullptr) {
+          dispatch_source_cancel(m_pathGuardTimer);
+          dispatch_release(m_pathGuardTimer);
+          m_pathGuardTimer = nullptr;
+      }
       if (m_acceptSource != nullptr) {
-          dispatch_source_cancel(m_acceptSource);
+          dispatch_source_cancel(m_acceptSource); // its cancel handler closes the listen fd
           dispatch_release(m_acceptSource);
           m_acceptSource = nullptr;
       }
@@ -236,6 +277,11 @@ SocketTransport::~SocketTransport()
       }
       m_connections.clear();
     });
+    // Every accept source's cancel handler touches `this`; wait for the last
+    // one (including one a replaced-path cancel left in flight).
+    dispatch_group_wait(m_acceptTeardown, DISPATCH_TIME_FOREVER);
+    dispatch_release(m_acceptTeardown);
+    m_acceptTeardown = nullptr;
 
     if (m_ownsSocketFile && !m_socketPath.empty()) {
         ::unlink(m_socketPath.c_str());
@@ -256,7 +302,73 @@ void SocketTransport::installAcceptSource()
     dispatch_source_set_event_handler(m_acceptSource, ^{
       this->onAcceptReady();
     });
+    // The listen fd closes HERE and nowhere else: GCD may still be deregistering
+    // the kevent until this handler runs, and a fd closed (and its number
+    // reused) before then is a random EBADF or a watch on someone else's fd.
+    dispatch_group_t teardown = m_acceptTeardown;
+    dispatch_group_enter(teardown);
+    dispatch_source_set_cancel_handler(m_acceptSource, ^{
+      this->onAcceptSourceCancelled();
+      dispatch_group_leave(teardown);
+    });
     dispatch_resume(m_acceptSource);
+}
+
+void SocketTransport::installPathGuard()
+{
+    m_pathGuardTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, m_queue);
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(m_pathGuardInterval).count();
+    dispatch_source_set_timer(m_pathGuardTimer, dispatch_time(DISPATCH_TIME_NOW, ns), static_cast<std::uint64_t>(ns),
+                              static_cast<std::uint64_t>(ns / 10));
+    dispatch_source_set_event_handler(m_pathGuardTimer, ^{
+      this->checkSocketPath();
+    });
+    dispatch_resume(m_pathGuardTimer);
+}
+
+void SocketTransport::checkSocketPath()
+{
+    // An inherited (launchd) socket file is not ours to take back.
+    if (!m_ownsSocketFile || m_stopping) {
+        return;
+    }
+    if (m_rebindPending) {
+        if (!m_listenFd) {
+            rebindListenSocket(); // the last attempt failed: try again on this tick
+        }
+        return; // otherwise the cancel handler has not run yet; it binds
+    }
+    if (m_acceptSource == nullptr || (m_listenIdentity && m_listenIdentity->stillNames(m_socketPath))) {
+        return;
+    }
+    log::warn("socket path was replaced; re-binding");
+    m_rebindPending = true;
+    dispatch_source_cancel(m_acceptSource); // cancel handler: close, then bind again
+    dispatch_release(m_acceptSource);
+    m_acceptSource = nullptr;
+}
+
+void SocketTransport::onAcceptSourceCancelled()
+{
+    m_listenFd.reset();
+    m_listenIdentity.reset();
+    if (m_rebindPending && !m_stopping) {
+        rebindListenSocket();
+    }
+}
+
+void SocketTransport::rebindListenSocket()
+{
+    // The same path create() takes: unlink what is there, bind 0600, listen.
+    auto bound = bindContainerSocket(m_socketPath);
+    if (!bound) {
+        log::warnf("transport: re-binding the replaced socket failed ({}); retrying on the next check", bound.error());
+        return;
+    }
+    m_listenFd = std::move(bound->fd);
+    m_listenIdentity = bound->identity;
+    m_rebindPending = false;
+    installAcceptSource();
 }
 
 void SocketTransport::onAcceptReady()
@@ -271,6 +383,7 @@ void SocketTransport::onAcceptReady()
         }
         acceptOne(c);
     }
+    checkSocketPath(); // every accept is also a look at the path
 }
 
 void SocketTransport::acceptOne(int connFd)

@@ -100,6 +100,8 @@ LibreSCRS::Darwin::PrompterComposition::Hooks defaultHooks()
                     return window->dismissAll();
                 },
                 makePeerAuth());
+            state->server->setWarn(
+                [](const std::string& message) { NSLog(@"librescrs-prompter: %s", message.c_str()); });
             return state->server->start();
         },
         .runLoop = [] { [NSApp run]; }, // the socket server lives on its GCD queues

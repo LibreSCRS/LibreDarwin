@@ -8,24 +8,29 @@
 // loop-affine calls are marshaled with dispatch_sync.
 #include <LibreSCRS/Darwin/backend/AgentCoreSeams.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
+#include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
 
 #include <gtest/gtest.h>
 
+#include <poll.h>
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <atomic>
 #include <charconv>
+#include <cerrno>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -748,6 +753,221 @@ TEST(SocketTransport, ReaderThatDrainsIsNeverClosed)
     ::close(client);
     tr.reset();
     std::filesystem::remove(path);
+}
+
+// --- Replaced-path guard --------------------------------------------------
+
+// Under $TMPDIR (per-user, ~50 bytes on macOS, so the path stays well under
+// the 104-byte sun_path limit) -- never the App-Group container a live agent
+// may be serving.
+std::string tmpSocketPath(const char* tag)
+{
+    return (std::filesystem::temp_directory_path() /
+            std::format("ld-{}-{}-{}.sock", tag, ::getpid(), std::rand() % 100000))
+        .string();
+}
+
+// What an attacker does: unlink whatever the path names and bind a listener
+// of its own there. A guard tick can land between the unlink and the bind and
+// re-bind first (EADDRINUSE / EEXIST); an attacker tries again, and so does this.
+// `attempts` counts the unlinks: each one is a replacement the server may see.
+int bindImpostor(const std::string& path, int* attempts = nullptr)
+{
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        ::unlink(path.c_str());
+        if (attempts != nullptr) {
+            ++*attempts;
+        }
+        const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        EXPECT_GE(fd, 0);
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            EXPECT_EQ(::listen(fd, 4), 0);
+            return fd;
+        }
+        const int err = errno;
+        ::close(fd);
+        if (err != EADDRINUSE && err != EEXIST) {
+            ADD_FAILURE() << "bind(" << path << "): " << std::strerror(err);
+            return -1;
+        }
+    }
+    ADD_FAILURE() << "bind(" << path << "): the path never came free";
+    return -1;
+}
+
+bool hasPendingConnection(int listenFd, int timeoutMs)
+{
+    pollfd p{.fd = listenFd, .events = POLLIN, .revents = 0};
+    return ::poll(&p, 1, timeoutMs) == 1 && (p.revents & POLLIN) != 0;
+}
+
+// The path names the new inode from bind() on, but connect() is refused until
+// the server's listen() a moment later; retry through that window only.
+int connectOnceListening(const std::string& path, std::chrono::milliseconds bound)
+{
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    for (;;) {
+        const int c = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+        if (::connect(c, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            const timeval recvTimeout{.tv_sec = 20, .tv_usec = 0};
+            ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, sizeof(recvTimeout));
+            return c;
+        }
+        const int err = errno;
+        ::close(c);
+        if (err != ECONNREFUSED || std::chrono::steady_clock::now() >= deadline) {
+            ADD_FAILURE() << "connect(" << path << "): " << std::strerror(err);
+            return -1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+bool waitUntil(const std::function<bool()>& pred, std::chrono::milliseconds bound)
+{
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return pred();
+}
+
+// Collects the warn lines the transport logs, from whichever thread logs them.
+struct WarnCapture
+{
+    std::mutex m;
+    std::vector<std::string> lines;
+    WarnCapture()
+    {
+        Agent::log::init(
+            [this](Agent::log::Level level, std::string_view line) {
+                if (level == Agent::log::Level::Warn) {
+                    std::lock_guard<std::mutex> lk(m);
+                    lines.emplace_back(line);
+                }
+            },
+            "rs.librescrs.agent.test");
+    }
+    ~WarnCapture()
+    {
+        Agent::log::resetForTest();
+    }
+    std::size_t count(std::string_view needle)
+    {
+        std::lock_guard<std::mutex> lk(m);
+        return static_cast<std::size_t>(
+            std::ranges::count_if(lines, [&](const std::string& l) { return l.find(needle) != std::string::npos; }));
+    }
+};
+
+constexpr std::string_view kReplacedLine = "socket path was replaced; re-binding";
+
+// A same-uid process unlinks the socket file and binds its own listener at the
+// path. The agent must notice and bind again, so a client connecting to the
+// path afterwards reaches the AGENT (its sink sees the Hello), not the
+// impostor -- twice, to show the guard keeps watching after it re-bound.
+TEST(SocketTransport, RebindsWhenTheSocketPathIsReplaced)
+{
+    WarnCapture warnings;
+    const std::string path = tmpSocketPath("rb");
+    auto created = SocketTransport::create(path);
+    ASSERT_TRUE(created.has_value()) << (created ? "" : created.error());
+    auto tr = std::move(*created);
+    tr->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
+
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+
+    int replacements = 0;
+    for (std::size_t round = 1; round <= 2; ++round) {
+        const int impostor = bindImpostor(path, &replacements);
+        const auto impostorId = SocketPathIdentity::of(path);
+        ASSERT_TRUE(impostorId.has_value());
+
+        // The path names a socket again, and it is no longer the impostor's.
+        ASSERT_TRUE(waitUntil(
+            [&] {
+                // ONE lstat: two would race the server's own unlink-then-bind.
+                const auto now = SocketPathIdentity::of(path);
+                return now && (now->dev != impostorId->dev || now->ino != impostorId->ino);
+            },
+            std::chrono::seconds(5)))
+            << "round " << round << ": the transport never bound the replaced path again";
+
+        const int client = connectOnceListening(path, std::chrono::seconds(2));
+        ASSERT_GE(client, 0);
+        ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+        EXPECT_TRUE(sink.waitFor(round, std::chrono::seconds(2)))
+            << "round " << round << ": a client on the path did not reach the transport";
+        EXPECT_FALSE(hasPendingConnection(impostor, 0)) << "round " << round << ": the impostor got the client";
+        ::close(client);
+        ::close(impostor);
+    }
+
+    // One line per replacement: at least one per round, never more than the
+    // impostor's unlinks, and none at all over further ticks on a steady path.
+    const std::size_t settled = warnings.count(kReplacedLine);
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(warnings.count(kReplacedLine), settled) << "a steady path was reported as replaced";
+    EXPECT_GE(settled, 2u);
+    EXPECT_LE(settled, static_cast<std::size_t>(replacements));
+
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
+// A launchd-activated socket is launchd's file: the agent must not bind over
+// it (that would sever the activation) and must not unlink it on shutdown.
+TEST(SocketTransport, InheritedSocketPathIsNeverReclaimed)
+{
+    WarnCapture warnings;
+    const std::string path = tmpSocketPath("ih");
+    const int launchdFd = bindImpostor(path); // stands in for launchd's listener
+    auto tr = SocketTransport::adoptInherited(Agent::Wire::UniqueFd(launchdFd), path);
+    ASSERT_NE(tr, nullptr);
+    tr->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+    // A second name for launchd's socket, so a client can still reach the
+    // transport after the path is taken -- every accept is a guard check too.
+    const std::string alias = path + ".a";
+    ASSERT_EQ(::link(path.c_str(), alias.c_str()), 0) << std::strerror(errno);
+
+    const int other = bindImpostor(path);
+    const auto otherId = SocketPathIdentity::of(path);
+    ASSERT_TRUE(otherId.has_value());
+
+    // An accept on the transport, then fifteen would-be guard ticks: nothing
+    // may take the path back.
+    const int viaAlias = connectClient(alias);
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(viaAlias, helloBytes).has_value());
+    ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2))) << "the inherited socket stopped serving";
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    EXPECT_TRUE(otherId->stillNames(path)) << "the transport bound over a path it does not own";
+    const int client = connectClient(path);
+    EXPECT_TRUE(hasPendingConnection(other, 2000)) << "a client on the path must reach whoever launchd gave it to";
+    EXPECT_EQ(warnings.count(kReplacedLine), 0u);
+
+    tr.reset();
+    EXPECT_TRUE(otherId->stillNames(path)) << "shutdown unlinked a socket file the transport does not own";
+    ::close(client);
+    ::close(viaAlias);
+    ::close(other);
+    std::filesystem::remove(path);
+    std::filesystem::remove(alias);
 }
 
 } // namespace

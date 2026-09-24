@@ -96,6 +96,10 @@ PrompterServer::PrompterServer(std::string socketPath, SecretProvider provider, 
 PrompterServer::~PrompterServer()
 {
     stop();
+    if (m_acceptTeardown != nullptr) {
+        dispatch_release(m_acceptTeardown);
+        m_acceptTeardown = nullptr;
+    }
     if (m_worker != nullptr) {
         dispatch_release(m_worker);
         m_worker = nullptr;
@@ -106,11 +110,8 @@ PrompterServer::~PrompterServer()
     }
 }
 
-std::expected<void, std::string> PrompterServer::start()
+std::expected<void, std::string> PrompterServer::bindListenSocket()
 {
-    if (m_started) {
-        return {};
-    }
     if (m_socketPath.size() >= sizeof(sockaddr_un{}.sun_path)) {
         return std::unexpected(std::format("prompter socket path exceeds sun_path limit"));
     }
@@ -119,7 +120,7 @@ std::expected<void, std::string> PrompterServer::start()
     if (fd < 0) {
         return std::unexpected(std::format("socket(): {}", std::strerror(errno)));
     }
-    m_listen = Agent::Wire::UniqueFd(fd);
+    Agent::Wire::UniqueFd owned(fd);
     makeNonBlockingCloexec(fd);
     setNoSigPipe(fd);
     sockaddr_un addr{};
@@ -135,24 +136,129 @@ std::expected<void, std::string> PrompterServer::start()
     if (bindRc != 0) {
         return std::unexpected(std::format("bind(): {}", std::strerror(errno)));
     }
+    // Recorded at once, before anything else can replace the file.
+    const auto identity = SocketPathIdentity::of(m_socketPath);
+    if (!identity) {
+        return std::unexpected(std::format("stat() after bind: {}", std::strerror(errno)));
+    }
     ::chmod(m_socketPath.c_str(), 0600);
     if (::listen(fd, 8) != 0) {
         return std::unexpected(std::format("listen(): {}", std::strerror(errno)));
     }
+    m_listen = std::move(owned);
+    m_listenIdentity = identity;
+    return {};
+}
 
+std::expected<void, std::string> PrompterServer::start()
+{
+    if (m_started) {
+        return {};
+    }
+    if (auto bound = bindListenSocket(); !bound) {
+        return bound;
+    }
     if (m_queue == nullptr) {
         m_queue = dispatch_queue_create("rs.librescrs.prompter", DISPATCH_QUEUE_SERIAL);
     }
     if (m_worker == nullptr) {
         m_worker = dispatch_queue_create("rs.librescrs.prompter.worker", DISPATCH_QUEUE_CONCURRENT);
     }
-    m_acceptSource = dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, static_cast<uintptr_t>(fd), 0, m_queue);
+    if (m_acceptTeardown == nullptr) {
+        m_acceptTeardown = dispatch_group_create();
+    }
+    dispatch_sync(m_queue, ^{
+      m_stopping = false;
+      m_rebindPending = false;
+      installAcceptSource();
+      installPathGuard();
+    });
+    m_started = true;
+    return {};
+}
+
+void PrompterServer::installAcceptSource()
+{
+    m_acceptSource =
+        dispatch_source_create(DISPATCH_SOURCE_TYPE_READ, static_cast<uintptr_t>(m_listen.get()), 0, m_queue);
     dispatch_source_set_event_handler(m_acceptSource, ^{
       this->onAcceptReady();
     });
+    // The listen fd closes HERE and nowhere else: GCD may still be deregistering
+    // the kevent until this handler runs, and a fd closed (and its number
+    // reused) before then is a random EBADF or a watch on someone else's fd.
+    dispatch_group_t teardown = m_acceptTeardown;
+    dispatch_group_enter(teardown);
+    dispatch_source_set_cancel_handler(m_acceptSource, ^{
+      this->onAcceptSourceCancelled();
+      dispatch_group_leave(teardown);
+    });
     dispatch_resume(m_acceptSource);
-    m_started = true;
-    return {};
+}
+
+void PrompterServer::installPathGuard()
+{
+    m_pathGuardTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, m_queue);
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(m_pathGuardInterval).count();
+    dispatch_source_set_timer(m_pathGuardTimer, dispatch_time(DISPATCH_TIME_NOW, ns), static_cast<std::uint64_t>(ns),
+                              static_cast<std::uint64_t>(ns / 10));
+    dispatch_source_set_event_handler(m_pathGuardTimer, ^{
+      this->checkSocketPath();
+    });
+    dispatch_resume(m_pathGuardTimer);
+}
+
+void PrompterServer::checkSocketPath()
+{
+    if (m_stopping) {
+        return;
+    }
+    if (m_rebindPending) {
+        if (!m_listen) {
+            rebindListenSocket(); // the last attempt failed: try again on this tick
+        }
+        return; // otherwise the cancel handler has not run yet; it binds
+    }
+    if (m_acceptSource == nullptr || (m_listenIdentity && m_listenIdentity->stillNames(m_socketPath))) {
+        return;
+    }
+    warn("socket path was replaced; re-binding");
+    m_rebindPending = true;
+    dispatch_source_cancel(m_acceptSource); // cancel handler: close, then bind again
+    dispatch_release(m_acceptSource);
+    m_acceptSource = nullptr;
+}
+
+void PrompterServer::onAcceptSourceCancelled()
+{
+    m_listen.reset();
+    m_listenIdentity.reset();
+    if (m_rebindPending && !m_stopping) {
+        rebindListenSocket();
+    }
+}
+
+void PrompterServer::rebindListenSocket()
+{
+    if (auto bound = bindListenSocket(); !bound) {
+        m_listen.reset();
+        warn(std::format("re-binding the replaced socket failed ({}); retrying on the next check", bound.error()));
+        return;
+    }
+    m_rebindPending = false;
+    installAcceptSource();
+}
+
+void PrompterServer::warn(const std::string& message) const
+{
+    if (m_warn) {
+        m_warn(message);
+    }
+}
+
+void PrompterServer::setWarn(std::function<void(const std::string&)> warn)
+{
+    m_warn = std::move(warn);
 }
 
 void PrompterServer::stop() noexcept
@@ -161,12 +267,18 @@ void PrompterServer::stop() noexcept
         return;
     }
     m_started = false;
-    // Cancel every source on the loop, then barrier once more so the enqueued
-    // cancellation handlers have run before the listen fd closes (Apple's
-    // fd-source teardown discipline; per-connection fds are co-owned by their
-    // cancel handlers and close themselves). No blocking accept() to wake ->
-    // no join() -> stop() cannot hang on a provider still waiting for a panel.
+    // Cancel every source on the loop, then wait for the accept source's
+    // cancel handler, which is where the listen fd closes (Apple's fd-source
+    // teardown discipline; per-connection fds are co-owned by their cancel
+    // handlers and close themselves). No blocking accept() to wake -> no
+    // join() -> stop() cannot hang on a provider still waiting for a panel.
     dispatch_sync(m_queue, ^{
+      m_stopping = true; // a pending accept-source cancel handler must not bind again
+      if (m_pathGuardTimer != nullptr) {
+          dispatch_source_cancel(m_pathGuardTimer);
+          dispatch_release(m_pathGuardTimer);
+          m_pathGuardTimer = nullptr;
+      }
       if (m_acceptSource != nullptr) {
           dispatch_source_cancel(m_acceptSource);
           dispatch_release(m_acceptSource);
@@ -181,9 +293,7 @@ void PrompterServer::stop() noexcept
       }
       m_connections.clear();
     });
-    dispatch_sync(m_queue, ^{
-                  });
-    m_listen.reset();
+    dispatch_group_wait(m_acceptTeardown, DISPATCH_TIME_FOREVER);
     if (!m_socketPath.empty()) {
         ::unlink(m_socketPath.c_str());
     }
@@ -201,6 +311,7 @@ void PrompterServer::onAcceptReady()
         }
         acceptOne(c);
     }
+    checkSocketPath(); // every accept is also a look at the path
 }
 
 void PrompterServer::acceptOne(int connFd)

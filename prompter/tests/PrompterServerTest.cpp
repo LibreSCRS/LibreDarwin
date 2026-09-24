@@ -4,9 +4,10 @@
 // PrompterServer over real socket connections with injected seams (no display,
 // no real code signing): a cross-connection CancelCurrent lands while a
 // provider call is blocked (the modal), stop() returns promptly with a modal
-// pending, peer-auth fails closed, and a request round-trips its reply. Real
-// sockets + latches, no sleeps. The AppKit window + real SecTask peer-auth are
-// exercised manually / in the HW gate.
+// pending, peer-auth fails closed, a request round-trips its reply, and a
+// replaced socket path is bound again. Real sockets + latches; only the
+// replaced-path test polls, since the guard is a timer. The AppKit window +
+// real SecTask peer-auth are exercised manually / in the HW gate.
 #include "PrompterServer.h"
 
 #include <LibreSCRS/Agent/wire/Framing.h>
@@ -14,17 +15,23 @@
 
 #include <gtest/gtest.h>
 
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
 #include <filesystem>
+#include <format>
+#include <functional>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace LibreSCRS::Darwin;
@@ -711,6 +718,146 @@ TEST(PrompterServer, ARequestOneVersionAheadIsRefusedWithoutAProviderCall)
     EXPECT_FALSE(parsed->userMessage.empty());
 
     ::close(conn);
+    server.stop();
+    std::filesystem::remove(path);
+}
+
+// Under $TMPDIR (short enough for the 104-byte sun_path limit) -- never the
+// App-Group container a live prompter may be serving.
+std::string tmpSocketPath(const char* tag)
+{
+    return (std::filesystem::temp_directory_path() /
+            std::format("ld-{}-{}-{}.sock", tag, ::getpid(), std::rand() % 100000))
+        .string();
+}
+
+// What an attacker does: unlink whatever the path names and bind a listener
+// of its own there. A guard tick can land between the unlink and the bind and
+// re-bind first (EADDRINUSE / EEXIST); an attacker tries again, and so does this.
+// `attempts` counts the unlinks: each one is a replacement the server may see.
+int bindImpostor(const std::string& path, int* attempts = nullptr)
+{
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+    for (int attempt = 0; attempt < 100; ++attempt) {
+        ::unlink(path.c_str());
+        if (attempts != nullptr) {
+            ++*attempts;
+        }
+        const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        EXPECT_GE(fd, 0);
+        if (::bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            EXPECT_EQ(::listen(fd, 4), 0);
+            return fd;
+        }
+        const int err = errno;
+        ::close(fd);
+        if (err != EADDRINUSE && err != EEXIST) {
+            ADD_FAILURE() << "bind(" << path << "): " << std::strerror(err);
+            return -1;
+        }
+    }
+    ADD_FAILURE() << "bind(" << path << "): the path never came free";
+    return -1;
+}
+
+// The path names the new inode from bind() on, but connect() is refused until
+// the server's listen() a moment later; retry through that window only.
+int connectOnceListening(const std::string& path, std::chrono::milliseconds bound)
+{
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    for (;;) {
+        const int c = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+        if (::connect(c, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0) {
+            const timeval recvTimeout{.tv_sec = 20, .tv_usec = 0};
+            ::setsockopt(c, SOL_SOCKET, SO_RCVTIMEO, &recvTimeout, sizeof(recvTimeout));
+            return c;
+        }
+        const int err = errno;
+        ::close(c);
+        if (err != ECONNREFUSED || std::chrono::steady_clock::now() >= deadline) {
+            ADD_FAILURE() << "connect(" << path << "): " << std::strerror(err);
+            return -1;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+}
+
+bool waitUntil(const std::function<bool()>& pred, std::chrono::milliseconds bound)
+{
+    const auto deadline = std::chrono::steady_clock::now() + bound;
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (pred()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return pred();
+}
+
+// A same-uid process unlinks prompter.sock and binds its own listener there.
+// The prompter must notice and bind again, so the agent's next Reset reaches
+// the PROMPTER (its handler's distinctive count comes back), not the impostor
+// -- twice, to show the guard keeps watching after it re-bound.
+TEST(PrompterServer, RebindsWhenTheSocketPathIsReplaced)
+{
+    const std::string path = tmpSocketPath("prb");
+    std::mutex warnMutex;
+    std::vector<std::string> warnings;
+    PrompterServer server(
+        path, rejectSingleProvider(), rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+        []() -> std::uint32_t { return 7; }, [](const PeerCredentials&) { return true; });
+    server.setWarn([&](const std::string& line) {
+        std::lock_guard<std::mutex> lk(warnMutex);
+        warnings.push_back(line);
+    });
+    server.setPathGuardIntervalForTest(std::chrono::milliseconds(20));
+    ASSERT_TRUE(server.start().has_value());
+
+    int replacements = 0;
+    for (int round = 1; round <= 2; ++round) {
+        const int impostor = bindImpostor(path, &replacements);
+        const auto impostorId = SocketPathIdentity::of(path);
+        ASSERT_TRUE(impostorId.has_value());
+
+        ASSERT_TRUE(waitUntil(
+            [&] {
+                // ONE lstat: two would race the server's own unlink-then-bind.
+                const auto now = SocketPathIdentity::of(path);
+                return now && (now->dev != impostorId->dev || now->ino != impostorId->ino);
+            },
+            std::chrono::seconds(5)))
+            << "round " << round << ": the prompter never bound the replaced path again";
+
+        const int conn = connectOnceListening(path, std::chrono::seconds(2));
+        ASSERT_GE(conn, 0);
+        ASSERT_TRUE(Agent::Wire::sendFrame(conn, wire::toCbor(wire::PromptReset{}).encode()).has_value());
+        auto reply = Agent::Wire::recvFrame(conn);
+        ASSERT_TRUE(reply.has_value()) << "round " << round << ": no reply on the path";
+        auto parsed = wire::parseResetDone(reply->body);
+        ASSERT_TRUE(parsed.has_value());
+        EXPECT_EQ(parsed->closed, 7u);
+        pollfd p{.fd = impostor, .events = POLLIN, .revents = 0};
+        EXPECT_EQ(::poll(&p, 1, 0), 0) << "round " << round << ": the impostor got the client";
+        ::close(conn);
+        ::close(impostor);
+    }
+
+    // One line per replacement: at least one per round, never more than the
+    // impostor's unlinks, and none at all over further ticks on a steady path.
+    const auto replacedLines = [&] {
+        std::lock_guard<std::mutex> lk(warnMutex);
+        return std::ranges::count(warnings, std::string("socket path was replaced; re-binding"));
+    };
+    const auto settled = replacedLines();
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    EXPECT_EQ(replacedLines(), settled) << "a steady path was reported as replaced";
+    EXPECT_GE(settled, 2);
+    EXPECT_LE(settled, replacements);
     server.stop();
     std::filesystem::remove(path);
 }
