@@ -14,7 +14,7 @@
 # So this gate deliberately does NOT read the pin. It compiles against a
 # LibreAgent checkout handed to it -- in CI, the agent's main branch.
 #
-# Five rules, because the type alone is not the contract and R1 sees exactly
+# Six rules, because the type alone is not the contract and R1 sees exactly
 # one declaration:
 #   R1  SecCodeAuthorizer's override signature matches the base declaration,
 #       and the authorizer's own test compiles against it. Proven by a real
@@ -93,6 +93,12 @@
 #       it says FAILED rather than ok: a rule that prints "R5 ok" on the run in
 #       which it sets rc=1 leaves a log whose verdict lines all read ok over a
 #       red gate, and those lines are the only record of what was judged.
+#   R6  and the other three Darwin implementations of an agent base, which R1
+#       never compiles: ci/interface-probe.cpp includes SecCodeAuthorizer,
+#       SocketTransport, SocketOperationChannel and MacPrompterClient and
+#       asserts each concrete. `override` catches a base signature that moved,
+#       is_abstract a pure virtual the base gained. It runs first, and judges
+#       only where <dispatch/dispatch.h> exists; elsewhere it says so, rc=2.
 #
 # What they read is every tracked source in the repository, by extension, minus
 # ci/ -- this gate, its selftest and this paragraph name the interface by
@@ -345,6 +351,68 @@ IFS=$oldifs
 # not compile the authorizer's test at all, and LIBRESCRS_EXTRA_INCLUDE, the
 # documented way to say where the headers are, could not reach it.
 
+# ---------------------------------------------------------------- R6
+# Every Darwin implementation of an agent interface, not only the authorizer.
+# R1 compiles SecCodeAuthorizer; SocketTransport, SocketOperationChannel and
+# MacPrompterClient implement three more agent bases, and until this rule a
+# base that moved under any of them was seen by nothing short of the full
+# macOS build. ci/interface-probe.cpp includes the four headers and asserts
+# each class concrete: `override` catches a changed signature, is_abstract an
+# added pure virtual, which leaves every header well formed.
+#
+# It runs BEFORE R1 because R1 refuses to judge (exit 2) a compile it cannot
+# attribute to the authorize() contract -- and a moved authorize() signature is
+# exactly that -- so placed after it, this verdict would never be printed.
+# For the same reason the refusals below R1 keep an rc=1 set here.
+#
+# SocketTransport.h includes <dispatch/dispatch.h>, so this rule judges only
+# where the Apple SDK is; elsewhere it says it cannot, which is rc=2 and never
+# a pass. A tree that carries Darwin implementations and no probe is a stale
+# gate. The question is asked of the implementations, not of "is this a
+# checkout": the other self-test's fixtures are checkouts too, carry only a
+# synthetic authorizer, and have nothing for a probe to judge.
+PROBE="ci/interface-probe.cpp"
+if [ ! -f "$PROBE" ]; then
+    for impl in SocketTransport SocketOperationChannel MacPrompterClient; do
+        if [ -f "agent/include/LibreSCRS/Darwin/backend/$impl.h" ]; then
+            echo "FATAL: $PROBE is named by this gate but is not in the tree, which carries $impl.h — the gate in $0 is stale" >&2
+            exit 2
+        fi
+    done
+    echo "  R6 n/a  — this tree carries no $PROBE and none of the implementations it would compile"
+else
+    printf '#include <dispatch/dispatch.h>\n' > "$SCRATCH/dispatchprobe.cpp"
+    if ! "$CXX_BIN" -fsyntax-only -x c++ "$SCRATCH/dispatchprobe.cpp" > "$SCRATCH/dispatch.log" 2>&1; then
+        echo "  R6 cannot judge: <dispatch/dispatch.h> unavailable — SocketTransport.h includes it and only the Apple SDK provides it, so the four Darwin implementations compile nowhere else. Run this on macOS."
+        echo "::error::refusing to judge R6: <dispatch/dispatch.h> is unavailable to $CXX_BIN on this host"
+        [ "$rc" -eq 0 ] && rc=2
+    elif "$CXX_BIN" -std=c++23 ${expl[@]+"${expl[@]}"} -fsyntax-only \
+        -I agent/include -isystem "$LA_INCLUDE" ${extra_inc[@]+"${extra_inc[@]}"} \
+        "$PROBE" > "$SCRATCH/r6.log" 2>&1; then
+        echo "  R6 ok   — SecCodeAuthorizer, SocketTransport, SocketOperationChannel and MacPrompterClient compile against $LA_INCLUDE and none is abstract"
+    else
+        r6_miss=$(grep -m1 -E "(No such file or directory|file not found)" "$SCRATCH/r6.log" \
+            | sed -e "s/.*'\([^']*\)' file not found.*/\1/" \
+                  -e 's/.*: \([^ :]*\): No such file or directory.*/\1/')
+        if [ -n "$r6_miss" ]; then
+            # A header nobody put on the path is a statement about this host,
+            # not about the interface -- including an agent header the revision
+            # under test does not carry yet.
+            echo "  R6 cannot judge: <$r6_miss> not found — put the headers the Darwin backend needs on the path with LIBRESCRS_EXTRA_INCLUDE (LibreMiddleware's include/), or hand in a LibreAgent that carries it"
+            echo "::error::refusing to judge R6: $PROBE could not be compiled because <$r6_miss> was not found"
+            [ "$rc" -eq 0 ] && rc=2
+        else
+            echo "  R6 FAILED — a Darwin implementation does not compile against the agent interface in $LA_INCLUDE: a base signature moved under an override, or a base gained a pure virtual it does not implement"
+            echo "::error file=$PROBE::the Darwin implementations do not compile against the agent interface in $LA_INCLUDE"
+            grep -E '(error|note):' "$SCRATCH/r6.log" | head -30 | sed 's/^/  R6 | /'
+            rc=1
+        fi
+    fi
+fi
+
+# A refusal below this point must not hide R6: rc=1 is the stronger verdict.
+refuse() { [ "$rc" -eq 1 ] && exit 1; exit 2; }
+
 # ---------------------------------------------------------------- R1
 mkdir -p "$SCRATCH/shim/bsm"
 cat > "$SCRATCH/shim/bsm/libbsm.h" <<'EOF'
@@ -394,7 +462,7 @@ for t in agent/tests/SecCodeAuthorizerTest.cpp; do
         tus+=("$t")
     elif [ "$in_checkout" = 1 ]; then
         echo "FATAL: $t is named by this gate but is not in the tree — the list in $0 is stale" >&2
-        exit 2
+        refuse
     fi
 done
 
@@ -415,7 +483,7 @@ done
 # reader looking at the contract for a missing package.
 if grep -qE "gtest/gtest\.h: No such file|'gtest/gtest\.h' file not found" "$SCRATCH/r1.log"; then
     echo "FATAL: gtest's headers are not on the include path, so the authorizer's test cannot be compiled — install them (Debian/Ubuntu: libgtest-dev; macOS: point LIBRESCRS_EXTRA_INCLUDE at a prefix that has gtest/, e.g. the LibreMiddleware install prefix's include/) rather than letting this rule measure one header" >&2
-    exit 2
+    refuse
 fi
 
 # --------------------------------------------- classifying a failed compile
@@ -559,7 +627,7 @@ elif contract_diag "$SCRATCH/r1.log"; then
 else
     echo "FATAL: $HDR failed to compile for a reason that is not the authorize() contract — refusing to judge" >&2
     r1_diagnostics >&2
-    exit 2
+    refuse
 fi
 
 # Statements, not lines. A line-based rule reads a trailing comment as part of

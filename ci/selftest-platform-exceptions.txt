@@ -1,0 +1,17 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Self-tests whose cases can be judged on ONE platform only, and the job that
+# judges them there. One row per self-test:
+#
+#   <self-test>  <platform, as `uname -s` prints it>  <workflow>:<job>  <reason>
+#
+# The ubuntu job runs every self-test through ci/scripts/run-selftests.sh. A
+# self-test listed here does not pass there on the cases it cannot judge, and
+# does not drop them in silence either: it prints them as NOT JUDGED, names this
+# file, and counts in its trailer only what ran. That is honest only while the
+# job named here really runs it, so the self-test checks every row as data on
+# every host -- the job exists, runs on that platform's runner, is not
+# conditional, and has an unconditional step invoking the self-test -- and goes
+# red when the step is removed. A row naming an untracked self-test fails, as
+# does a row whose self-test never reads this file, or one with no reason.
+ci/scripts/check-agent-interface-probe.selftest.sh  Darwin  ci.yml:agent-interface  Its cases compile the real Darwin backend headers, and SocketTransport.h includes <dispatch/dispatch.h> from the Apple SDK, which no Ubuntu package provides; on macOS it is judged in full.

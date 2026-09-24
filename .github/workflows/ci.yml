@@ -298,6 +298,22 @@ jobs:
         # otherwise report a green.
         run: LibreDarwin/ci/scripts/check-agent-interface.selftest.sh
 
+      - name: Install PyYAML
+        # The probe self-test below reads this workflow as data to prove its own
+        # wiring, and the macOS image does not guarantee the module.
+        run: python3 -m pip install --break-system-packages --user pyyaml
+
+      - name: Prove the interface probe still fails when an agent base moves
+        # R6 of the gate below compiles ci/interface-probe.cpp: all four Darwin
+        # implementations of an agent base, not only the authorizer. Its proof
+        # moves one base at a time in a COPY of these real headers, so it needs
+        # the Apple SDK and is judged in full only here; the ubuntu self-test
+        # runner judges its wiring half and names this job, as recorded in
+        # ci/selftest-platform-exceptions.txt.
+        run: |
+          LIBRESCRS_EXTRA_INCLUDE="$GITHUB_WORKSPACE/LibreMiddleware/include" \
+              LibreDarwin/ci/scripts/check-agent-interface-probe.selftest.sh "$GITHUB_WORKSPACE/LibreAgent/include"
+
       - name: Darwin authorizer implements the agent interface
         # `trunk` names where those headers came from, and it changes one
         # sentence: if the agent turns out to predate the outcome type, this
