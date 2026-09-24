@@ -23,10 +23,19 @@
 # own ad-hoc signature on librescrs-agent/librescrs-prompter (identifier =
 # the binary's own name, no entitlements at all), which fails that check --
 # see Scripts/bundle-agent.sh (LibreMac) and RealAgentSmokeTests.swift for the
-# same recipe applied to the bundled and manually-run cases respectively. Every
-# subcommand here that runs or loads a binary re-signs it first with
-# sign_dev_binary(), ad-hoc, with the identifier + App-Group entitlement the
-# checking side expects.
+# same recipe applied to the bundled and manually-run cases respectively.
+# `run`, `launchd`, and `smoke` re-sign $AGENT_BIN with sign_dev_binary()
+# every time, and also re-sign $PROMPTER_BIN the same way when it exists --
+# this harness never starts a prompter process itself (there is no dev
+# prompter LaunchAgent template here, unlike the bundled
+# org.librescrs.prompter.plist), but if a developer points a hand-made
+# LaunchAgent at the build-tree prompter, its signature is kept current by
+# whichever of these subcommands they run. SecTask reads the signature of
+# the already-running process, not the file on disk, so a prompter that is
+# already loaded needs restarting after a re-sign -- each subcommand prints
+# (never runs) the `launchctl kickstart` line for that. `--sign-only <path>
+# <identifier>` (see below) is the same signing step, callable on its own
+# for testing or for a binary this harness does not otherwise touch.
 set -euo pipefail
 
 APP_GROUP="group.org.librescrs.LibreMac"
@@ -84,14 +93,21 @@ die() { echo "error: $*" >&2; exit 1; }
 # function returns, on every exit path, via a scoped EXIT trap.
 sign_dev_binary() {
     local bin="$1" identifier="$2"
-    if [ "$CODESIGN_IDENTITY" != "-" ]; then
-        echo "not signing $bin: CODESIGN_IDENTITY='$CODESIGN_IDENTITY' is not ad-hoc (this dev harness only signs ad-hoc)" >&2
-        return 0
-    fi
+    # Fail closed, not open: continuing past this with the binary unsigned
+    # (or signed under some other identity) hands run/launchd/smoke a binary
+    # the peer verifier refuses, which fails minutes later and far from here.
+    [ "$CODESIGN_IDENTITY" = "-" ] || die "CODESIGN_IDENTITY='$CODESIGN_IDENTITY' is not ad-hoc; this dev harness only signs ad-hoc (unset it, or run bundle-agent.sh's staged/team-signed path instead)"
     [ -x "$bin" ] || die "cannot sign, binary not found/executable: $bin"
 
+    # `mktemp -t` itself falls back to a literal /tmp when $TMPDIR is unset;
+    # state that rule instead of silently taking the fallback.
+    : "${TMPDIR:?TMPDIR must be set -- refusing to fall back to a literal /tmp path}"
     local ents
     ents="$(mktemp -t librescrs-dev-entitlements)"
+    # No EXIT trap is set by any caller before this point in the current
+    # control flow (`smoke` sets its own AFTER both of its sign_dev_binary
+    # calls) -- safe to claim EXIT here and hand it back below. If that ever
+    # changes, save/restore the incoming trap instead of clearing it.
     trap 'rm -f "$ents"' EXIT
     cat > "$ents" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -123,6 +139,10 @@ case "${1:-run}" in
     run)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
         sign_dev_binary "$AGENT_BIN" "$LABEL"
+        if [ -x "$PROMPTER_BIN" ]; then
+            sign_dev_binary "$PROMPTER_BIN" "$PROMPTER_LABEL"
+            echo "note: if $PROMPTER_LABEL is already loaded (a hand-made LaunchAgent), restart it to pick up this signature: launchctl kickstart -k gui/$UID/$PROMPTER_LABEL"
+        fi
         ensure_container
         echo "librescrs-agent (dev) -> self-binds $SOCK"
         echo "stop with Ctrl-C (SIGINT); the agent unlinks the socket on clean exit."
@@ -131,6 +151,10 @@ case "${1:-run}" in
     launchd)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
         sign_dev_binary "$AGENT_BIN" "$LABEL"
+        if [ -x "$PROMPTER_BIN" ]; then
+            sign_dev_binary "$PROMPTER_BIN" "$PROMPTER_LABEL"
+            echo "note: if $PROMPTER_LABEL is already loaded (a hand-made LaunchAgent), restart it to pick up this signature: launchctl kickstart -k gui/$UID/$PROMPTER_LABEL"
+        fi
         ensure_container
         ABS_BIN="$(cd "$(dirname "$AGENT_BIN")" && pwd)/$(basename "$AGENT_BIN")"
         PLIST_DIR="$HOME/Library/LaunchAgents"
@@ -170,6 +194,10 @@ case "${1:-run}" in
     smoke)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
         sign_dev_binary "$AGENT_BIN" "$LABEL"
+        if [ -x "$PROMPTER_BIN" ]; then
+            sign_dev_binary "$PROMPTER_BIN" "$PROMPTER_LABEL"
+            echo "note: if $PROMPTER_LABEL is already loaded (a hand-made LaunchAgent), restart it to pick up this signature: launchctl kickstart -k gui/$UID/$PROMPTER_LABEL"
+        fi
         ensure_container
         "$AGENT_BIN" --plugin-dir "$PLUGIN_DIR" &
         AGENT_PID=$!
@@ -182,23 +210,19 @@ case "${1:-run}" in
         echo "OK: agent bound $SOCK (0600). Connect a client to exchange Hello/HelloAck."
         ;;
     --sign-only)
-        # Internal, undocumented in the usage line on purpose: signs one
-        # binary and exits, touching no container, launchd, or process.
-        # Exists so the signing step above can be exercised (and verified
-        # with `codesign -dv --entitlements -`) without running `run`,
-        # `launchd`, or `smoke` against a real dev App-Group container.
-        SIGN_BIN="${2:?usage: $0 --sign-only <path> [identifier]  (e.g. $AGENT_BIN or $PROMPTER_BIN)}"
-        SIGN_ID="${3:-}"
-        if [ -z "$SIGN_ID" ]; then
-            case "$(basename "$SIGN_BIN")" in
-                *agent*) SIGN_ID="$LABEL" ;;
-                *prompter*) SIGN_ID="$PROMPTER_LABEL" ;;
-                *) die "--sign-only: cannot infer the signing identifier from '$SIGN_BIN'; pass it as a third argument" ;;
-            esac
-        fi
+        # Internal dev/test helper, kept out of the {run|launchd|unload|smoke}
+        # list because it is not one of this harness's user-facing modes: it
+        # signs one binary and exits, touching no container, launchd, or
+        # process. Exists so the signing step above can be exercised (and
+        # verified with `codesign -dv --entitlements -`) without running
+        # `run`, `launchd`, or `smoke` against a real dev App-Group container.
+        # The identifier is required, not guessed from the path, because a
+        # guess in a signing path is the wrong kind of convenient.
+        SIGN_BIN="${2:?usage: $0 --sign-only <path> <identifier>  (identifier: $LABEL or $PROMPTER_LABEL)}"
+        SIGN_ID="${3:?usage: $0 --sign-only <path> <identifier>  (identifier: $LABEL or $PROMPTER_LABEL)}"
         sign_dev_binary "$SIGN_BIN" "$SIGN_ID"
         ;;
     *)
-        die "usage: $0 {run|launchd|unload|smoke}"
+        die "usage: $0 {run|launchd|unload|smoke}  (also: --sign-only <path> <identifier>, an internal dev/test helper)"
         ;;
 esac
