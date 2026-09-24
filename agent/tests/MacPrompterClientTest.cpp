@@ -5,6 +5,7 @@
 // secret is a fake test value (never a real card PIN); it round-trips into a
 // cleansing Secure::String.
 #include <LibreSCRS/Darwin/backend/MacPrompterClient.h>
+#include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
@@ -21,6 +22,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <mutex>
@@ -1132,6 +1134,43 @@ TEST(MacPrompterClient, ResetWaitsForResetDoneAndSurvivesAMissingPrompter)
         server.waitUntilServed();
         EXPECT_EQ(server.resetCount(), 1u);
     }
+}
+
+// The prompter verifier has no opt-out. The agent once honoured
+// LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER, and `launchctl setenv` reaches every
+// job the user's launchd starts, so any process running as the user could have
+// switched the check off. With the variable set, an unsigned serving peer is
+// still refused, both by the verifier itself and by a client built with the
+// default one.
+TEST(MacPrompterClient, DefaultVerifierRefusesAnUnsignedPeerWhateverTheEnvironmentSays)
+{
+    ASSERT_EQ(setenv("LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER", "1", 1), 0);
+
+    // (a) The verifier on a connected descriptor whose peer is this test binary,
+    // which is not the prompter and carries no App-Group entitlement.
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    const bool accepted = makeDefaultPrompterVerifier()(fds[0]);
+    ::close(fds[0]);
+    ::close(fds[1]);
+    EXPECT_FALSE(accepted);
+
+    // (b) A client with no injected verifier, against a fake prompter holding an
+    // injected wrong PIN: no request is sent, no reply is consumed.
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Ok;
+    reply.secret = {'6', '6', '6', '6'};
+    FakePrompter server(path, reply);
+
+    MacPrompterClient client(path);
+    const auto r = client.requestPin(Agent::PromptOptions{});
+    unsetenv("LIBRESCRS_AGENT_ALLOW_UNVERIFIED_PROMPTER");
+
+    EXPECT_EQ(r.status, Agent::PromptStatus::Error);
+    EXPECT_EQ(r.userMessage, "prompter peer verification failed");
+    EXPECT_FALSE(r.secret.has_value());
+    EXPECT_FALSE(server.capturedRequest().has_value());
 }
 
 } // namespace

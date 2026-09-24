@@ -1,4 +1,5 @@
 AgentCoreSeamsTest
+AppGroupPathsProductionTest
 CscaImportSocketTest
 MacPrompterClientTest
 ManagePinOperationTest
