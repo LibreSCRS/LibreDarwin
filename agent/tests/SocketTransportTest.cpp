@@ -613,6 +613,66 @@ TEST(SocketTransport, OutboundQueueIsBounded)
     std::filesystem::remove(path);
 }
 
+// The frame-count half of the same bound: a peer that never reads, sent many
+// TINY frames, is closed once more than kMaxQueuedFrames are queued, while the
+// bytes queued are still a small fraction of the byte bound -- so the close
+// can only have come from the frame count.
+TEST(SocketTransport, OutboundQueueIsBoundedInFrames)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    SocketTransport* trp = tr.get();
+
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+    Latch<int> closed;
+    tr->onClientDisconnect([&](Agent::CallerToken) { closed.push(1); });
+
+    const int client = connectClient(path);
+    int rcvbuf = 1; // see OutboundQueueIsBounded
+    ::setsockopt(client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+    ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
+
+    const std::string tinyKey = "k";
+    const std::size_t frameBytes =
+        Agent::Wire::encodeFrame(Agent::Wire::toCbor(Agent::Wire::ConfigChanged{tinyKey}).encode(), 0).size();
+    // Mirrors SocketTransport.cpp's file-local bounds, as the byte test does.
+    constexpr std::size_t kExpectedMaxQueuedFrames = 4096;
+    constexpr std::size_t kExpectedMaxQueuedBytes = 4 * 1024 * 1024;
+    // Frames the kernel may take before backpressure engages (the OS floor on
+    // SO_RCVBUF is not zero); they are sent, not queued.
+    constexpr std::size_t kSlackFrames = 1024;
+    constexpr std::size_t kLimit = 4 * kExpectedMaxQueuedFrames;
+    ASSERT_LT(kLimit * frameBytes, kExpectedMaxQueuedBytes / 8)
+        << "frames too large: the byte bound could close this connection first";
+
+    bool sawClose = false;
+    std::size_t framesPushedAtClose = 0;
+    for (std::size_t i = 0; i < kLimit && !sawClose; ++i) {
+        dispatch_sync(trp->loopQueue(), ^{
+          trp->broadcastConfigChanged(tinyKey);
+        });
+        std::lock_guard<std::mutex> lk(closed.m);
+        if (!closed.items.empty()) {
+            sawClose = true;
+            framesPushedAtClose = i + 1;
+        }
+    }
+    ASSERT_TRUE(sawClose) << "a peer that never reads was not closed after " << kLimit << " frames of " << frameBytes
+                          << " bytes";
+    EXPECT_GT(framesPushedAtClose, kExpectedMaxQueuedFrames) << "closed before the frame bound was crossed";
+    EXPECT_LE(framesPushedAtClose, kExpectedMaxQueuedFrames + 1 + kSlackFrames)
+        << "closed too late: " << framesPushedAtClose << " frames pushed";
+    EXPECT_LT(framesPushedAtClose * frameBytes, kExpectedMaxQueuedBytes / 8);
+
+    ::close(client);
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
 // The mirror image of OutboundQueueIsBounded: a client that keeps reading
 // must NEVER be closed for backpressure, no matter how much is broadcast at
 // it, because the queue that matters is what is still WAITING to be sent, not
