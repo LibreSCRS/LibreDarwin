@@ -140,3 +140,18 @@ TEST(SecCodeAuthorizer, UnidentifiablePeerFailsClosed)
 }
 
 } // namespace
+
+TEST(SecCodeAuthorizer, TeamIdMakesTheAllowListDemandTheDesignatedRequirement)
+{
+    SecCodeAuthorizer::Policy policy;
+    policy.allowedSigningIds = {"org.librescrs.LibreMac"};
+    policy.requiredAppGroup = "group.org.librescrs.LibreMac";
+    policy.teamId = "ABCDE12345";
+    const auto claimed = [](std::optional<bool> dr) {
+        return SecCodeAuthorizer::PeerAuth{std::string("org.librescrs.LibreMac"), {"group.org.librescrs.LibreMac"}, dr};
+    };
+    EXPECT_EQ(make(policy, claimed(std::nullopt)).authorize(Agent::kActionSign, kCaller),
+              Agent::AuthorizationOutcome::Denied);
+    EXPECT_EQ(make(policy, claimed(false)).authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Denied);
+    EXPECT_EQ(make(policy, claimed(true)).authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Granted);
+}

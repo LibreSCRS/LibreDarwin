@@ -34,11 +34,12 @@ namespace LibreSCRS::Darwin {
 //
 // What an allow-list proves, and what it does not: the signing identifier and
 // the app-group entitlement are both CLAIMED by the peer's own signature, and
-// an ad-hoc signed binary can claim both. Until the peer's designated
-// requirement is checked against our Team ID, an allow-list narrows honest
-// callers and stops no one who signs a binary to match. Every allow-list still
-// requires the app-group entitlement, and fails closed without it, because that
-// is the most the public SecTask path can ask for.
+// an ad-hoc signed binary can claim both. With Policy::teamId set, an
+// allow-list also demands that the peer satisfy the designated requirement
+// naming that Team ID (checked through the shared PeerCodeSigning resolution),
+// which a binary someone else signed cannot. Without it, an allow-list narrows
+// honest callers and stops no one who signs a binary to match. Every allow-list
+// still requires the app-group entitlement, and fails closed without it.
 //
 // The per-caller first-op rate limit is NOT here: it is the neutral core's RateLimiter,
 // keyed on the CallerToken the transport mints. This gate does identity only.
@@ -52,8 +53,9 @@ public:
     // The code-signing facts read from a peer's audit_token (the shared
     // SecTask resolution in PeerCodeSigning.h).
     using PeerAuth = PeerCodeSigning;
-    // Resolves a peer's SecTask facts. Default = real SecTask; a fake is injected
-    // in tests (the test binary has no meaningful signing identity).
+    // Resolves a peer's SecTask facts (and, with Policy::teamId, its designated
+    // requirement). Default = the real resolution; a fake is injected in tests
+    // (the test binary has no meaningful signing identity).
     using AuthResolver = std::function<PeerAuth(const PeerCredentials&)>;
 
     struct Policy
@@ -69,6 +71,10 @@ public:
         // app-group entitlement -- claimed by the peer's signature, like the
         // signing identifier. e.g. "group.org.librescrs.LibreMac".
         std::optional<std::string> requiredAppGroup;
+        // If set, every allow-list decision ALSO requires the peer's code to
+        // satisfy the designated requirement naming this Team ID -- the part
+        // that says who signed it. The daemon passes configuredTeamId().
+        std::optional<std::string> teamId;
     };
 
     SecCodeAuthorizer(CredentialsResolver credentials, Policy policy);
@@ -83,7 +89,7 @@ public:
 private:
     CredentialsResolver m_credentials;
     Policy m_policy;
-    AuthResolver m_authResolver; // default: real SecTask
+    AuthResolver m_authResolver; // default: real SecTask + designated requirement
 };
 
 } // namespace LibreSCRS::Darwin

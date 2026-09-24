@@ -34,14 +34,16 @@ std::string prompterSocketPath()
 }
 
 // The connecting peer must be the agent: its SecTask signing identifier must
-// match the agent's and it must carry our App-Group entitlement — the shared
+// match the agent's, it must carry our App-Group entitlement, and with a team id
+// configured it must satisfy the designated requirement — the shared
 // PeerCodeSigning gate (PeerPolicy.h). There is no opt-out and no override of
 // the expected identity: with one, any same-uid process could raise the PIN
 // window and receive the typed secret.
 LibreSCRS::Darwin::PrompterServer::PeerAuthorized makePeerAuth()
 {
     return [expected = LibreSCRS::Darwin::expectedAgentIdentity()](const LibreSCRS::Darwin::PeerCredentials& creds) {
-        return LibreSCRS::Darwin::matchesExpectedPeer(LibreSCRS::Darwin::resolvePeerCodeSigning(creds), expected);
+        return LibreSCRS::Darwin::matchesExpectedPeer(LibreSCRS::Darwin::resolvePeerCodeSigning(creds, expected.teamId),
+                                                      expected);
     };
 }
 
@@ -57,6 +59,7 @@ LibreSCRS::Darwin::PrompterComposition::Hooks defaultHooks()
     auto state = std::make_shared<State>();
     return LibreSCRS::Darwin::PrompterComposition::Hooks{
         .harden = LibreSCRS::Darwin::hardenSecretProcess,
+        .selfCheck = [] { return LibreSCRS::Darwin::selfMatchesConfiguredTeam(LibreSCRS::Darwin::kPrompterSigningId); },
         .appInit =
             [] {
                 // LSUIElement (no Dock icon / menu bar); the windows are

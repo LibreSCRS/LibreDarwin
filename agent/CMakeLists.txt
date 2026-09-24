@@ -27,6 +27,18 @@ add_library(LibreDarwinWireCore STATIC
     src/backend/AppGroupPaths.cpp
     src/backend/ProcessHardening.cpp)
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
+# The team id the agent and the prompter hold each other (and themselves, at
+# start-up) to through the designated requirement. A compiled constant, never
+# read from the environment. Empty = no designated-requirement check, which is
+# what an ad-hoc signed build needs; a build signed with a Developer ID sets it.
+set(LIBRESCRS_TEAM_ID "" CACHE STRING
+    "Apple Team ID whose signature the agent and prompter require of each other (empty: no check)")
+if(NOT LIBRESCRS_TEAM_ID STREQUAL "" AND NOT LIBRESCRS_TEAM_ID MATCHES "^[A-Z0-9]+$")
+    message(FATAL_ERROR "LIBRESCRS_TEAM_ID must be upper-case letters and digits, got '${LIBRESCRS_TEAM_ID}'")
+endif()
+# PRIVATE to the one translation unit's library that reads it, so no header
+# carries the macro and every consumer sees the same value.
+target_compile_definitions(LibreDarwinWireCore PRIVATE LIBRESCRS_TEAM_ID="${LIBRESCRS_TEAM_ID}")
 target_compile_features(LibreDarwinWireCore PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinWireCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(LibreDarwinWireCore
@@ -34,7 +46,7 @@ target_link_libraries(LibreDarwinWireCore
         LibreAgent::Wire # AnonFd.h/PrompterProtocol.h expose UniqueFd/CborValue in their public API
     PRIVATE
         ${BSM_LIB}                     # PeerIdentity audit_token_to_pid
-        ${SECURITY_FRAMEWORK}          # PeerCodeSigning SecTask resolution
+        ${SECURITY_FRAMEWORK}          # PeerCodeSigning SecTask + SecCode designated requirement
         ${CORE_FOUNDATION_FRAMEWORK})
 
 add_library(LibreDarwinAgentBackend STATIC

@@ -111,6 +111,14 @@ int main(int argc, char** argv)
     if (!hardened) {
         Agent::log::warn("process hardening incomplete (PT_DENY_ATTACH / RLIMIT_CORE=0 failed)");
     }
+    // A build that names a team id holds its peers to that team's designated
+    // requirement, so it must meet the requirement itself. A mis-signed build
+    // stops here, with the cause, before it binds a socket or touches the
+    // container -- rather than being refused by its prompter with nothing said.
+    if (!Darwin::selfMatchesConfiguredTeam(Darwin::kAgentSigningId)) {
+        Agent::log::error("built with a team id but not signed by that team; refusing to start");
+        return 2;
+    }
 
     const auto arguments = parseArguments(std::span<char* const>(argv, static_cast<std::size_t>(argc)));
     if (!arguments) {
@@ -172,13 +180,15 @@ int main(int argc, char** argv)
     // trust tier rests on the device-owner confirmation the frontend requires,
     // and the empty lists add no narrowing. The app group below is what an
     // allow-list would also require -- claimable by a self-signed peer too, so
-    // it is hygiene, not a boundary (SecCodeAuthorizer.h says what it proves).
+    // it is hygiene, not a boundary; the team id, when the build names one, is
+    // what makes an allow-list a boundary (SecCodeAuthorizer.h says what each proves).
     LibreSCRS::Darwin::SecCodeAuthorizer authorizer(
         [&transport](const Agent::CallerToken& caller) { return transport->credentialsFor(caller); },
         LibreSCRS::Darwin::SecCodeAuthorizer::Policy{
             .trustTierSigningIds = {},
             .allowedSigningIds = {},
             .requiredAppGroup = std::string(Darwin::kAppGroup),
+            .teamId = Darwin::configuredTeamId(),
         });
     // The prompter client verifies the SERVING peer's code-signing identity (a
     // re-bound prompter.sock must not be able to inject a secret the agent

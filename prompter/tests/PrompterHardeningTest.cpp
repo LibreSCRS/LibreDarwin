@@ -6,7 +6,7 @@
 // the test process, which must stay debuggable — observed from outside: a probe
 // that tries to attach to the hardened child is killed by the kernel with
 // SIGSEGV, while the same probe against an unhardened child is merely refused;
-// (2) PrompterComposition::run() calls its hooks in the order harden -> appInit
+// (2) PrompterComposition::run() calls its hooks in the order harden -> selfCheck -> appInit
 // -> bind -> runLoop, so the step that creates NSApplication (and later the
 // window) can never run before the hardening.
 #include "PrompterComposition.h"
@@ -132,13 +132,19 @@ struct Recorder
     std::vector<std::string> calls;
     std::vector<std::string> warnings;
 
-    Composition::Hooks hooks(bool hardenResult = true, std::expected<void, std::string> bindResult = {})
+    Composition::Hooks hooks(bool hardenResult = true, std::expected<void, std::string> bindResult = {},
+                             bool selfCheckResult = true)
     {
         return Composition::Hooks{
             .harden =
                 [this, hardenResult] {
                     calls.emplace_back("harden");
                     return hardenResult;
+                },
+            .selfCheck =
+                [this, selfCheckResult] {
+                    calls.emplace_back("selfCheck");
+                    return selfCheckResult;
                 },
             .appInit = [this] { calls.emplace_back("appInit"); },
             .bind =
@@ -158,7 +164,7 @@ TEST(PrompterComposition, HardensBeforeTheApplicationExistsAndBeforeTheSocketIsB
 {
     Recorder recorder;
     EXPECT_EQ(Composition::run(recorder.hooks()), 0);
-    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "appInit", "bind", "runLoop"}));
+    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "selfCheck", "appInit", "bind", "runLoop"}));
     EXPECT_TRUE(recorder.warnings.empty());
 }
 
@@ -166,7 +172,7 @@ TEST(PrompterComposition, IncompleteHardeningIsReportedAndDoesNotReorderTheRest)
 {
     Recorder recorder;
     EXPECT_EQ(Composition::run(recorder.hooks(false)), 0);
-    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "appInit", "bind", "runLoop"}));
+    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "selfCheck", "appInit", "bind", "runLoop"}));
     ASSERT_EQ(recorder.warnings.size(), 1u);
 }
 
@@ -174,7 +180,19 @@ TEST(PrompterComposition, FailedBindExitsNonZeroWithoutRunningTheLoop)
 {
     Recorder recorder;
     EXPECT_NE(Composition::run(recorder.hooks(true, std::unexpected(std::string("bind refused")))), 0);
-    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "appInit", "bind"}));
+    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "selfCheck", "appInit", "bind"}));
     ASSERT_EQ(recorder.warnings.size(), 1u);
     EXPECT_NE(recorder.warnings.front().find("bind refused"), std::string::npos);
+}
+
+TEST(PrompterComposition, FailedSelfCheckExitsTwoBeforeTheApplicationOrTheSocket)
+{
+    // A build that names a team id but was not signed by that team refuses to
+    // start, with the cause, instead of standing up a window its agent would
+    // then refuse to talk to.
+    Recorder recorder;
+    EXPECT_EQ(Composition::run(recorder.hooks(true, {}, false)), 2);
+    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "selfCheck"}));
+    ASSERT_EQ(recorder.warnings.size(), 1u);
+    EXPECT_NE(recorder.warnings.front().find("not signed by that team"), std::string::npos);
 }
