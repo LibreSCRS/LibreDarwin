@@ -15,6 +15,18 @@
 # production the sandboxed LibreMac host creates the container (+ primes CTK) and
 # registers the bundled plist via SMAppService — this harness stands in for
 # that until the host exists.
+#
+# The LibreMac Swift clients (and, on the agent<->prompter private socket, the
+# two binaries checking each other -- PeerPolicy.h) verify the peer's SecTask
+# signing identifier plus the com.apple.security.application-groups
+# entitlement before trusting it. A plain `cmake --build` leaves the linker's
+# own ad-hoc signature on librescrs-agent/librescrs-prompter (identifier =
+# the binary's own name, no entitlements at all), which fails that check --
+# see Scripts/bundle-agent.sh (LibreMac) and RealAgentSmokeTests.swift for the
+# same recipe applied to the bundled and manually-run cases respectively. Every
+# subcommand here that runs or loads a binary re-signs it first with
+# sign_dev_binary(), ad-hoc, with the identifier + App-Group entitlement the
+# checking side expects.
 set -euo pipefail
 
 APP_GROUP="group.org.librescrs.LibreMac"
@@ -23,8 +35,17 @@ APP_GROUP="group.org.librescrs.LibreMac"
 CONTAINER="$HOME/Library/Group Containers/$APP_GROUP"
 SOCK="$CONTAINER/agent.sock"
 LABEL="org.librescrs.agent"
+PROMPTER_LABEL="org.librescrs.prompter"
 BUILD_DIR="${BUILD_DIR:-build}"
 AGENT_BIN="${AGENT_BIN:-$BUILD_DIR/agent/librescrs-agent}"
+PROMPTER_BIN="${PROMPTER_BIN:-$BUILD_DIR/prompter/librescrs-prompter}"
+# This harness only ever signs ad-hoc (no team, no designated requirement --
+# that policy belongs to LibreMac's Scripts/bundle-agent.sh, which team-signs
+# the bundled agent/prompter when CODESIGN_IDENTITY names a real identity).
+# Kept as a variable, not a literal "-", so sign_dev_binary can refuse to act
+# outside that one supported case instead of silently ad-hoc-signing a binary
+# someone meant to sign with a real identity.
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
 # Card plugins the agent dlopens. Defaults to the workspace install prefix that
 # rebuild-all populates, because the agent's own compiled default points at a
@@ -38,6 +59,58 @@ LM_LIB="${LM_LIB:-$LM_PREFIX/lib}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# sign_dev_binary <path> <identifier>
+#
+# Ad-hoc (re-)signs a dev-built binary with the signing identifier + the
+# com.apple.security.application-groups entitlement its peer checks
+# (PeerPolicy.h on the C++ side; the LibreMac Swift client on the other).
+# `codesign --force` replaces whatever signature is already there -- the
+# linker's ad-hoc one after a fresh build, or our own from a previous run --
+# so calling this again on the same binary is a no-op in effect: idempotent.
+#
+# Deliberately NO --options runtime. The hardened runtime strips DYLD_* out
+# of a process's environment unless the binary also carries
+# com.apple.security.cs.allow-dyld-environment-variables, and the whole point
+# of DYLD_LIBRARY_PATH here (see the `launchd` case below) is to let a dev
+# build that links LibreMiddleware with bare @rpath entries find it outside
+# an install prefix. A hardened dev binary would just fail to start instead
+# of failing the identity check it is being signed to pass. LibreMac's
+# Scripts/bundle-agent.sh DOES use --options runtime -- it signs a bundled,
+# installed agent that finds its libraries next to itself and needs no
+# DYLD_LIBRARY_PATH, which is a different binary than the one built here.
+#
+# The entitlements plist is written to a temp file made with `mktemp -t`
+# (honors $TMPDIR, never a literal /tmp path) and is removed before this
+# function returns, on every exit path, via a scoped EXIT trap.
+sign_dev_binary() {
+    local bin="$1" identifier="$2"
+    if [ "$CODESIGN_IDENTITY" != "-" ]; then
+        echo "not signing $bin: CODESIGN_IDENTITY='$CODESIGN_IDENTITY' is not ad-hoc (this dev harness only signs ad-hoc)" >&2
+        return 0
+    fi
+    [ -x "$bin" ] || die "cannot sign, binary not found/executable: $bin"
+
+    local ents
+    ents="$(mktemp -t librescrs-dev-entitlements)"
+    trap 'rm -f "$ents"' EXIT
+    cat > "$ents" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>$APP_GROUP</string>
+    </array>
+</dict>
+</plist>
+PLIST
+    codesign --force -s - --identifier "$identifier" --entitlements "$ents" "$bin"
+    rm -f "$ents"
+    trap - EXIT
+    echo "signed (ad-hoc): $bin identifier=$identifier group=$APP_GROUP"
+}
+
 ensure_container() {
     mkdir -p "$CONTAINER"
     # AF_UNIX sun_path is 104 bytes; fail early if the resolved socket overflows.
@@ -49,6 +122,7 @@ ensure_container() {
 case "${1:-run}" in
     run)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
+        sign_dev_binary "$AGENT_BIN" "$LABEL"
         ensure_container
         echo "librescrs-agent (dev) -> self-binds $SOCK"
         echo "stop with Ctrl-C (SIGINT); the agent unlinks the socket on clean exit."
@@ -56,6 +130,7 @@ case "${1:-run}" in
         ;;
     launchd)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
+        sign_dev_binary "$AGENT_BIN" "$LABEL"
         ensure_container
         ABS_BIN="$(cd "$(dirname "$AGENT_BIN")" && pwd)/$(basename "$AGENT_BIN")"
         PLIST_DIR="$HOME/Library/LaunchAgents"
@@ -94,6 +169,7 @@ case "${1:-run}" in
         ;;
     smoke)
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
+        sign_dev_binary "$AGENT_BIN" "$LABEL"
         ensure_container
         "$AGENT_BIN" --plugin-dir "$PLUGIN_DIR" &
         AGENT_PID=$!
@@ -104,6 +180,23 @@ case "${1:-run}" in
         done
         [ -S "$SOCK" ] || die "agent did not bind $SOCK within 4s"
         echo "OK: agent bound $SOCK (0600). Connect a client to exchange Hello/HelloAck."
+        ;;
+    --sign-only)
+        # Internal, undocumented in the usage line on purpose: signs one
+        # binary and exits, touching no container, launchd, or process.
+        # Exists so the signing step above can be exercised (and verified
+        # with `codesign -dv --entitlements -`) without running `run`,
+        # `launchd`, or `smoke` against a real dev App-Group container.
+        SIGN_BIN="${2:?usage: $0 --sign-only <path> [identifier]  (e.g. $AGENT_BIN or $PROMPTER_BIN)}"
+        SIGN_ID="${3:-}"
+        if [ -z "$SIGN_ID" ]; then
+            case "$(basename "$SIGN_BIN")" in
+                *agent*) SIGN_ID="$LABEL" ;;
+                *prompter*) SIGN_ID="$PROMPTER_LABEL" ;;
+                *) die "--sign-only: cannot infer the signing identifier from '$SIGN_BIN'; pass it as a third argument" ;;
+            esac
+        fi
+        sign_dev_binary "$SIGN_BIN" "$SIGN_ID"
         ;;
     *)
         die "usage: $0 {run|launchd|unload|smoke}"
