@@ -28,6 +28,15 @@ foreach(backend_test PeerIdentityTest PeerCodeSigningTest AgentCoreSeamsTest Soc
     add_test(NAME ${backend_test} COMMAND ${backend_test})
 endforeach()
 
+# The hardware smoke skips without LIBRESCRS_HW or a card; ctest would call
+# that Passed, so the summary would claim a hardware gate that never ran. The
+# pattern is anchored at the END of the output, on the last line of gtest's
+# skipped list: a bare "[  SKIPPED ]" also matches when another case in the
+# same binary FAILED, and ctest lets a skip match outrank the failure -- the
+# run then reports Skipped and exits 0. With a failure the output ends on
+# gtest's failed list instead, so the pattern misses and the failure stands.
+set_tests_properties(SignHwSmokeTest PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\] [^ \n]+\n*$")
+
 # ReadCertificatesOperationTest drives the agent's own operation, reached through
 # LibreAgent::Core's public headers like every other consumer (this host carried
 # a copy of it until the core exported one). It builds a session via the

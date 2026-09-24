@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: LGPL-2.1-or-later
+
+  LaunchAgent for the macOS broker-host daemon (librescrs-agent). Bundled as a
+  resource in the LibreMac host's Contents/Library/LaunchAgents/, where
+  SMAppService.agent(plistName:) registers it. No socket-activation, no
+  per-user path templating.
+
+  Self-bind: the agent resolves the App-Group container socket at runtime
+  ($HOME/Library/Group Containers/group.org.librescrs.LibreMac/agent.sock) and
+  bind()s it itself, so there is NO Sockets key. SMAppService cannot carry a
+  per-user SockPathName, which is precisely why socket-activation is off the
+  modern path; self-bind resolves the conflict. The container does not exist
+  until the sandboxed host first runs, so the host creates it (+ primes the CTK
+  registration) and THEN registers/loads this agent.
+
+  RunAtLoad + KeepAlive keep the agent up so it holds the CTK identity and
+  observes card presence; it idles cheaply (the per-reader CardSessionHolder
+  releases PC/SC after ~45 s).
+
+  ProgramArguments points at the librescrs-agent inside the host bundle
+  (Contents/MacOS). The dev harness (packaging/install-dev.sh) substitutes the
+  installed libexec path for a standalone launchd smoke.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>org.librescrs.agent</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>@LIBRESCRS_AGENT_PROGRAM@</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <!-- Where the card plugins are. The agent's compiled default is an install
+         prefix a dev box does not have, and the bundle-relative path only
+         exists inside a real app bundle: without this the agent loads ZERO
+         plugins, a card reads fine over PC/SC and still reports "not usable",
+         and nothing is logged about why.
+
+         This block used to be absent from the template entirely. The running
+         dev agent had it only because someone hand-edited the GENERATED plist,
+         which then went stale against the prefix it named -- and any later
+         `install-dev.sh launchd` would have silently overwritten the edit and
+         taken the plugins away again. Substituted by the script so the
+         documented setup is reproducible instead of remembered. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>LIBRESCRS_PLUGIN_DIR</key>
+        <string>@LIBRESCRS_PLUGIN_DIR@</string>
+
+        <!-- Where the middleware's shared libraries are. The agent is linked
+             with @rpath entries for @executable_path and ../Frameworks only,
+             which is right for a bundled deployment and finds nothing for a
+             development build linked against an install prefix. A shell that
+             exported this by hand hid the gap: the agent ran for weeks, and
+             the first launchd start after a rebuild died on
+             `Library not loaded: @rpath/libLibreSCRS_Plugin.4.dylib` before
+             reaching main -- a crash loop launchd then throttles, so even the
+             failure arrives slowly. -->
+        <key>DYLD_LIBRARY_PATH</key>
+        <string>@LIBRESCRS_LM_LIB@</string>
+    </dict>
+</dict>
+</plist>

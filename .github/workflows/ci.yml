@@ -8,8 +8,8 @@
 # sibling LibreAgent source (both components). The wire codec/framing/message-
 # model tests (incl. the CDDL contract guard and the CBOR fuzz gate) live in
 # LibreAgent's own CI now, not here. The hardware sign-smoke (SignHwSmokeTest)
-# GTEST_SKIP()s without LIBRESCRS_HW, so an unattended CI run is green,
-# not failed.
+# GTEST_SKIP()s without LIBRESCRS_HW, and ctest reports it as Skipped, not
+# Passed: an unattended run is green without claiming the hardware gate ran.
 name: CI
 
 on:
@@ -90,6 +90,14 @@ jobs:
         # others), and a green step says nothing about those. Its self-test runs
         # with the others below.
         run: ./ci/scripts/check-no-env-handles.sh
+
+      - name: The LaunchAgent template parses and carries no empty value
+        # plutil accepted a template whose comment was not well-formed XML, so
+        # a check on the Mac alone said nothing about it. This one uses a
+        # conforming parser and needs no Mac; the build job runs it again on the
+        # plist the install writes, which is the one that ships. Its self-test
+        # runs with the others below.
+        run: python3 ci/scripts/check-launchd-plist.py packaging/launchd/*.plist
 
       - name: Changelog and version agree on the pending release
         # Run on every push with the version this tree is heading for, so the
@@ -549,10 +557,31 @@ jobs:
             echo "$bin embeds $got"
           done
 
+      - name: Install the tree and check the LaunchAgent it installs
+        # The template is checked in the format job; this is the file
+        # configure_file() made of it, where a placeholder whose variable is
+        # not set has become an empty string without a word. Installed into a
+        # directory of its own so nothing on the runner is touched.
+        working-directory: LibreDarwin
+        run: |
+          cmake --install build --prefix "$PWD/install-probe"
+          python3 ci/scripts/check-launchd-plist.py install-probe/share/librescrs/launchd/org.librescrs.agent.plist
+
+      - name: The installed prompter carries its process hardening
+        # The prompter denies debugger attach and core dumps before it reads a
+        # secret. A link that stopped pulling the routine in would still build
+        # and pass every test that does not look at the binary; this reads the
+        # binary the install step put in place. Proved by
+        # ci/scripts/check-defined-symbol.selftest.sh, run in the format job.
+        working-directory: LibreDarwin
+        run: ./ci/scripts/check-defined-symbol.sh install-probe/libexec/librescrs-prompter 'LibreSCRS::Darwin::hardenSecretProcess()'
+
       - name: Test
-        # The hardware SignHwSmokeTest auto-skips without LIBRESCRS_HW, so
-        # this is green unattended. All wire/transport/frontend/lifecycle unit
-        # tests run against fakes + a real bound socket (no PC/SC reader needed).
+        # SignHwSmokeTest skips without LIBRESCRS_HW, and ctest reports it as
+        # Skipped -- its skip pattern matches only when the output ENDS on the
+        # skipped list, so a failing case in the same binary still fails. All
+        # wire/transport/frontend/lifecycle unit tests run against fakes + a
+        # real bound socket (no PC/SC reader needed).
         working-directory: LibreDarwin
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
