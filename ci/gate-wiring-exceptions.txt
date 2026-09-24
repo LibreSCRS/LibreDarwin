@@ -5,3 +5,4 @@
 # check-gates-wired.sh treats every line here as a reachability root, so what
 # these scripts call counts as run too. A path that stops being tracked fails.
 packaging/install-dev.sh  A dev harness that runs the agent standalone against a development App-Group container on a Mac; there is no host to run it against on a runner, and it installs into the developer's own container.
+ci/scripts/check-release-artifacts.sh  No workflow here uploads or downloads an artefact: the release publishes notes only, so the check would measure nothing and exits 2 by design. Its self-test still runs; wire the check the day a workflow here first downloads an artefact.
