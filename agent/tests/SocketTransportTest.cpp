@@ -519,4 +519,181 @@ TEST(SocketTransport, PresenceRosterIsReadableWhileTheLoopMutatesIt)
     std::filesystem::remove(path);
 }
 
+// The mirror image of a well-behaved client: this one never reads at all.
+// Every broadcast piles onto the per-connection outQueue (enqueueSend's
+// increment) with nothing ever popped back off, so the connection must be
+// closed once the queue crosses the byte bound -- well before it could ever
+// cross the frame-count bound at this frame size (~2 KiB/frame * 4096 frames
+// would be ~8 MiB).
+TEST(SocketTransport, OutboundQueueIsBounded)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    SocketTransport* trp = tr.get();
+
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+    Latch<int> closed;
+    tr->onClientDisconnect([&](Agent::CallerToken) { closed.push(1); });
+
+    const int client = connectClient(path);
+    // Minimal receive buffer: the kernel socket buffer fills almost at once,
+    // so backpressure (WouldBlock) sets in fast and every following broadcast
+    // piles directly onto the application-level queue.
+    int rcvbuf = 1;
+    ::setsockopt(client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
+
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+    ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
+
+    const std::string bigKey(2048, 'x'); // ~2 KiB/frame
+    bool sawClose = false;
+    for (int i = 0; i < 4096 && !sawClose; ++i) {
+        dispatch_sync(trp->loopQueue(), ^{
+          trp->broadcastConfigChanged(bigKey);
+        });
+        std::lock_guard<std::mutex> lk(closed.m);
+        sawClose = !closed.items.empty();
+    }
+    EXPECT_TRUE(sawClose) << "connection was never closed for a peer that never reads";
+
+    // The client observes the close as EOF once it drains whatever the
+    // kernel had already buffered.
+    timeval tv{5, 0};
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    char buf[256];
+    ssize_t r = -1;
+    do {
+        r = ::recv(client, buf, sizeof(buf), 0);
+    } while (r > 0);
+    EXPECT_EQ(r, 0) << "closed connection observed as EOF, not an error";
+
+    ::close(client);
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
+// The mirror image of OutboundQueueIsBounded: a client that keeps reading
+// must NEVER be closed for backpressure, no matter how much is broadcast at
+// it, because the queue that matters is what is still WAITING to be sent, not
+// the running total ever pushed. This is the test that catches a missing
+// decrement: without it, queuedBytes only grows (exactly like the never-reads
+// peer), so an actively-draining client would eventually cross the same bound
+// and get wrongly disconnected.
+TEST(SocketTransport, ReaderThatDrainsIsNeverClosed)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    SocketTransport* trp = tr.get();
+
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+    Latch<int> closed;
+    tr->onClientDisconnect([&](Agent::CallerToken) { closed.push(1); });
+
+    const int client = connectClient(path);
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+    ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
+
+    // A background reader drains every frame as it arrives. It stops on a
+    // named sentinel frame, the last one sent below, so "received every frame
+    // including the last" is directly observable rather than inferred from a
+    // timeout.
+    std::atomic<bool> sawSentinel{false};
+    std::atomic<int> received{0};
+    std::thread reader([&] {
+        while (!sawSentinel.load()) {
+            const auto frame = Agent::Wire::recvFrame(client);
+            if (!frame.has_value()) {
+                return; // EOF/error -- the counts below will catch the shortfall
+            }
+            received.fetch_add(1);
+            const auto decoded = Agent::Wire::decode(frame->body);
+            if (decoded.has_value()) {
+                const auto* keyField = decoded->find("key");
+                if (keyField != nullptr && keyField->asText() != nullptr && *keyField->asText() == "sentinel") {
+                    sawSentinel.store(true);
+                }
+            }
+        }
+    });
+
+    // Pace production against a sliding window of frames the reader has not
+    // yet observed. Bursting the whole total in one go (no pacing) would
+    // transiently back the queue up past both bounds even for a client that
+    // reads as fast as it can -- one blocking recvFrame() at a time is
+    // inherently slower than dispatch_sync issuing pushes back to back, so
+    // the resulting "backlog" would be a property of this test's own
+    // production rate, not of the client failing to drain. Keeping at most
+    // kWindow frames outstanding at any time (comfortably under both
+    // kMaxQueuedFrames and kMaxQueuedBytesPerConnection even at the larger
+    // frame size below) is what "a client that drains its queue" means here;
+    // the running TOTAL pushed across the test still comfortably exceeds
+    // both bounds.
+    constexpr int kWindow = 256;
+    int pushed = 0;
+    const auto waitForWindow = [&](int pushedSoFar) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+        while (received.load() < pushedSoFar - kWindow) {
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return false;
+            }
+            std::this_thread::sleep_for(std::chrono::microseconds(200));
+        }
+        return true;
+    };
+
+    // > kMaxQueuedFrames (4096) small frames...
+    constexpr int kSmallFrames = 4200;
+    // Non-fatal + a manual break, not ASSERT_TRUE: the reader thread is
+    // joinable and (if the connection was in fact wrongly closed) unjoined at
+    // any early `return` would abort the process instead of failing the test
+    // cleanly. A closed connection makes the client's next recvFrame() see
+    // EOF almost immediately, so the reader still exits and join() below
+    // still returns promptly even when paced goes false.
+    bool paced = true;
+    const std::string smallKey = "k";
+    for (int i = 0; i < kSmallFrames && paced; ++i) {
+        dispatch_sync(trp->loopQueue(), ^{
+          trp->broadcastConfigChanged(smallKey);
+        });
+        ++pushed;
+        paced = waitForWindow(pushed);
+        EXPECT_TRUE(paced) << "reader fell behind the pacing window at frame " << pushed;
+    }
+    // ...plus > kMaxQueuedBytesPerConnection (4 MiB) of larger frames, all in
+    // the same connection's lifetime.
+    constexpr int kBigFrames = 900;
+    const std::string bigKey(5000, 'y'); // 900 * ~5 KiB =~ 4.5 MiB
+    for (int i = 0; i < kBigFrames && paced; ++i) {
+        dispatch_sync(trp->loopQueue(), ^{
+          trp->broadcastConfigChanged(bigKey);
+        });
+        ++pushed;
+        paced = waitForWindow(pushed);
+        EXPECT_TRUE(paced) << "reader fell behind the pacing window at frame " << pushed;
+    }
+    if (paced) {
+        dispatch_sync(trp->loopQueue(), ^{
+          trp->broadcastConfigChanged("sentinel");
+        });
+    }
+
+    reader.join();
+    EXPECT_TRUE(sawSentinel.load()) << "the reader must observe every frame, including the last one";
+    EXPECT_EQ(received.load(), kSmallFrames + kBigFrames + 1);
+    {
+        std::lock_guard<std::mutex> lk(closed.m);
+        EXPECT_TRUE(closed.items.empty()) << "a client that drains its queue must never be closed for backpressure";
+    }
+
+    ::close(client);
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
 } // namespace

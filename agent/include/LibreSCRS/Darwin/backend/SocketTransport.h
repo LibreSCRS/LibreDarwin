@@ -211,6 +211,13 @@ private:
         bool sawFirstFrame{false};
         bool writeSourceResumed{false};
         std::deque<OutFrame> outQueue;
+        // Sum of every currently-queued OutFrame::bytes.size(): incremented in
+        // enqueueSend before push_back, decremented in flushWrites alongside
+        // pop_front, and zeroed in closeConnection. Checked against
+        // kMaxQueuedBytesPerConnection / kMaxQueuedFrames on every enqueue so a
+        // peer that never reads (or reads slower than it is published to) gets
+        // its connection closed instead of growing this queue forever.
+        std::size_t queuedBytes{0};
     };
 
     enum class SendState : std::uint8_t { Sent, WouldBlock, Error };

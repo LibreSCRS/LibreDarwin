@@ -33,6 +33,18 @@ namespace log = Agent::log;
 // accept.
 constexpr std::size_t kMaxConnections = 32;
 
+// Per-connection outbound backpressure bounds: a peer that never reads (or
+// reads slower than it is published to) would otherwise grow its outQueue
+// without limit -- a WouldBlock send left frames queued forever. The byte
+// bound is the primary backstop; the frame-count bound catches a many-small-
+// frames storm that would stay under the byte bound for a long time. Checked
+// on every enqueue (Connection::queuedBytes / outQueue.size()); crossing
+// either closes the connection instead of growing the queue further. The
+// third client, SocketAgentClient (the PKCS#11 facade), stays subscribed and
+// drains its queue on every call, so it never approaches either bound.
+constexpr std::size_t kMaxQueuedBytesPerConnection = 4 * 1024 * 1024; // 4 MiB
+constexpr std::size_t kMaxQueuedFrames = 4096;
+
 void makeNonBlockingCloexec(int fd) noexcept
 {
     ::fcntl(fd, F_SETFD, FD_CLOEXEC);
@@ -404,6 +416,7 @@ void SocketTransport::closeConnection(std::uint64_t connId)
         it->second->writeSource = nullptr;
     }
     cancelFirstFrameTimer(*it->second);
+    it->second->queuedBytes = 0;
     m_connections.erase(it); // drops this connection's fd share; the source cancel
                              // handlers close the fd once GCD finishes their teardown
 
@@ -417,10 +430,18 @@ void SocketTransport::closeConnection(std::uint64_t connId)
 void SocketTransport::enqueueSend(Connection& conn, std::vector<std::uint8_t> framed,
                                   std::vector<Agent::Wire::UniqueFd> fds)
 {
+    const std::size_t frameBytes = framed.size();
     OutFrame f;
     f.bytes = std::move(framed);
     f.fds = std::move(fds);
     conn.outQueue.push_back(std::move(f));
+    conn.queuedBytes += frameBytes;
+    if (conn.queuedBytes > kMaxQueuedBytesPerConnection || conn.outQueue.size() > kMaxQueuedFrames) {
+        log::warnf("transport: closing connection {}: outbound queue exceeded ({} bytes, {} frames)", conn.id,
+                   conn.queuedBytes, conn.outQueue.size());
+        closeConnection(conn.id); // erases conn; nothing below may touch it
+        return;
+    }
     flushWrites(conn);
 }
 
@@ -454,6 +475,7 @@ void SocketTransport::flushWrites(Connection& conn)
             closeConnection(conn.id);
             return; // conn gone
         }
+        conn.queuedBytes -= conn.outQueue.front().bytes.size();
         conn.outQueue.pop_front(); // Sent
     }
     // Drained: tear down the (backpressure-only) write source if it exists.
@@ -472,6 +494,8 @@ void SocketTransport::sendTo(std::uint64_t connId, const Agent::Wire::CborValue&
         return;
     }
     auto framed = Agent::Wire::encodeFrame(message.encode(), static_cast<std::uint32_t>(fds.size()));
+    // enqueueSend may close (and erase) this connection when the queue bound
+    // is exceeded; nothing below may read `it` or the connection afterward.
     enqueueSend(*it->second, std::move(framed), std::move(fds));
 }
 
