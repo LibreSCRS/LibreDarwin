@@ -54,8 +54,9 @@ public:
     // SecTask resolution in PeerCodeSigning.h).
     using PeerAuth = PeerCodeSigning;
     // Resolves a peer's SecTask facts (and, with Policy::teamId, its designated
-    // requirement). Default = the real resolution; a fake is injected in tests
-    // (the test binary has no meaningful signing identity).
+    // requirement). Called only when an allow-list decides, never for the
+    // default posture. Default = the real resolution; a fake is injected in
+    // tests (the test binary has no meaningful signing identity).
     using AuthResolver = std::function<PeerAuth(const PeerCredentials&)>;
 
     struct Policy

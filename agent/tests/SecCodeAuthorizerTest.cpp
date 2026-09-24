@@ -139,6 +139,42 @@ TEST(SecCodeAuthorizer, UnidentifiablePeerFailsClosed)
     EXPECT_EQ(authz.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Denied);
 }
 
+// With a team id configured, resolving the peer's code (SecTask, then the
+// designated requirement, on the transport's loop) is work only an allow-list
+// decision uses. The default posture must decide without it; an allow-list
+// decision resolves it once.
+TEST(SecCodeAuthorizer, OnlyAnAllowListDecisionResolvesThePeersCode)
+{
+    SecCodeAuthorizer::Policy policy;
+    policy.requiredAppGroup = "group.org.librescrs.LibreMac";
+    policy.teamId = "ABCDE12345";
+    const SecCodeAuthorizer::PeerAuth peer{
+        std::string("org.librescrs.LibreMac"), {"group.org.librescrs.LibreMac"}, true};
+    int resolved = 0;
+    const auto counting = [&resolved, peer](const PeerCredentials&) {
+        ++resolved;
+        return peer;
+    };
+
+    auto defaults = make(policy, peer); // no allow-list: the default posture
+    defaults.setAuthResolverForTest(counting);
+    EXPECT_EQ(defaults.authorize(Agent::kActionConfigure, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(defaults.authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(defaults.authorize(Agent::kActionPkcs11Login, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(defaults.authorize(Agent::kActionCredentialsManage, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(defaults.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(defaults.authorize("org.librescrs.agent.nonsense", kCaller), Agent::AuthorizationOutcome::Denied);
+    EXPECT_EQ(resolved, 0) << "the default posture resolved the peer's code it never uses";
+
+    policy.allowedSigningIds = {"org.librescrs.LibreMac"};
+    auto listed = make(policy, peer);
+    listed.setAuthResolverForTest(counting);
+    EXPECT_EQ(listed.authorize(Agent::kActionSign, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(resolved, 1) << "an allow-list decision must resolve the peer's code, once";
+    EXPECT_EQ(listed.authorize(Agent::kActionConfigureTrust, kCaller), Agent::AuthorizationOutcome::Granted);
+    EXPECT_EQ(resolved, 1) << "the trust tier has no list here, so it must not resolve";
+}
+
 } // namespace
 
 TEST(SecCodeAuthorizer, TeamIdMakesTheAllowListDemandTheDesignatedRequirement)

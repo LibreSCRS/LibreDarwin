@@ -52,7 +52,6 @@ Agent::AuthorizationOutcome SecCodeAuthorizer::authorize(std::string_view action
         log::warnf("authz: denying {} - unidentifiable peer", actionId);
         return Agent::AuthorizationOutcome::Denied; // fail closed
     }
-    const PeerAuth peer = m_authResolver(*creds);
 
     // A signing-identifier match is claimable by an ad-hoc-signed binary, and so
     // is the app-group entitlement: the SecTask path reports what the peer's own
@@ -65,11 +64,17 @@ Agent::AuthorizationOutcome SecCodeAuthorizer::authorize(std::string_view action
     // allow-list then demands that it held. Without a Team ID a determined
     // ad-hoc spoofer is a documented residual; the default posture -- empty
     // allow-lists, PIN-as-consent -- does not rest on either.
+    //
+    // The peer's code is resolved HERE, for an allow-list decision only: with a
+    // Team ID that is a SecCode lookup plus a validity check against the
+    // designated requirement, run on the transport's loop, and the default
+    // posture's answer would discard it.
     const auto signingIdAllowed = [&](const std::vector<std::string>& list) {
         if (!m_policy.requiredAppGroup) {
             log::warnf("authz: denying {} - allow-list configured without a requiredAppGroup binding", actionId);
             return false;
         }
+        const PeerAuth peer = m_authResolver(*creds);
         if (m_policy.teamId && peer.designatedRequirementValid != true) {
             log::warnf("authz: denying {} - peer does not satisfy the designated requirement", actionId);
             return false;
