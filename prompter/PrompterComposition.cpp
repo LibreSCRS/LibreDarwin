@@ -15,7 +15,12 @@ int run(const Hooks& hooks)
     }
     hooks.appInit();
     if (auto bound = hooks.bind(); !bound) {
-        hooks.warn(bound.error());
+        if (bound.error().kind == ServerStartError::Kind::AnotherInstance) {
+            hooks.warn("another prompter is already serving its socket; refusing to start a second one (" +
+                       bound.error().message + ")");
+            return 3;
+        }
+        hooks.warn(bound.error().message);
         return 1;
     }
     hooks.runLoop();

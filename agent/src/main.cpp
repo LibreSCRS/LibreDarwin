@@ -147,7 +147,17 @@ int main(int argc, char** argv)
     // socket) + the plugin capability resolver owned here at the entry point.
     auto created = LibreSCRS::Darwin::SocketTransport::create(socketPath);
     if (!created) {
-        Agent::log::errorf("failed to bind the agent socket {}: {}", socketPath, created.error());
+        if (created.error().kind == Darwin::ServerStartError::Kind::AnotherInstance) {
+            // Exit 3, not 0: under the LaunchAgent (KeepAlive SuccessfulExit=false)
+            // a non-zero exit is restarted every ThrottleInterval, logging this
+            // line each time, and the launchd agent takes over as soon as the
+            // other instance (a development run started by hand) exits. Exit 0
+            // would leave the job stopped for good once that instance is gone.
+            Agent::log::errorf("another agent is already serving {}; refusing to start a second one ({})", socketPath,
+                               created.error().message);
+            return 3;
+        }
+        Agent::log::errorf("failed to bind the agent socket {}: {}", socketPath, created.error().message);
         return 1;
     }
     auto transport = std::move(*created);

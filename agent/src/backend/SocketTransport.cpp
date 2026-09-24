@@ -183,23 +183,29 @@ SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
     return SendState::Sent;
 }
 
-std::expected<std::unique_ptr<SocketTransport>, std::string>
+std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
 SocketTransport::create(std::string socketPath, std::optional<std::string> socketActivationName)
 {
+    // Before anything at the path is unlinked or bound: a second instance must
+    // leave the first one's socket alone.
+    auto lock = SingleInstanceLock::acquire(socketPath);
+    if (!lock) {
+        return std::unexpected(std::move(lock.error()));
+    }
     if (socketActivationName) {
         if (auto activated = inheritActivatedSocket(*socketActivationName)) {
-            return adoptInherited(std::move(*activated), std::move(socketPath));
+            return adopt(std::move(*lock), std::move(*activated), std::move(socketPath));
         }
     }
     auto bound = bindContainerSocket(socketPath);
     if (!bound) {
-        return std::unexpected(bound.error());
+        return std::unexpected(ServerStartError{ServerStartError::Kind::Failed, bound.error()});
     }
 
     dispatch_queue_t queue = dispatch_queue_create("rs.librescrs.agent.transport", DISPATCH_QUEUE_SERIAL);
     // Private ctor; make_unique cannot see it.
-    std::unique_ptr<SocketTransport> t(
-        new SocketTransport(queue, std::move(bound->fd), std::move(socketPath), true, bound->identity));
+    std::unique_ptr<SocketTransport> t(new SocketTransport(queue, std::move(bound->fd), std::move(socketPath), true,
+                                                           bound->identity, std::move(*lock)));
     SocketTransport* raw = t.get();
     dispatch_sync(raw->m_queue, ^{
       raw->installAcceptSource();
@@ -208,14 +214,25 @@ SocketTransport::create(std::string socketPath, std::optional<std::string> socke
     return t;
 }
 
-std::unique_ptr<SocketTransport> SocketTransport::adoptInherited(Agent::Wire::UniqueFd listenFd, std::string socketPath)
+std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
+SocketTransport::adoptInherited(Agent::Wire::UniqueFd listenFd, std::string socketPath)
+{
+    auto lock = SingleInstanceLock::acquire(socketPath);
+    if (!lock) {
+        return std::unexpected(std::move(lock.error()));
+    }
+    return adopt(std::move(*lock), std::move(listenFd), std::move(socketPath));
+}
+
+std::unique_ptr<SocketTransport> SocketTransport::adopt(SingleInstanceLock instanceLock, Agent::Wire::UniqueFd listenFd,
+                                                        std::string socketPath)
 {
     // The accept handler drains until EAGAIN; a blocking fd would park the loop.
     makeNonBlockingCloexec(listenFd.get());
     dispatch_queue_t queue = dispatch_queue_create("rs.librescrs.agent.transport", DISPATCH_QUEUE_SERIAL);
     // launchd owns the file: no guard (see the header).
-    std::unique_ptr<SocketTransport> t(
-        new SocketTransport(queue, std::move(listenFd), std::move(socketPath), false, std::nullopt));
+    std::unique_ptr<SocketTransport> t(new SocketTransport(queue, std::move(listenFd), std::move(socketPath), false,
+                                                           std::nullopt, std::move(instanceLock)));
     SocketTransport* raw = t.get();
     dispatch_sync(raw->m_queue, ^{
       raw->installAcceptSource();
@@ -224,9 +241,11 @@ std::unique_ptr<SocketTransport> SocketTransport::adoptInherited(Agent::Wire::Un
 }
 
 SocketTransport::SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath,
-                                 bool ownsSocketFile, std::optional<SocketPathIdentity> listenIdentity)
+                                 bool ownsSocketFile, std::optional<SocketPathIdentity> listenIdentity,
+                                 SingleInstanceLock instanceLock)
     : m_queue(queue), m_listenFd(std::move(listenFd)), m_socketPath(std::move(socketPath)),
-      m_ownsSocketFile(ownsSocketFile), m_acceptTeardown(dispatch_group_create()), m_listenIdentity(listenIdentity)
+      m_instanceLock(std::move(instanceLock)), m_ownsSocketFile(ownsSocketFile),
+      m_acceptTeardown(dispatch_group_create()), m_listenIdentity(listenIdentity)
 {}
 
 void SocketTransport::setPathGuardIntervalForTest(std::chrono::microseconds interval)

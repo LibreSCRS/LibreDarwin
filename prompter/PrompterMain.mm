@@ -68,7 +68,7 @@ LibreSCRS::Darwin::PrompterComposition::Hooks defaultHooks()
                 [NSApplication sharedApplication];
                 [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
             },
-        .bind = [state]() -> std::expected<void, std::string> {
+        .bind = [state]() -> std::expected<void, LibreSCRS::Darwin::ServerStartError> {
             auto window = std::make_shared<LibreSCRS::Darwin::PromptWindow>();
             state->server = std::make_unique<LibreSCRS::Darwin::PrompterServer>(
                 prompterSocketPath(),

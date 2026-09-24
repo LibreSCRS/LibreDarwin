@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
+#include <LibreSCRS/Darwin/backend/SingleInstanceLock.h>
 #include <LibreSCRS/Darwin/backend/SocketPathIdentity.h>
 #include <LibreSCRS/Agent/wire/FrameReassembler.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
@@ -55,19 +56,24 @@ public:
     };
     using RequestSink = std::function<void(Inbound&&)>;
 
-    // Bind the container socket at `socketPath` (0600, sun_path-guarded,
-    // unlink-stale, cleanup-on-exit), or inherit a launchd-activated fd when
+    // Take the path's instance lock (SingleInstanceLock), then bind the
+    // container socket at `socketPath` (0600, sun_path-guarded, unlink-stale,
+    // cleanup-on-exit), or inherit a launchd-activated fd when
     // `socketActivationName` is set and available. On success the loop + accept
     // source are installed (driven by the process CFRunLoop / dispatch main).
-    [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, std::string>
+    // Another instance holding the lock is ServerStartError::AnotherInstance,
+    // and nothing at the path has been touched.
+    [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
     create(std::string socketPath, std::optional<std::string> socketActivationName = std::nullopt);
 
     // Serve an already-listening socket whose FILE this process does not own
     // (the launchd-activated fd create() inherits). launchd owns that path, so
     // no replaced-path guard is installed and the file is never unlinked here:
-    // binding a fresh socket over it would sever the activation.
-    [[nodiscard]] static std::unique_ptr<SocketTransport> adoptInherited(Agent::Wire::UniqueFd listenFd,
-                                                                         std::string socketPath);
+    // binding a fresh socket over it would sever the activation. The instance
+    // lock still applies: launchd starts one job per label, but a second agent
+    // started by hand beside it would own PC/SC on the same cards all the same.
+    [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
+    adoptInherited(Agent::Wire::UniqueFd listenFd, std::string socketPath);
 
     ~SocketTransport() override;
     SocketTransport(const SocketTransport&) = delete;
@@ -246,7 +252,9 @@ private:
     [[nodiscard]] static SendState trySendFrame(int fd, OutFrame& f);
 
     SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath, bool ownsSocketFile,
-                    std::optional<SocketPathIdentity> listenIdentity);
+                    std::optional<SocketPathIdentity> listenIdentity, SingleInstanceLock instanceLock);
+    [[nodiscard]] static std::unique_ptr<SocketTransport> adopt(SingleInstanceLock instanceLock,
+                                                                Agent::Wire::UniqueFd listenFd, std::string socketPath);
     void installAcceptSource();
     // Replaced-path guard (own socket file only): on every accept and on a
     // timer, compare what the path names with the inode this process bound.
@@ -276,6 +284,10 @@ private:
     dispatch_queue_t m_queue{nullptr};
     Agent::Wire::UniqueFd m_listenFd;
     std::string m_socketPath;
+    // Held for the transport's lifetime. A member, so it is released only
+    // after the destructor body has removed the socket file: a successor
+    // cannot bind in between and then lose its fresh file to that removal.
+    SingleInstanceLock m_instanceLock;
     bool m_ownsSocketFile{false};
     dispatch_source_t m_acceptSource{nullptr};
     // The listen fd is closed ONLY in the accept source's cancel handler

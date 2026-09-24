@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 #include <LibreSCRS/Darwin/backend/PeerIdentity.h>
+#include <LibreSCRS/Darwin/backend/SingleInstanceLock.h>
 #include <LibreSCRS/Darwin/backend/SocketPathIdentity.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
@@ -85,9 +86,11 @@ public:
     PrompterServer(const PrompterServer&) = delete;
     PrompterServer& operator=(const PrompterServer&) = delete;
 
-    // Bind the socket (0600, sun_path-guarded, unlink-stale) + arm the accept
-    // source. Returns an error string on bind failure.
-    [[nodiscard]] std::expected<void, std::string> start();
+    // Take the path's instance lock (SingleInstanceLock), then bind the socket
+    // (0600, sun_path-guarded, unlink-stale) + arm the accept source. Another
+    // prompter holding the lock is ServerStartError::AnotherInstance, and
+    // nothing at the path has been touched; the lock is held until stop().
+    [[nodiscard]] std::expected<void, ServerStartError> start();
 
     // Cancel the accept + connection sources and quiesce the serial queue.
     // Returns promptly even while a provider call is still blocked waiting on
@@ -162,6 +165,9 @@ private:
     // leaves it, so stop() waits for the last handler before returning.
     dispatch_group_t m_acceptTeardown{nullptr};
     std::optional<SocketPathIdentity> m_listenIdentity; // nullopt while unbound
+    // Held from start() to stop(); released there only after the socket file
+    // is removed, so a successor's fresh file cannot be the one removed.
+    std::optional<SingleInstanceLock> m_instanceLock;
     dispatch_source_t m_pathGuardTimer{nullptr};
     std::chrono::microseconds m_pathGuardInterval{std::chrono::seconds(10)};
     bool m_rebindPending{false}; // replacement seen; bind again until it succeeds

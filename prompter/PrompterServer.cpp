@@ -150,14 +150,21 @@ std::expected<void, std::string> PrompterServer::bindListenSocket()
     return {};
 }
 
-std::expected<void, std::string> PrompterServer::start()
+std::expected<void, ServerStartError> PrompterServer::start()
 {
     if (m_started) {
         return {};
     }
-    if (auto bound = bindListenSocket(); !bound) {
-        return bound;
+    // Before anything at the path is unlinked or bound: a second prompter must
+    // leave the first one's socket alone.
+    auto lock = SingleInstanceLock::acquire(m_socketPath);
+    if (!lock) {
+        return std::unexpected(std::move(lock.error()));
     }
+    if (auto bound = bindListenSocket(); !bound) {
+        return std::unexpected(ServerStartError{ServerStartError::Kind::Failed, bound.error()});
+    }
+    m_instanceLock = std::move(*lock);
     if (m_queue == nullptr) {
         m_queue = dispatch_queue_create("rs.librescrs.prompter", DISPATCH_QUEUE_SERIAL);
     }
@@ -313,6 +320,7 @@ void PrompterServer::stop() noexcept
         ::unlink(m_socketPath.c_str());
     }
     m_listenIdentity.reset();
+    m_instanceLock.reset(); // after the unlink: see the member
 }
 
 void PrompterServer::onAcceptReady()

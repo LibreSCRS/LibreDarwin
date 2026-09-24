@@ -29,6 +29,7 @@
 namespace {
 
 namespace Composition = LibreSCRS::Darwin::PrompterComposition;
+using LibreSCRS::Darwin::ServerStartError;
 
 // Child exit codes, reported to the parent through the pipe before pause().
 constexpr char kChildReady = 'R';
@@ -132,7 +133,7 @@ struct Recorder
     std::vector<std::string> calls;
     std::vector<std::string> warnings;
 
-    Composition::Hooks hooks(bool hardenResult = true, std::expected<void, std::string> bindResult = {},
+    Composition::Hooks hooks(bool hardenResult = true, std::expected<void, ServerStartError> bindResult = {},
                              bool selfCheckResult = true)
     {
         return Composition::Hooks{
@@ -179,10 +180,26 @@ TEST(PrompterComposition, IncompleteHardeningIsReportedAndDoesNotReorderTheRest)
 TEST(PrompterComposition, FailedBindExitsNonZeroWithoutRunningTheLoop)
 {
     Recorder recorder;
-    EXPECT_NE(Composition::run(recorder.hooks(true, std::unexpected(std::string("bind refused")))), 0);
+    EXPECT_EQ(Composition::run(recorder.hooks(
+                  true, std::unexpected(ServerStartError{ServerStartError::Kind::Failed, "bind refused"}))),
+              1);
     EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "selfCheck", "appInit", "bind"}));
     ASSERT_EQ(recorder.warnings.size(), 1u);
     EXPECT_NE(recorder.warnings.front().find("bind refused"), std::string::npos);
+}
+
+TEST(PrompterComposition, SecondInstanceExitsThreeWithoutRunningTheLoop)
+{
+    // Another prompter holds the socket path: this one says so and ends with
+    // its own exit code, before a run loop that would serve nothing.
+    Recorder recorder;
+    EXPECT_EQ(Composition::run(recorder.hooks(
+                  true, std::unexpected(ServerStartError{ServerStartError::Kind::AnotherInstance, "lock held"}))),
+              3);
+    EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "selfCheck", "appInit", "bind"}));
+    ASSERT_EQ(recorder.warnings.size(), 1u);
+    EXPECT_NE(recorder.warnings.front().find("already serving"), std::string::npos);
+    EXPECT_NE(recorder.warnings.front().find("lock held"), std::string::npos);
 }
 
 TEST(PrompterComposition, FailedSelfCheckExitsTwoBeforeTheApplicationOrTheSocket)

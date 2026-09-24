@@ -85,7 +85,7 @@ TEST(SocketTransport, InboundRequestReachesSinkWithPeerToken)
 {
     const std::string path = uniqueSocketPath();
     auto created = SocketTransport::create(path);
-    ASSERT_TRUE(created.has_value()) << (created ? "" : created.error());
+    ASSERT_TRUE(created.has_value()) << (created ? "" : created.error().message);
     auto tr = std::move(*created);
 
     Latch<std::pair<std::string, std::size_t>> sink; // (caller, request index)
@@ -880,7 +880,7 @@ TEST(SocketTransport, RebindsWhenTheSocketPathIsReplaced)
     WarnCapture warnings;
     const std::string path = tmpSocketPath("rb");
     auto created = SocketTransport::create(path);
-    ASSERT_TRUE(created.has_value()) << (created ? "" : created.error());
+    ASSERT_TRUE(created.has_value()) << (created ? "" : created.error().message);
     auto tr = std::move(*created);
     tr->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
     const auto closedAtCancel = tr->closedListenFdAtCancelForTest();
@@ -966,8 +966,9 @@ TEST(SocketTransport, InheritedSocketPathIsNeverReclaimed)
     WarnCapture warnings;
     const std::string path = tmpSocketPath("ih");
     const int launchdFd = bindImpostor(path); // stands in for launchd's listener
-    auto tr = SocketTransport::adoptInherited(Agent::Wire::UniqueFd(launchdFd), path);
-    ASSERT_NE(tr, nullptr);
+    auto adopted = SocketTransport::adoptInherited(Agent::Wire::UniqueFd(launchdFd), path);
+    ASSERT_TRUE(adopted.has_value()) << (adopted ? "" : adopted.error().message);
+    auto tr = std::move(*adopted);
     tr->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
     Latch<std::string> sink;
     tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
@@ -1000,6 +1001,87 @@ TEST(SocketTransport, InheritedSocketPathIsNeverReclaimed)
     ::close(other);
     std::filesystem::remove(path);
     std::filesystem::remove(alias);
+}
+
+// --- Single instance per socket path ---------------------------------------
+
+// A second agent on the same path (a manual run beside the launchd one) must
+// refuse to start rather than take the path: two instances would unlink each
+// other's socket on every guard tick, and both would own PC/SC on one card.
+// The first keeps its socket file and keeps serving.
+TEST(SocketTransport, SecondInstanceOnTheSamePathRefusesToStart)
+{
+    WarnCapture warnings;
+    const std::string path = tmpSocketPath("si");
+    auto created = SocketTransport::create(path);
+    ASSERT_TRUE(created.has_value()) << (created ? "" : created.error().message);
+    auto first = std::move(*created);
+    first->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
+    Latch<std::string> sink;
+    first->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+    const auto firstId = SocketPathIdentity::of(path);
+    ASSERT_TRUE(firstId.has_value());
+
+    auto second = SocketTransport::create(path);
+    ASSERT_FALSE(second.has_value()) << "a second instance started on a path another instance serves";
+    EXPECT_EQ(second.error().kind, ServerStartError::Kind::AnotherInstance) << second.error().message;
+
+    // Over several guard ticks: the path is still the first one's, and the
+    // first never saw a replacement to answer.
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    EXPECT_TRUE(firstId->stillNames(path)) << "the refused instance replaced the first one's socket file";
+    EXPECT_EQ(warnings.count(kReplacedLine), 0u);
+
+    const int client = connectClient(path);
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+    EXPECT_TRUE(sink.waitFor(1, std::chrono::seconds(2))) << "the first instance stopped serving";
+
+    ::close(client);
+    first.reset();
+    std::filesystem::remove(path);
+}
+
+// The lock is released at shutdown, so the next instance starts; and the lock
+// file does not outlive the instance that held it.
+TEST(SocketTransport, NextInstanceStartsOnceThePreviousHasShutDown)
+{
+    const std::string path = tmpSocketPath("sn");
+    {
+        auto first = SocketTransport::create(path);
+        ASSERT_TRUE(first.has_value()) << (first ? "" : first.error().message);
+    }
+    EXPECT_FALSE(std::filesystem::exists(path + ".lock")) << "shutdown left the lock file behind";
+    auto created = SocketTransport::create(path);
+    ASSERT_TRUE(created.has_value()) << (created ? "" : created.error().message);
+    auto second = std::move(*created);
+    Latch<std::string> sink;
+    second->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+    const int client = connectClient(path);
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+    EXPECT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
+    ::close(client);
+    second.reset();
+    EXPECT_FALSE(std::filesystem::exists(path + ".lock")) << "shutdown left the lock file behind";
+    std::filesystem::remove(path);
+}
+
+// A symlink planted where the lock file goes is refused, not followed: the
+// lock must not create or lock a file somewhere the planter chose.
+TEST(SocketTransport, SymlinkAtTheLockPathIsRefused)
+{
+    const std::string path = tmpSocketPath("sl");
+    const std::string target = path + ".target";
+    ASSERT_EQ(::symlink(target.c_str(), (path + ".lock").c_str()), 0) << std::strerror(errno);
+    auto created = SocketTransport::create(path);
+    ASSERT_FALSE(created.has_value()) << "the transport started through a symlinked lock file";
+    EXPECT_EQ(created.error().kind, ServerStartError::Kind::Failed) << created.error().message;
+    EXPECT_FALSE(std::filesystem::exists(target)) << "the lock followed the symlink";
+    EXPECT_FALSE(SocketPathIdentity::of(path).has_value()) << "a refused start bound the socket";
+    std::filesystem::remove(path + ".lock");
 }
 
 } // namespace

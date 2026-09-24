@@ -31,6 +31,7 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <vector>
@@ -899,6 +900,87 @@ TEST(PrompterServer, StopUnlinksOnlyItsOwnSocketFile)
         ::close(impostor);
         std::filesystem::remove(path);
     }
+}
+
+// Sends a Reset on `path` and returns the count the answering server reports,
+// or nullopt when nothing answers.
+std::optional<std::uint32_t> resetCountOn(const std::string& path)
+{
+    const int conn = connectOnceListening(path, std::chrono::seconds(2));
+    if (conn < 0) {
+        return std::nullopt;
+    }
+    std::optional<std::uint32_t> closed;
+    if (Agent::Wire::sendFrame(conn, wire::toCbor(wire::PromptReset{}).encode()).has_value()) {
+        if (auto reply = Agent::Wire::recvFrame(conn); reply.has_value()) {
+            if (auto parsed = wire::parseResetDone(reply->body); parsed.has_value()) {
+                closed = parsed->closed;
+            }
+        }
+    }
+    ::close(conn);
+    return closed;
+}
+
+// A second prompter on the same path must refuse to start rather than take the
+// path: two would unlink each other's socket on every guard tick. The first
+// keeps its socket file and keeps answering.
+TEST(PrompterServer, SecondInstanceOnTheSamePathRefusesToStart)
+{
+    const std::string path = tmpSocketPath("psi");
+    const auto makeServer = [&](std::uint32_t resetCount, std::vector<std::string>* warnings) {
+        auto server = std::make_unique<PrompterServer>(
+            path, rejectSingleProvider(), rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+            [resetCount]() -> std::uint32_t { return resetCount; }, [](const PeerCredentials&) { return true; });
+        if (warnings != nullptr) {
+            server->setWarn([warnings](const std::string& line) { warnings->push_back(line); });
+        }
+        server->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
+        return server;
+    };
+    std::vector<std::string> firstWarnings; // written on the first server's queue, read after stop()
+    auto first = makeServer(7, &firstWarnings);
+    ASSERT_TRUE(first->start().has_value());
+    const auto firstId = SocketPathIdentity::of(path);
+    ASSERT_TRUE(firstId.has_value());
+
+    auto second = makeServer(9, nullptr);
+    const auto started = second->start();
+    ASSERT_FALSE(started.has_value()) << "a second prompter started on a path another one serves";
+    EXPECT_EQ(started.error().kind, ServerStartError::Kind::AnotherInstance) << started.error().message;
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    EXPECT_TRUE(firstId->stillNames(path)) << "the refused prompter replaced the first one's socket file";
+    EXPECT_EQ(resetCountOn(path), std::optional<std::uint32_t>(7)) << "the first prompter stopped answering";
+
+    second.reset();
+    first->stop();
+    EXPECT_TRUE(firstWarnings.empty()) << "the first prompter saw its path replaced: " << firstWarnings.front();
+    std::filesystem::remove(path);
+}
+
+// stop() releases the lock, so the next prompter starts; and the lock file
+// does not outlive the prompter that held it.
+TEST(PrompterServer, NextInstanceStartsOnceThePreviousHasStopped)
+{
+    const std::string path = tmpSocketPath("psn");
+    const auto makeServer = [&](std::uint32_t resetCount) {
+        return std::make_unique<PrompterServer>(
+            path, rejectSingleProvider(), rejectMultiProvider(), [](const std::string&) {}, rejectConfirmProvider(),
+            [resetCount]() -> std::uint32_t { return resetCount; }, [](const PeerCredentials&) { return true; });
+    };
+    auto first = makeServer(7);
+    ASSERT_TRUE(first->start().has_value());
+    first->stop();
+    EXPECT_FALSE(std::filesystem::exists(path + ".lock")) << "stop() left the lock file behind";
+
+    auto second = makeServer(9);
+    const auto started = second->start();
+    ASSERT_TRUE(started.has_value()) << (started ? "" : started.error().message);
+    EXPECT_EQ(resetCountOn(path), std::optional<std::uint32_t>(9));
+    second->stop();
+    EXPECT_FALSE(std::filesystem::exists(path + ".lock")) << "stop() left the lock file behind";
+    std::filesystem::remove(path);
 }
 
 } // namespace

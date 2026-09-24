@@ -25,7 +25,8 @@ add_library(LibreDarwinWireCore STATIC
     src/backend/PeerIdentity.cpp
     src/backend/PeerCodeSigning.cpp
     src/backend/AppGroupPaths.cpp
-    src/backend/ProcessHardening.cpp)
+    src/backend/ProcessHardening.cpp
+    src/backend/SingleInstanceLock.cpp)
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # The team id the agent and the prompter hold each other (and themselves, at
 # start-up) to through the designated requirement. A compiled constant, never

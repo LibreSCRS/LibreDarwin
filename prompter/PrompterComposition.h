@@ -2,6 +2,8 @@
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
 
+#include <LibreSCRS/Darwin/backend/SingleInstanceLock.h>
+
 #include <expected>
 #include <functional>
 #include <string>
@@ -26,7 +28,7 @@ struct Hooks
     std::function<void()> appInit;
     // Build and start the socket server; an error is reported and ends the
     // process before the run loop starts.
-    std::function<std::expected<void, std::string>()> bind;
+    std::function<std::expected<void, ServerStartError>()> bind;
     // Run until the process ends.
     std::function<void()> runLoop;
     std::function<void(const std::string&)> warn;
@@ -34,7 +36,8 @@ struct Hooks
 
 // Calls harden -> selfCheck -> appInit -> bind -> runLoop and returns the process
 // exit code: 0 after the run loop returns, 1 when bind failed (the run loop never
-// starts), 2 when the self-check failed (nothing after it runs).
+// starts), 2 when the self-check failed (nothing after it runs), 3 when another
+// prompter already serves the socket path (bind refused before touching it).
 int run(const Hooks& hooks);
 
 } // namespace LibreSCRS::Darwin::PrompterComposition
