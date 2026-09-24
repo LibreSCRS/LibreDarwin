@@ -9,5 +9,9 @@ build-release/
 build-cc/
 build-*/
 
+# The tree `cmake --install build --prefix $PWD/install-probe` writes (CI's
+# install check, and the same command run locally).
+install-probe/
+
 # The editor's clangd index, written next to the sources it indexes.
 .cache/

@@ -23,6 +23,15 @@
   again at once. A crash or a refused start is restarted, no sooner than
   ThrottleInterval seconds after the last start.
 
+  Two refused starts repeat by design, and are not a crash loop. An agent
+  built with a team id but not signed by that team exits 2 at its start-up
+  self-check; one that finds another agent already serving the socket (a
+  development run started by hand) exits 3. launchd starts either one again
+  every ThrottleInterval seconds, for as long as the cause lasts, and each
+  start logs that cause again. The first stops only when the agent is signed
+  correctly; the second ends by itself, since the next start after the other
+  instance exits takes over the socket.
+
   ProgramArguments points at the librescrs-agent inside the host bundle
   (Contents/MacOS). The dev harness (packaging/install-dev.sh) substitutes the
   installed libexec path for a standalone launchd smoke.
