@@ -13,7 +13,8 @@ find_library(BSM_LIB bsm REQUIRED) # audit_token_to_pid / _pidversion (PeerIdent
 # Darwin-only wire-adjacent pieces that sit alongside, but are NOT themselves,
 # the shared LibreAgent::Wire codec/framing/message model: anonymous-fd
 # creation (the memfd_create analog), the private agent<->prompter CBOR
-# protocol, and BSM peer identity. Links NO LibreMiddleware/LibreAgent::Core,
+# protocol, BSM peer identity, and the process hardening both secret-holding
+# binaries call first. Links NO LibreMiddleware/LibreAgent::Core,
 # so the agent-owned prompter (and, later, the PKCS#11 facade) can reuse it
 # without pulling the card stack. The libc++ std::expected/std::format this
 # layer uses on AppleClang need -fexperimental-library, which the root
@@ -23,7 +24,8 @@ add_library(LibreDarwinWireCore STATIC
     src/backend/wire/PrompterProtocol.cpp
     src/backend/PeerIdentity.cpp
     src/backend/PeerCodeSigning.cpp
-    src/backend/AppGroupPaths.cpp)
+    src/backend/AppGroupPaths.cpp
+    src/backend/ProcessHardening.cpp)
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(LibreDarwinWireCore PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinWireCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -43,7 +45,6 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/SocketFrontend.cpp
     src/backend/SystemLifecycle.mm
     src/backend/OsLogSink.cpp
-    src/backend/ProcessHardening.cpp
     src/backend/PluginDirectory.cpp
     src/backend/PeerPolicy.cpp)
 target_include_directories(LibreDarwinAgentBackend PUBLIC

@@ -5,7 +5,7 @@
 // applies to the TEST process (debugging the suite must stay possible). A
 // spawned-tracer PT_ATTACH probe is deliberately omitted: attach behaviour on
 // macOS depends on SIP/entitlements and is not CI-stable; ptrace(PT_DENY_ATTACH)
-// returning 0 (checked via the hardenAgentProcess result) is the kernel-level
+// returning 0 (checked via the hardenSecretProcess result) is the kernel-level
 // acknowledgement.
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 
@@ -21,7 +21,7 @@ TEST(ProcessHardening, ChildDropsCoreLimitAndDeniesAttach)
     ASSERT_GE(child, 0);
     if (child == 0) {
         // Child: async-signal-safe calls only, then _exit with a failure code.
-        if (!LibreSCRS::Darwin::hardenAgentProcess()) {
+        if (!LibreSCRS::Darwin::hardenSecretProcess()) {
             ::_exit(1); // ptrace or setrlimit rejected
         }
         rlimit lim{};

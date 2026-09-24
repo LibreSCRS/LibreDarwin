@@ -8,6 +8,7 @@ PeerCodeSigningTest
 PeerIdentityTest
 PluginDirectoryTest
 ProcessHardeningTest
+PrompterHardeningTest
 PrompterProtocolTest
 PrompterServerTest
 ReadCertificatesOperationTest

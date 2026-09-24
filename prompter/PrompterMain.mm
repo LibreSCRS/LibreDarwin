@@ -8,14 +8,17 @@
 // cross-connection CancelCurrent can dismiss any of them at any time.
 #include "PromptWindow.h"
 #include "ConfirmAuthorizer.h"
+#include "PrompterComposition.h"
 #include "PrompterServer.h"
 
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 #include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 #include <LibreSCRS/Darwin/backend/PeerPolicy.h>
+#include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 
 #import <AppKit/AppKit.h>
 
+#include <expected>
 #include <memory>
 #include <string>
 #include <vector>
@@ -42,53 +45,70 @@ LibreSCRS::Darwin::PrompterServer::PeerAuthorized makePeerAuth()
     };
 }
 
+// The real startup steps, in the order PrompterComposition::run() calls them
+// (tested there without AppKit). The server lives in `state` so it outlives
+// bind() and is torn down only when main() returns.
+LibreSCRS::Darwin::PrompterComposition::Hooks defaultHooks()
+{
+    struct State
+    {
+        std::unique_ptr<LibreSCRS::Darwin::PrompterServer> server;
+    };
+    auto state = std::make_shared<State>();
+    return LibreSCRS::Darwin::PrompterComposition::Hooks{
+        .harden = LibreSCRS::Darwin::hardenSecretProcess,
+        .appInit =
+            [] {
+                // LSUIElement (no Dock icon / menu bar); the windows are
+                // transient floating panels, and nothing here ever runs a modal
+                // loop.
+                [NSApplication sharedApplication];
+                [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+            },
+        .bind = [state]() -> std::expected<void, std::string> {
+            auto window = std::make_shared<LibreSCRS::Darwin::PromptWindow>();
+            state->server = std::make_unique<LibreSCRS::Darwin::PrompterServer>(
+                prompterSocketPath(),
+                [window](const LibreSCRS::Darwin::wire::PromptRequest& req) { return window->showPrompt(req); },
+                [window](const LibreSCRS::Darwin::wire::RequestSecrets& req) { return window->showChangePrompt(req); },
+                [window](const std::string& promptId) { window->dismiss(promptId); },
+                // Not a window of ours: the confirmation is the platform's own
+                // device-owner prompt, so there is nothing here to dismiss and
+                // nothing that could collect a secret.
+                [](const LibreSCRS::Darwin::wire::ConfirmAction& req) {
+                    return LibreSCRS::Darwin::confirmWithDeviceOwner(req);
+                },
+                [window]() {
+                    // Name the prompts before sweeping them. A reset happens
+                    // when a fresh agent meets panels a previous one left
+                    // standing, so the count that goes back on the wire is the
+                    // one thing it can say — and the ids are the only record of
+                    // WHICH prompts they were, which is what a person reading
+                    // the log after an agent restart is actually looking for.
+                    // An id is an address the agent minted, never anything the
+                    // holder typed.
+                    const std::vector<std::string> closing = window->liveIds();
+                    NSMutableString* ids = [NSMutableString string];
+                    for (const std::string& id : closing) {
+                        [ids appendFormat:@"%@%s", ids.length ? @", " : @"", id.empty() ? "<unaddressed>" : id.c_str()];
+                    }
+                    NSLog(@"librescrs-prompter: reset closing %lu prompt(s): %@",
+                          static_cast<unsigned long>(closing.size()), ids.length ? ids : @"(none)");
+                    return window->dismissAll();
+                },
+                makePeerAuth());
+            return state->server->start();
+        },
+        .runLoop = [] { [NSApp run]; }, // the socket server lives on its GCD queues
+        .warn = [](const std::string& message) { NSLog(@"librescrs-prompter: %s", message.c_str()); },
+    };
+}
+
 } // namespace
 
 int main(int /*argc*/, char** /*argv*/)
 {
     @autoreleasepool {
-        // LSUIElement (no Dock icon / menu bar); the windows are transient
-        // floating panels, and nothing here ever runs a modal loop.
-        [NSApplication sharedApplication];
-        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
-
-        auto window = std::make_shared<LibreSCRS::Darwin::PromptWindow>();
-
-        LibreSCRS::Darwin::PrompterServer server(
-            prompterSocketPath(),
-            [window](const LibreSCRS::Darwin::wire::PromptRequest& req) { return window->showPrompt(req); },
-            [window](const LibreSCRS::Darwin::wire::RequestSecrets& req) { return window->showChangePrompt(req); },
-            [window](const std::string& promptId) { window->dismiss(promptId); },
-            // Not a window of ours: the confirmation is the platform's own
-            // device-owner prompt, so there is nothing here to dismiss and
-            // nothing that could collect a secret.
-            [](const LibreSCRS::Darwin::wire::ConfirmAction& req) {
-                return LibreSCRS::Darwin::confirmWithDeviceOwner(req);
-            },
-            [window]() {
-                // Name the prompts before sweeping them. A reset happens when a
-                // fresh agent meets panels a previous one left standing, so the
-                // count that goes back on the wire is the one thing it can say
-                // — and the ids are the only record of WHICH prompts they were,
-                // which is what a person reading the log after an agent restart
-                // is actually looking for. An id is an address the agent minted,
-                // never anything the holder typed.
-                const std::vector<std::string> closing = window->liveIds();
-                NSMutableString* ids = [NSMutableString string];
-                for (const std::string& id : closing) {
-                    [ids appendFormat:@"%@%s", ids.length ? @", " : @"", id.empty() ? "<unaddressed>" : id.c_str()];
-                }
-                NSLog(@"librescrs-prompter: reset closing %lu prompt(s): %@",
-                      static_cast<unsigned long>(closing.size()), ids.length ? ids : @"(none)");
-                return window->dismissAll();
-            },
-            makePeerAuth());
-
-        if (auto started = server.start(); !started) {
-            NSLog(@"librescrs-prompter: %s", started.error().c_str());
-            return 1;
-        }
-        [NSApp run]; // the socket server lives on its GCD queues inside `server`
+        return LibreSCRS::Darwin::PrompterComposition::run(defaultHooks());
     }
-    return 0;
 }

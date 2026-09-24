@@ -6,8 +6,9 @@
 # secret flows prompter -> agent only, never through a client; the prompter
 # peer-authenticates that the caller is the agent.
 
-# Testable server logic (peer-auth + protocol dispatch), LM-free.
-add_library(LibreDarwinPrompterServer STATIC PrompterServer.cpp)
+# Testable server logic (peer-auth + protocol dispatch) and the startup order
+# (PrompterComposition), LM-free and AppKit-free.
+add_library(LibreDarwinPrompterServer STATIC PrompterServer.cpp PrompterComposition.cpp)
 target_include_directories(LibreDarwinPrompterServer PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(LibreDarwinPrompterServer PUBLIC LibreDarwinWireCore)
 set_target_properties(LibreDarwinPrompterServer PROPERTIES POSITION_INDEPENDENT_CODE ON)
@@ -50,4 +51,7 @@ if(PROJECT_IS_TOP_LEVEL)
     add_executable(PrompterServerTest tests/PrompterServerTest.cpp)
     target_link_libraries(PrompterServerTest PRIVATE LibreDarwinPrompterServer GTest::gtest GTest::gtest_main)
     add_test(NAME PrompterServerTest COMMAND PrompterServerTest)
+    add_executable(PrompterHardeningTest tests/PrompterHardeningTest.cpp)
+    target_link_libraries(PrompterHardeningTest PRIVATE LibreDarwinPrompterServer GTest::gtest GTest::gtest_main)
+    add_test(NAME PrompterHardeningTest COMMAND PrompterHardeningTest)
 endif()

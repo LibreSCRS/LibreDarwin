@@ -100,7 +100,7 @@ int main(int argc, char** argv)
     // ad-hoc/dev builds; hardened-runtime get-task-allow=false is the
     // production backstop. Lives here in main(), not in a library ctor, so
     // test binaries linking the backend stay attachable.
-    const bool hardened = LibreSCRS::Darwin::hardenAgentProcess();
+    const bool hardened = LibreSCRS::Darwin::hardenSecretProcess();
 
     // Writing to a peer-closed socket must fail with EPIPE, never terminate the
     // daemon via SIGPIPE. Set process-wide as a belt-and-suspenders over the
