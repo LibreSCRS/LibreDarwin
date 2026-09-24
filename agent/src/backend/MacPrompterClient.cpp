@@ -26,6 +26,7 @@
 #include <cerrno>
 #include <chrono>
 #include <cstdint>
+#include <expected>
 #include <optional>
 #include <cstring>
 #include <string_view>
@@ -70,16 +71,53 @@ static_assert(kResetReplyBudgetMs < 1000, "the reset budget is packed into tv_us
 // as a real interval, or the bound silently becomes its opposite.
 constexpr std::int64_t kMinReceiveBudgetUs = 1000;
 
-// How long request() waits for the prompter's reply. A stuck (not dead --
-// dead closes the socket) helper must not be able to hold a card's slot, and
-// this call's caller's stack, forever. The bound is the sum of prompts one
-// request may run: on the pinned agent that sum is a single prompt, i.e.
-// Operations::kLongestDeadline (PromptPolicy.h), so this is that deadline
+// How long request() and requestPinChange() wait for the prompter's reply.
+// Both run inside a card operation, so a stuck (not dead -- dead closes the
+// socket) helper must not be able to hold the card's slot, and the caller's
+// stack, forever. The bound is the sum of prompts one request may run: on the
+// pinned agent that sum is a single prompt, i.e. Operations::kLongestDeadline
+// (PromptPolicy.h; 300s, above requestPinChange's own 180s ChangePin window),
 // plus a 30s margin.
 constexpr auto kPromptReceiveBudget = std::chrono::seconds{330};
 static_assert(kPromptReceiveBudget > Agent::Operations::kLongestDeadline,
               "the receive budget must outlive the longest single prompt, or its own timeout "
               "fires before the window the prompter is still showing ever could");
+
+// What recvFrameBounded's bounded receive came back with, beyond a frame:
+//   * BudgetNotSet -- the bound itself could not be applied, so recvFrame is
+//     not even attempted (same discipline as reset()'s own guard: reading
+//     with no bound in place would reopen the unbounded wait this exists to
+//     close).
+//   * TimedOut -- the budget expired on a peer that took the request and then
+//     went silent: wedged, not dead (a dead helper closes the socket, which
+//     surfaces as RecvFailed below instead).
+//   * RecvFailed -- every other recvFrame failure (malformed header, EOF,
+//     I/O error).
+enum class BoundedReceiveError : std::uint8_t { BudgetNotSet, TimedOut, RecvFailed };
+
+// Sets SO_RCVTIMEO to @p budget on @p fd, then reads exactly one frame.
+// Shared by request() and requestPinChange(): both send one prompt request
+// and block on its reply while a card operation is in progress, so both must
+// stop waiting at the same bound rather than each growing its own copy of
+// this sequence.
+[[nodiscard]] std::expected<Agent::Wire::Frame, BoundedReceiveError> recvFrameBounded(int fd,
+                                                                                      std::chrono::milliseconds budget)
+{
+    const auto budgetMs = budget.count();
+    const timeval receiveBudget{.tv_sec = static_cast<time_t>(budgetMs / 1000),
+                                .tv_usec = static_cast<suseconds_t>((budgetMs % 1000) * 1000)};
+    if (::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0) {
+        return std::unexpected(BoundedReceiveError::BudgetNotSet);
+    }
+    auto frame = Agent::Wire::recvFrame(fd);
+    if (!frame.has_value()) {
+        if (frame.error() == Agent::Wire::FrameError::WouldBlock) {
+            return std::unexpected(BoundedReceiveError::TimedOut);
+        }
+        return std::unexpected(BoundedReceiveError::RecvFailed);
+    }
+    return std::move(*frame);
+}
 
 // Wait until @p fd has something to read, but not past @p deadline. poll's own
 // timeout restarts from the top on every EINTR, so the deadline is kept here
@@ -252,6 +290,10 @@ wire::ConfirmReply MacPrompterClient::requestConfirmation(const wire::ConfirmAct
     if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return refuse("prompter send failed");
     }
+    // Deliberately unbounded, unlike request()/requestPinChange(): this path
+    // holds no card operation open behind it, and the window it answers is
+    // meant to hold the person's attention for as long as they take
+    // (SocketFrontend::confirmThenApply's trust-tier confirm queue).
     auto frame = Agent::Wire::recvFrame(fd.get());
     if (!frame.has_value()) {
         return refuse("prompter recv failed");
@@ -291,32 +333,23 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
 
     // Bound the wait for the reply (kPromptReceiveBudget above) before the
     // receive that could otherwise sit on a wedged helper indefinitely.
-    const auto budgetMs = m_promptReceiveBudget.count();
-    const timeval receiveBudget{.tv_sec = static_cast<time_t>(budgetMs / 1000),
-                                .tv_usec = static_cast<suseconds_t>((budgetMs % 1000) * 1000)};
-    if (::setsockopt(fd.get(), SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0) {
-        // With no bound in place there is nothing to stop the read below
-        // sitting on a prompter that never answers, so it is not attempted at
-        // all -- the same guard reset() takes on its own bounded receive.
-        return errorResult("prompter reply wait could not be bounded");
-    }
-    auto frame = Agent::Wire::recvFrame(fd.get());
-    if (!frame.has_value()) {
-        if (frame.error() == Agent::Wire::FrameError::WouldBlock) {
-            // The budget above expired: the prompter took the request and
-            // then went silent -- wedged, not dead (a dead helper closes the
-            // socket and lands in the branch below instead).
+    auto received = recvFrameBounded(fd.get(), m_promptReceiveBudget);
+    if (!received.has_value()) {
+        if (received.error() == BoundedReceiveError::TimedOut) {
             Agent::PromptResult result;
             result.status = Agent::PromptStatus::Timeout;
             return result;
         }
-        return errorResult("prompter recv failed");
+        return errorResult(received.error() == BoundedReceiveError::BudgetNotSet
+                               ? "prompter reply wait could not be bounded"
+                               : "prompter recv failed");
     }
-    auto reply = wire::parsePromptReply(frame->body);
+    auto frame = std::move(*received);
+    auto reply = wire::parsePromptReply(frame.body);
     // The raw frame body carries the secret inline for Ok replies; zero it the
     // moment it is parsed, whatever the outcome (parsePromptReply scrubbed its
     // own decoded intermediates, and decode() zeroed the canonical re-encode).
-    Agent::Wire::secureZero(frame->body);
+    Agent::Wire::secureZero(frame.body);
     if (!reply.has_value()) {
         return errorResult("prompter reply malformed");
     }
@@ -395,16 +428,27 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
     if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return changeErrorResult("prompter send failed");
     }
-    auto frame = Agent::Wire::recvFrame(fd.get());
-    if (!frame.has_value()) {
-        return changeErrorResult("prompter recv failed");
+    // Same bound as request() (kPromptReceiveBudget above): this call runs
+    // inside a PIN-change card operation too, and a wedged helper here must
+    // not hold the card any longer than a single-secret prompt would.
+    auto received = recvFrameBounded(fd.get(), m_promptReceiveBudget);
+    if (!received.has_value()) {
+        if (received.error() == BoundedReceiveError::TimedOut) {
+            Agent::PinChangePromptResult result;
+            result.status = Agent::PromptStatus::Timeout;
+            return result;
+        }
+        return changeErrorResult(received.error() == BoundedReceiveError::BudgetNotSet
+                                     ? "prompter reply wait could not be bounded"
+                                     : "prompter recv failed");
     }
-    auto reply = wire::parseMultiPromptReply(frame->body);
+    auto frame = std::move(*received);
+    auto reply = wire::parseMultiPromptReply(frame.body);
     // The raw frame body carries BOTH secrets inline for Ok replies; zero it
     // the moment it is parsed, whatever the outcome (parseMultiPromptReply
     // scrubbed its own decoded intermediates, and decode() zeroed the
     // canonical re-encode).
-    Agent::Wire::secureZero(frame->body);
+    Agent::Wire::secureZero(frame.body);
     if (!reply.has_value()) {
         return changeErrorResult("prompter reply malformed");
     }

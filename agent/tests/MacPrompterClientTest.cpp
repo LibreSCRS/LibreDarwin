@@ -1247,6 +1247,25 @@ TEST(MacPrompterClient, SilentPrompterTimesOut)
     EXPECT_LT(elapsed, std::chrono::seconds(2)) << "the injected budget, not the production one, must bound the wait";
 }
 
+// requestPinChange() takes the identical connect/send/bounded-recv shape as
+// request() and runs inside the same kind of card operation (a PIN change),
+// so the fix above must cover it too -- not just requestPin/Can/Mrz.
+TEST(MacPrompterClient, SilentPrompterTimesOutOnPinChange)
+{
+    const std::string path = uniquePath();
+    SilentPrompter server(path);
+
+    MacPrompterClient client(path, trustAnyPeerForTest(), std::chrono::milliseconds(300));
+    const auto begun = std::chrono::steady_clock::now();
+    const auto r = client.requestPinChange(Agent::PromptOptions{});
+    const auto elapsed = std::chrono::steady_clock::now() - begun;
+
+    EXPECT_EQ(r.status, Agent::PromptStatus::Timeout);
+    EXPECT_FALSE(r.current.has_value());
+    EXPECT_FALSE(r.newPin.has_value());
+    EXPECT_LT(elapsed, std::chrono::seconds(2)) << "the injected budget, not the production one, must bound the wait";
+}
+
 // The real production value: setsockopt itself must accept it, not just the
 // constant compile. A kernel that silently capped SO_RCVTIMEO below 330s
 // would leave the static_assert in MacPrompterClient.cpp provably true and
