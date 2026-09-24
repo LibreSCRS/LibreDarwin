@@ -549,15 +549,48 @@ TEST(SocketTransport, OutboundQueueIsBounded)
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
     const std::string bigKey(2048, 'x'); // ~2 KiB/frame
+    // The exact bytes this one push puts on the wire (framing header + CBOR
+    // overhead included), independent of the 2048-char key alone -- this is
+    // what Connection::queuedBytes counts, so the tightness check below is
+    // exact arithmetic, not a guess at encoding overhead.
+    const std::size_t frameBytes =
+        Agent::Wire::encodeFrame(Agent::Wire::toCbor(Agent::Wire::ConfigChanged{bigKey}).encode(), 0).size();
+    // Mirrors SocketTransport.cpp's kMaxQueuedBytesPerConnection: duplicated
+    // here the same way this file already duplicates kMaxConnections in
+    // ConnectionCapRefusesTheExcessConnection, since the constant is
+    // file-local to the production .cpp.
+    constexpr std::size_t kExpectedMaxQueuedBytes = 4 * 1024 * 1024;
+
     bool sawClose = false;
+    int framesPushedAtClose = -1;
     for (int i = 0; i < 4096 && !sawClose; ++i) {
         dispatch_sync(trp->loopQueue(), ^{
           trp->broadcastConfigChanged(bigKey);
         });
         std::lock_guard<std::mutex> lk(closed.m);
-        sawClose = !closed.items.empty();
+        if (!closed.items.empty()) {
+            sawClose = true;
+            framesPushedAtClose = i + 1;
+        }
     }
-    EXPECT_TRUE(sawClose) << "connection was never closed for a peer that never reads";
+    ASSERT_TRUE(sawClose) << "connection was never closed for a peer that never reads";
+    // Tightness, not just eventual closure: a regression that silently
+    // widened the bound (e.g. to 7 MiB) would still close *eventually* at
+    // this frame size -- just past frame ~3529 instead of ~2017 -- and the
+    // check above alone would stay green. The total ever pushed by the time
+    // of closing is an UPPER bound on the connection's actual queued bytes at
+    // that instant (never a lower one): SO_RCVBUF is pinned to the minimum,
+    // but that minimum is an OS floor, not a true zero, so a handful of early
+    // frames can still be sent-and-dequeued before backpressure fully
+    // engages. kSlackFrames absorbs that noise while leaving an enormous
+    // margin below what a bound silently widened to 7 MiB would need (~1500
+    // MORE frames beyond the true 4 MiB point).
+    constexpr std::size_t kSlackFrames = 128;
+    const std::size_t maxExpectedFrames = kExpectedMaxQueuedBytes / frameBytes + 1 + kSlackFrames;
+    EXPECT_LE(static_cast<std::size_t>(framesPushedAtClose), maxExpectedFrames)
+        << "closed too late: " << framesPushedAtClose << " frames pushed (" << frameBytes
+        << " bytes/frame), expected a close within " << kSlackFrames << " frames of "
+        << (kExpectedMaxQueuedBytes / frameBytes + 1);
 
     // The client observes the close as EOF once it drains whatever the
     // kernel had already buffered.
@@ -594,6 +627,18 @@ TEST(SocketTransport, ReaderThatDrainsIsNeverClosed)
     tr->onClientDisconnect([&](Agent::CallerToken) { closed.push(1); });
 
     const int client = connectClient(path);
+    // Bounded backstop against a regression this test cannot otherwise catch
+    // cleanly: if a future bug keeps the connection OPEN but stops delivering
+    // frames (e.g. silently dropping on overflow instead of closing), `paced`
+    // below still goes false and the sentinel is never sent, but a plain
+    // blocking recv() with no timeout would then wait in the kernel forever
+    // -- a hung test process, not a red one (ctest has no per-case TIMEOUT
+    // here). SO_RCVTIMEO turns that indefinite block into a bounded EAGAIN;
+    // recvFrame (Framing.h) reports that as WouldBlock, which is a terminal
+    // read error here, not something the loop below retries.
+    timeval rcvTimeout{15, 0};
+    ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, sizeof(rcvTimeout));
+
     const auto helloBytes =
         Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
@@ -609,7 +654,10 @@ TEST(SocketTransport, ReaderThatDrainsIsNeverClosed)
         while (!sawSentinel.load()) {
             const auto frame = Agent::Wire::recvFrame(client);
             if (!frame.has_value()) {
-                return; // EOF/error -- the counts below will catch the shortfall
+                // EOF, a real I/O error, or the SO_RCVTIMEO backstop tripping
+                // (WouldBlock) -- none of these is retried; the counts and
+                // `paced` below report the shortfall as a test failure.
+                return;
             }
             received.fetch_add(1);
             const auto decoded = Agent::Wire::decode(frame->body);
@@ -681,6 +729,12 @@ TEST(SocketTransport, ReaderThatDrainsIsNeverClosed)
         dispatch_sync(trp->loopQueue(), ^{
           trp->broadcastConfigChanged("sentinel");
         });
+    } else {
+        // Pacing already timed out (already reported above): don't wait out
+        // the full SO_RCVTIMEO backstop too. A local shutdown(SHUT_RDWR)
+        // makes the reader's in-flight (or next) recv() on this same fd
+        // return immediately, regardless of what the peer does.
+        ::shutdown(client, SHUT_RDWR);
     }
 
     reader.join();

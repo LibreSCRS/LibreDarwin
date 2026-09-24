@@ -502,10 +502,11 @@ void SocketTransport::sendTo(std::uint64_t connId, const Agent::Wire::CborValue&
 void SocketTransport::broadcast(const Agent::Wire::CborValue& event)
 {
     const auto framed = Agent::Wire::encodeFrame(event.encode(), 0);
-    // Snapshot the connection ids FIRST: a failed send inside enqueueSend closes +
-    // erases the connection (flushWrites -> closeConnection -> m_connections.erase),
-    // which would invalidate a live range-for iterator. sendTo re-finds by id and
-    // no-ops a vanished connection.
+    // Snapshot the connection ids FIRST: enqueueSend can close + erase the
+    // connection -- on a failed send (flushWrites -> closeConnection) or on a
+    // queue-bound overflow (byte/frame cap exceeded, checked in enqueueSend
+    // itself) -- which would invalidate a live range-for iterator. This loop
+    // re-finds each id below and no-ops a vanished connection.
     std::vector<std::uint64_t> ids;
     ids.reserve(m_connections.size());
     for (const auto& [id, conn] : m_connections) {
