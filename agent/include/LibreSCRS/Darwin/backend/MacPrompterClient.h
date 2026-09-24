@@ -6,7 +6,9 @@
 #include <LibreSCRS/Agent/backend/PromptTypes.h>        // PromptOptions, PromptResult, PinChangePromptResult
 #include <LibreSCRS/Agent/backend/PrompterClientBase.h> // Operations::PrompterClientBase
 
+#include <chrono>
 #include <functional>
+#include <optional>
 #include <string>
 
 namespace LibreSCRS::Darwin {
@@ -37,7 +39,15 @@ public:
     // the agent at accept. Only tests inject a permissive one.
     using PeerVerifier = std::function<bool(int connectedFd)>;
 
-    explicit MacPrompterClient(std::string prompterSocketPath, PeerVerifier peerVerifier = {});
+    // promptReceiveBudget overrides how long request() waits for the
+    // prompter's reply (production default: kPromptReceiveBudget,
+    // MacPrompterClient.cpp) -- a seam for tests that need to see the timeout
+    // path without waiting out the real bound (which is why this is
+    // milliseconds, not seconds: a test budget short enough to run fast is
+    // sub-second). std::nullopt, which every production caller passes, keeps
+    // the production budget.
+    explicit MacPrompterClient(std::string prompterSocketPath, PeerVerifier peerVerifier = {},
+                               std::optional<std::chrono::milliseconds> promptReceiveBudget = std::nullopt);
     ~MacPrompterClient() override;
 
     [[nodiscard]] Agent::PromptResult requestPin(const Agent::PromptOptions& options) override;
@@ -75,6 +85,7 @@ private:
     [[nodiscard]] Agent::PromptResult request(wire::PromptKind kind, const Agent::PromptOptions& options);
     std::string m_socketPath;
     PeerVerifier m_peerVerifier;
+    std::chrono::milliseconds m_promptReceiveBudget;
 };
 
 } // namespace LibreSCRS::Darwin

@@ -9,6 +9,7 @@
 #include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 
 #include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Agent/operations/PromptPolicy.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 
@@ -68,6 +69,17 @@ static_assert(kResetReplyBudgetMs < 1000, "the reset budget is packed into tv_us
 // at all -- so a remainder small enough to round away must still be asked for
 // as a real interval, or the bound silently becomes its opposite.
 constexpr std::int64_t kMinReceiveBudgetUs = 1000;
+
+// How long request() waits for the prompter's reply. A stuck (not dead --
+// dead closes the socket) helper must not be able to hold a card's slot, and
+// this call's caller's stack, forever. The bound is the sum of prompts one
+// request may run: on the pinned agent that sum is a single prompt, i.e.
+// Operations::kLongestDeadline (PromptPolicy.h), so this is that deadline
+// plus a 30s margin.
+constexpr auto kPromptReceiveBudget = std::chrono::seconds{330};
+static_assert(kPromptReceiveBudget > Agent::Operations::kLongestDeadline,
+              "the receive budget must outlive the longest single prompt, or its own timeout "
+              "fires before the window the prompter is still showing ever could");
 
 // Wait until @p fd has something to read, but not past @p deadline. poll's own
 // timeout restarts from the top on every EINTR, so the deadline is kept here
@@ -202,8 +214,11 @@ Agent::PinChangePromptResult changeErrorResult(std::string message)
 
 } // namespace
 
-MacPrompterClient::MacPrompterClient(std::string prompterSocketPath, PeerVerifier peerVerifier)
-    : m_socketPath(std::move(prompterSocketPath)), m_peerVerifier(std::move(peerVerifier))
+MacPrompterClient::MacPrompterClient(std::string prompterSocketPath, PeerVerifier peerVerifier,
+                                     std::optional<std::chrono::milliseconds> promptReceiveBudget)
+    : m_socketPath(std::move(prompterSocketPath)), m_peerVerifier(std::move(peerVerifier)),
+      m_promptReceiveBudget(
+          promptReceiveBudget.value_or(std::chrono::duration_cast<std::chrono::milliseconds>(kPromptReceiveBudget)))
 {
     if (!m_peerVerifier) {
         // Default: the serving peer must BE the prompter — the same verifier
@@ -273,8 +288,28 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
     if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return errorResult("prompter send failed");
     }
+
+    // Bound the wait for the reply (kPromptReceiveBudget above) before the
+    // receive that could otherwise sit on a wedged helper indefinitely.
+    const auto budgetMs = m_promptReceiveBudget.count();
+    const timeval receiveBudget{.tv_sec = static_cast<time_t>(budgetMs / 1000),
+                                .tv_usec = static_cast<suseconds_t>((budgetMs % 1000) * 1000)};
+    if (::setsockopt(fd.get(), SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0) {
+        // With no bound in place there is nothing to stop the read below
+        // sitting on a prompter that never answers, so it is not attempted at
+        // all -- the same guard reset() takes on its own bounded receive.
+        return errorResult("prompter reply wait could not be bounded");
+    }
     auto frame = Agent::Wire::recvFrame(fd.get());
     if (!frame.has_value()) {
+        if (frame.error() == Agent::Wire::FrameError::WouldBlock) {
+            // The budget above expired: the prompter took the request and
+            // then went silent -- wedged, not dead (a dead helper closes the
+            // socket and lands in the branch below instead).
+            Agent::PromptResult result;
+            result.status = Agent::PromptStatus::Timeout;
+            return result;
+        }
         return errorResult("prompter recv failed");
     }
     auto reply = wire::parsePromptReply(frame->body);

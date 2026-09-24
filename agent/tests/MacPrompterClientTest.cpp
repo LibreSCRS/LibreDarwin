@@ -14,6 +14,7 @@
 #include <gtest/gtest.h>
 
 #include <sys/socket.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -1171,6 +1172,93 @@ TEST(MacPrompterClient, DefaultVerifierRefusesAnUnsignedPeerWhateverTheEnvironme
     EXPECT_EQ(r.userMessage, "prompter peer verification failed");
     EXPECT_FALSE(r.secret.has_value());
     EXPECT_FALSE(server.capturedRequest().has_value());
+}
+
+// A prompter that accepts the connection, reads the request (so the client's
+// send does not itself fail), and then says nothing at all -- wedged, not
+// dead: a dead helper closes the socket, which recvFrame reports as
+// PeerClosed, not a timeout. Holds every accepted connection open until
+// destruction, same discipline as FakeResetPrompter's silent mode above.
+class SilentPrompter
+{
+public:
+    explicit SilentPrompter(std::string path) : m_path(std::move(path))
+    {
+        m_listen = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, m_path.c_str(), sizeof(addr.sun_path) - 1);
+        ::unlink(m_path.c_str());
+        EXPECT_EQ(::bind(m_listen, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+        EXPECT_EQ(::listen(m_listen, 4), 0);
+        m_thread = std::thread([this] { serve(); });
+    }
+    ~SilentPrompter()
+    {
+        m_stop = true;
+        ::shutdown(m_listen, SHUT_RDWR);
+        ::close(m_listen);
+        if (m_thread.joinable()) {
+            m_thread.join();
+        }
+        for (const int held : m_held) {
+            ::close(held);
+        }
+        std::filesystem::remove(m_path);
+    }
+
+private:
+    void serve()
+    {
+        while (!m_stop) {
+            const int c = ::accept(m_listen, nullptr, nullptr);
+            if (c < 0) {
+                break;
+            }
+            static_cast<void>(Agent::Wire::recvFrame(c));
+            m_held.push_back(c);
+        }
+    }
+    std::string m_path;
+    std::vector<int> m_held;
+    int m_listen{-1};
+    std::atomic<bool> m_stop{false};
+    std::thread m_thread;
+};
+
+// A stuck helper -- not a dead one -- must not hold a card's slot forever.
+// The budget is injected short so the test proves the mechanism without
+// waiting out the real 330s production bound; the fake's shape (accept, read
+// the request, answer nothing) is exactly what a wedged prompter looks like
+// on the wire. Run under ctest's own --timeout so a regression that drops the
+// bound shows up as a timeout, not a hang.
+TEST(MacPrompterClient, SilentPrompterTimesOut)
+{
+    const std::string path = uniquePath();
+    SilentPrompter server(path);
+
+    MacPrompterClient client(path, trustAnyPeerForTest(), std::chrono::milliseconds(300));
+    const auto begun = std::chrono::steady_clock::now();
+    const auto r = client.requestPin(Agent::PromptOptions{});
+    const auto elapsed = std::chrono::steady_clock::now() - begun;
+
+    EXPECT_EQ(r.status, Agent::PromptStatus::Timeout);
+    EXPECT_FALSE(r.secret.has_value());
+    EXPECT_LT(elapsed, std::chrono::seconds(2)) << "the injected budget, not the production one, must bound the wait";
+}
+
+// The real production value: setsockopt itself must accept it, not just the
+// constant compile. A kernel that silently capped SO_RCVTIMEO below 330s
+// would leave the static_assert in MacPrompterClient.cpp provably true and
+// the runtime bound false.
+TEST(MacPrompterClient, ReceiveBudgetIsAcceptedByTheKernel)
+{
+    int fds[2] = {-1, -1};
+    ASSERT_EQ(::socketpair(AF_UNIX, SOCK_STREAM, 0, fds), 0);
+    const timeval budget{.tv_sec = 330, .tv_usec = 0};
+    EXPECT_EQ(::setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &budget, sizeof(budget)), 0);
+    ::close(fds[0]);
+    ::close(fds[1]);
 }
 
 } // namespace
