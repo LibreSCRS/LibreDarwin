@@ -32,9 +32,11 @@
 #                                                          that checked the exit
 #                                                          code alone would accept it.
 #
-# The real SocketTransport.h includes <dispatch/dispatch.h>, which only the Apple
-# SDK provides, so D1-D7 are judged only where that header exists. The cases
-# that follow run everywhere:
+# The real backend headers need the Apple SDK (SocketTransport.h includes
+# <dispatch/dispatch.h>, SecCodeAuthorizer.h <bsm/libbsm.h>), so D1-D7 are
+# judged only on Darwin. Which host that is, is decided by `uname -s`, never by
+# whether <dispatch/dispatch.h> compiles: a Linux libdispatch port provides that
+# one header. The cases that follow run everywhere:
 #
 #   N1  a tree carrying SocketTransport.h that has lost ci/interface-probe.cpp
 #                                                       -> rc=2, naming it
@@ -48,8 +50,12 @@
 #   W3  the same workflow with the job moved to ubuntu  -> 1
 #   W4  the same step marked continue-on-error          -> 1
 #   W5  a row naming a self-test that is not tracked    -> 1
+#   H1  the host decision on Linux with a reachable <dispatch/dispatch.h>
+#                                                       -> not judged
+#   H2  on Darwin without it                            -> cannot judge
+#   H3  on Darwin with it                               -> judged
 #
-# On a host without the Apple SDK -- the ubuntu job that runs every self-test --
+# On a host that is not Darwin -- the ubuntu job that runs every self-test --
 # D1-D7 are NOT JUDGED, and that is said, not skipped: the host must be the
 # other platform (a Mac without the header is exit 2), this self-test must carry
 # a row in ci/selftest-platform-exceptions.txt, and W1 must have just proved
@@ -305,21 +311,80 @@ else
     bad "N2 no <dispatch/dispatch.h>: want rc=2 and R6 'cannot judge', got rc=$rc" "$WORK/n2.out"
 fi
 
-# ------------------------------------------------------------------ D1-D7
+# ------------------------------------------------------------------ H1-H3
+# Whether D1-D7 are judged here is decided by the PLATFORM, not by whether the
+# compiler happens to reach <dispatch/dispatch.h>: a Linux host can carry a
+# libdispatch port of it (Arch's libdispatch does), and the backend headers
+# still need the rest of the Apple SDK. Judging there ends in "cannot judge".
+#
+#   decide_host <host> <cxx> -> one line:
+#     judge            the host is Darwin and <cxx> reaches <dispatch/dispatch.h>
+#     unjudged         any other host, excused by a Darwin row in $ROWS
+#     cannot <why>     a Mac without the header, or no row excusing this host
+SDK_HOST=Darwin
 printf '#include <dispatch/dispatch.h>\n' > "$WORK/dispatch-reach.cpp"
-if ! "$BASE_CXX" -fsyntax-only -x c++ "$WORK/dispatch-reach.cpp" > /dev/null 2>&1; then
-    host="$(uname -s)"
+decide_host() {
+    if [ "$1" = "$SDK_HOST" ]; then
+        if "$2" -fsyntax-only -x c++ "$WORK/dispatch-reach.cpp" > /dev/null 2>&1; then
+            echo judge
+        else
+            echo "cannot <dispatch/dispatch.h> unavailable on this $1 host -- run this where the Apple SDK is"
+        fi
+        return
+    fi
+    _row="$(grep -E "^$SELF[[:space:]]" "$REPO/$ROWS" 2>/dev/null | head -n 1)"
+    _plat="$(printf '%s' "$_row" | awk '{print $2}')"
+    if [ -z "$_row" ]; then
+        echo "cannot $ROWS has no row for $SELF, so this $1 host is not excused"
+    elif [ "$_plat" != "$SDK_HOST" ]; then
+        echo "cannot the row in $ROWS names $_plat, not $SDK_HOST, so this $1 host is not excused"
+    else
+        echo unjudged
+    fi
+}
+
+echo "Host decision (every host):"
+mkdir -p "$WORK/sdk-yes/dispatch" "$WORK/sdk-no/dispatch"
+: > "$WORK/sdk-yes/dispatch/dispatch.h"
+echo '#error "no Apple SDK here"' > "$WORK/sdk-no/dispatch/dispatch.h"
+printf '#!/usr/bin/env bash\nexec "%s" -I "%s" "$@"\n' "$BASE_CXX" "$WORK/sdk-yes" > "$WORK/cxx-dispatch-yes"
+printf '#!/usr/bin/env bash\nexec "%s" -I "%s" "$@"\n' "$BASE_CXX" "$WORK/sdk-no" > "$WORK/cxx-dispatch-no"
+chmod +x "$WORK/cxx-dispatch-yes" "$WORK/cxx-dispatch-no"
+cases=$((cases + 1)); red=$((red + 1))
+d="$(decide_host Linux "$WORK/cxx-dispatch-yes")"
+if [ "$d" = unjudged ]; then
+    ok "H1 a Linux host whose compiler reaches <dispatch/dispatch.h> is not judged"
+else
+    bad "H1 a Linux host whose compiler reaches <dispatch/dispatch.h>: want unjudged, got '$d'"
+fi
+cases=$((cases + 1))
+d="$(decide_host Darwin "$WORK/cxx-dispatch-no")"
+case "$d" in
+    cannot*) ok "H2 a Mac whose compiler cannot reach <dispatch/dispatch.h> cannot judge" ;;
+    *) bad "H2 a Mac without <dispatch/dispatch.h>: want cannot, got '$d'" ;;
+esac
+cases=$((cases + 1))
+d="$(decide_host Darwin "$WORK/cxx-dispatch-yes")"
+if [ "$d" = judge ]; then
+    ok "H3 a Mac whose compiler reaches <dispatch/dispatch.h> is judged"
+else
+    bad "H3 a Mac with <dispatch/dispatch.h>: want judge, got '$d'"
+fi
+
+# ------------------------------------------------------------------ D1-D7
+host="$(uname -s)"
+decision="$(decide_host "$host" "$BASE_CXX")"
+if [ "$decision" != judge ]; then
+    case "$decision" in
+        cannot*)
+            echo "check-agent-interface-probe.selftest: $pass passed, $fail failed"
+            echo "FATAL: cannot judge: ${decision#cannot }" >&2
+            exit 2 ;;
+    esac
     row="$(grep -E "^$SELF[[:space:]]" "$REPO/$ROWS" 2>/dev/null | head -n 1)"
-    plat="$(printf '%s' "$row" | awk '{print $2}')"
     job="$(printf '%s' "$row" | awk '{print $3}')"
     reason="$(printf '%s' "$row" | awk '{ $1 = ""; $2 = ""; $3 = ""; sub(/^ +/, ""); print }')"
-    if [ -z "$row" ] || [ "$host" = "$plat" ]; then
-        echo "check-agent-interface-probe.selftest: $pass passed, $fail failed"
-        if [ -n "$row" ]; then why="the row in $ROWS excuses only hosts other than $plat"; else why="$ROWS has no row for $SELF"; fi
-        echo "FATAL: cannot judge: <dispatch/dispatch.h> unavailable on this $host host, and $why -- run this where the Apple SDK is" >&2
-        exit 2
-    fi
-    unjudged="D1-D7 NOT JUDGED on this $host host: <dispatch/dispatch.h> is unavailable, and $ROWS says so ($reason). They run in $job on a $plat runner, which W1 above has just proved."
+    unjudged="D1-D7 NOT JUDGED on this $host host: the real backend headers need the Apple SDK, and $ROWS says so ($reason). They run in $job on a $SDK_HOST runner, which W1 above has just proved."
 else
     BASE_H="LibreSCRS/Agent/backend"
     [ -f "$LA_REAL/$BASE_H/Authorizer.h" ] \
