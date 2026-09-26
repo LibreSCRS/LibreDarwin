@@ -1,0 +1,137 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# The Darwin backend against the LibreAgent TRUNK, as an early warning. CI on
+# every push builds against the revision deps.lock names; this asks the other
+# question -- would the next lock bump still compile -- and it is asked
+# nightly and on demand rather than on every push, because the answer changes
+# when the agent moves, not when this repository does. Run it by hand before
+# moving the LibreAgent row of deps.lock. Pushes to ci/ branches run it too, so
+# a change to this workflow or to the gate is exercised before it lands.
+name: Agent interface
+
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+  push:
+    branches: ['ci/**']
+
+permissions: {}
+
+jobs:
+  agent-interface:
+    # The macOS job builds against the LibreAgent row of deps.lock -- the agent
+    # interface as it WAS. That is not the combination a release ships, and it
+    # stayed green while SecCodeAuthorizer::authorize still returned bool and
+    # the base class had already moved to AuthorizationOutcome. So this job runs
+    # the check against the agent's main branch -- what a release is cut from.
+    # Green here means this repository has followed the interface. The locked
+    # direction needs no job of its own: build-macos compiles exactly that
+    # revision, and checkout-deps proves the tree it compiles is the lock.
+    #
+    # macOS, and NOT because the check is expensive: two of the five translation
+    # units it judges include the Darwin backend, whose transport header takes
+    # <dispatch/dispatch.h> from the Apple SDK. No Ubuntu package provides that
+    # header -- so on a Linux runner the check can only name those two units and
+    # refuse, every time, which is a required job that can never pass. On macOS
+    # all five compile, against the same AppleClang the gate's own fixtures were
+    # written and measured against. This job used to say it needed "nothing
+    # Apple" and that it answered while the macOS build was unavailable; neither
+    # was ever true of the whole file set.
+    #
+    # It still builds nothing: R5 is -fsyntax-only, so the runner is here for
+    # its SDK and its compiler, not for a build. Which hosts reach all five, and
+    # what a Linux host is told instead, is recorded ONCE, in the threat model
+    # at the top of ci/scripts/check-agent-interface.sh.
+    timeout-minutes: 15
+    runs-on: macos-15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          path: LibreDarwin
+          persist-credentials: false
+
+      - name: Checkout the LibreAgent trunk
+        # Deliberately main, not the lock: the lock is what build-macos
+        # compiles, and this job exists to see past it.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: LibreSCRS/LibreAgent
+          ref: main
+          path: LibreAgent
+          persist-credentials: false
+
+      - name: Install bash 4
+        # actions/checkout-deps runs under bash 4 or later; macOS ships 3.2.
+        run: brew install bash
+
+      - name: Checkout LibreMiddleware at the lock (headers only)
+        # HEADERS ONLY. Nothing here builds LibreMiddleware, and no submodule is
+        # fetched: R5 runs the compiler with -fsyntax-only, which links nothing,
+        # and every header the two socket units need is a tracked file under
+        # include/ -- none of them is written by CMake, so an install tree buys
+        # nothing a checkout does not already have. The revision is the one
+        # deps.lock names, the same one build-macos builds.
+        #
+        # Without this the job compiled 3 of the 5 translation units that name
+        # authorize() and the 2 it skipped carried 8 of the 9 call sites. The
+        # check refuses to judge on that now, so the checkout is what keeps this
+        # job green rather than an optimisation.
+        uses: LibreSCRS/ci/actions/checkout-deps@5b9410f9b0e6ab6983c39f931e118e68007c12b4
+        with:
+          root: LibreDarwin
+          names: LibreMiddleware
+          path: .
+
+      - name: Install gtest headers
+        # Headers only -- the check compiles with -fsyntax-only and links
+        # nothing. The authorizer's own test is one of the translation units the
+        # check compiles, and without these it refuses to judge rather than
+        # quietly measuring one header.
+        #
+        # The macOS image does not ship googletest, so this fetches a bottle; if
+        # a future image does ship it, brew reports it as already installed and
+        # exits 0, so the step is a no-op either way. `brew --prefix googletest`
+        # below is what says where the headers landed -- the prefix differs
+        # between the arm64 and x86_64 images, so it is asked rather than
+        # written down.
+        run: brew install googletest
+
+      - name: Prove the interface gate still fails when it should
+        # Synthetic pairs, so the suite does not pass or fail with the defect it
+        # guards. A gate whose compile step quietly stopped compiling would
+        # otherwise report a green.
+        run: LibreDarwin/ci/scripts/check-agent-interface.selftest.sh
+
+      - name: Install PyYAML
+        # The probe self-test below reads this workflow as data to prove its own
+        # wiring, and the macOS image does not guarantee the module.
+        run: python3 -m pip install --break-system-packages --user pyyaml
+
+      - name: Prove the interface probe still fails when an agent base moves
+        # R6 of the gate below compiles ci/interface-probe.cpp: all four Darwin
+        # implementations of an agent base, not only the authorizer. Its proof
+        # moves one base at a time in a COPY of these real headers, so it needs
+        # the Apple SDK and is judged in full only here; the ubuntu self-test
+        # runner judges its wiring half and names this job, as recorded in
+        # ci/selftest-platform-exceptions.txt.
+        run: |
+          LIBRESCRS_EXTRA_INCLUDE="$GITHUB_WORKSPACE/LibreMiddleware/include" \
+              LibreDarwin/ci/scripts/check-agent-interface-probe.selftest.sh "$GITHUB_WORKSPACE/LibreAgent/include"
+
+      - name: Darwin authorizer implements the agent interface
+        # `trunk` names where those headers came from, and it changes one
+        # sentence: if the agent turns out to predate the outcome type, this
+        # job is told to publish that revision rather than to raise a pin it
+        # never reads.
+        #
+        # Two include roots, colon-separated, which is the form the gate
+        # documents and splits on: LibreMiddleware's headers for the socket
+        # units, gtest's for the authorizer's own test. On macOS neither is in a
+        # default system include path, so both have to be named.
+        run: |
+          cd LibreDarwin
+          LIBRESCRS_EXTRA_INCLUDE="$GITHUB_WORKSPACE/LibreMiddleware/include:$(brew --prefix googletest)/include" \
+              ci/scripts/check-agent-interface.sh "$GITHUB_WORKSPACE/LibreAgent/include" trunk

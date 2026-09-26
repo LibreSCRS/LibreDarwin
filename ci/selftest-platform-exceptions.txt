@@ -15,4 +15,4 @@
 # conditional, and has an unconditional step invoking the self-test -- and goes
 # red when the step is removed. A row naming an untracked self-test fails, as
 # does a row whose self-test never reads this file, or one with no reason.
-ci/scripts/check-agent-interface-probe.selftest.sh  Darwin  ci.yml:agent-interface  Its cases compile the real Darwin backend headers, which need the Apple SDK (<dispatch/dispatch.h>, <bsm/libbsm.h>); a Linux libdispatch port provides the first only, so the host is chosen by uname -s. On macOS it is judged in full.
+ci/scripts/check-agent-interface-probe.selftest.sh  Darwin  agent-interface.yml:agent-interface  Its cases compile the real Darwin backend headers, which need the Apple SDK (<dispatch/dispatch.h>, <bsm/libbsm.h>); a Linux libdispatch port provides the first only, so the host is chosen by uname -s. On macOS it is judged in full.
