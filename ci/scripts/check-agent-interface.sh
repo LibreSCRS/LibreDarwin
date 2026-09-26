@@ -4,12 +4,12 @@
 # check-agent-interface.sh — the Darwin authorizer must implement the
 # LibreAgent Authorizer interface AS THE RELEASE WILL SEE IT.
 #
-# This repository's macOS job builds against cmake/libreagent.pin. A pin is by
-# construction the interface as it was, so a CI that only builds the pin can
-# never report that the base class has moved: it is green on a combination the
-# release does not ship. That is how bool authorize() survived here after
-# LibreAgent had already changed it to AuthorizationOutcome and the Linux host
-# had already followed.
+# This repository's macOS job builds against the LibreAgent row of deps.lock.
+# A pin is by construction the interface as it was, so a CI that only builds
+# the pin can never report that the base class has moved: it is green on a
+# combination the release does not ship. That is how bool authorize()
+# survived here after LibreAgent had already changed it to AuthorizationOutcome
+# and the Linux host had already followed.
 #
 # So this gate deliberately does NOT read the pin. It compiles against a
 # LibreAgent checkout handed to it -- in CI, the agent's main branch.
@@ -222,9 +222,9 @@ cd "$REPO_ROOT" || exit 2
 LA_INCLUDE="${1:-${LIBREAGENT_INCLUDE:-$REPO_ROOT/../LibreAgent/include}}"
 # Where that checkout came from. It changes one sentence and only one: when the
 # agent turns out to predate the outcome type, what moves depends on which
-# revision was handed in. `pin` is a checkout at cmake/libreagent.pin, and
-# raising the pin is the answer. `trunk` is the agent's published branch, which
-# reads no pin at all -- telling its reader to raise one names a file that had
+# revision was handed in. `pin` is a checkout at the LibreAgent row of
+# deps.lock, and raising that row is the answer. `trunk` is the agent's
+# published branch, which reads no pin at all -- telling its reader to raise one names a file that had
 # no part in the verdict, and the agent has to publish the revision instead.
 # Anything else is refused rather than quietly generic.
 LA_ORIGIN="${2:-${LIBREAGENT_ORIGIN:-unnamed}}"
@@ -605,7 +605,7 @@ elif grep -qE "$STALERE" "$SCRATCH/r1.log"; then
     # type, and the answer to those is not "the override is wrong".
     agent_stale=1
     case "$LA_ORIGIN" in
-        pin)   stale_next="Raise cmake/libreagent.pin to a published revision that carries it." ;;
+        pin)   stale_next="Raise the LibreAgent row of deps.lock (bump-deps to-head) to a published revision that carries it." ;;
         trunk) stale_next="This is the agent's own branch and reads no pin: publish the LibreAgent revision that introduces the outcome type. Moving a pin cannot answer this one." ;;
         *)     stale_next="Point this check at a LibreAgent revision that carries it." ;;
     esac

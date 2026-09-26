@@ -57,34 +57,28 @@ else()
 
     # A fixed revision, not a branch: the client's contract conformance is
     # proven against exactly this revision, and a moving branch would let the
-    # built agent run ahead of what was proven. Raising it is a deliberate act
-    # that moves this file and the client's recorded revision together.
+    # built agent run ahead of what was proven. Raising it is a deliberate act:
+    # `bump-deps to-head` moves the row in a commit of its own.
     #
-    # The revision lives in cmake/libreagent.pin rather than on the line below.
-    # A pin in a file of its own can be read and checked without parsing CMake
-    # — including the release-time assertion that the pin equals the commit the
-    # agent's tag points at, which cannot read a SHA embedded in a CMake call.
-    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/libreagent.pin")
-        message(FATAL_ERROR
-            "cmake/libreagent.pin is missing. It carries the LibreAgent revision this "
-            "project is proven against; without it the fetch would have no revision to "
-            "pin and would silently follow whatever the agent's default branch holds.")
+    # The revision -- and the URL -- are the LibreAgent row of deps.lock
+    # (`<name> <url> <commit> <main|version>`), which `bump-deps` writes and
+    # `bump-deps check` holds (form, reachable from upstream main, same revision
+    # as every other consumer, and in CI: the tree actually built == the row).
+    # This file only reads the row. CMAKE_CONFIGURE_DEPENDS makes a bumped lock
+    # re-run configure, so the fetched tree follows the lock instead of staying
+    # at the revision the build directory first fetched.
+    set(_libredarwin_deps_lock "${CMAKE_CURRENT_LIST_DIR}/../deps.lock")
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_libredarwin_deps_lock}")
+    file(STRINGS "${_libredarwin_deps_lock}" _libredarwin_agent_row REGEX "^LibreAgent[ \t]")
+    list(LENGTH _libredarwin_agent_row _libredarwin_agent_rows)
+    if(NOT _libredarwin_agent_rows EQUAL 1)
+        message(FATAL_ERROR "deps.lock must hold exactly one LibreAgent row")
     endif()
-    file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/libreagent.pin" LIBREAGENT_PIN LIMIT_COUNT 1)
-    string(STRIP "${LIBREAGENT_PIN}" LIBREAGENT_PIN)
-    # Exactly 40 lowercase hex characters. Spelled as a length test plus a
-    # character-class test because CMake's regex engine has no {n} repetition
-    # operator -- "^[0-9a-f]{40}$" matches the literal brace form and so never
-    # matches a real SHA, which turns this guard into an unconditional refusal.
-    string(LENGTH "${LIBREAGENT_PIN}" LIBREAGENT_PIN_LENGTH)
-    if(NOT LIBREAGENT_PIN_LENGTH EQUAL 40 OR NOT LIBREAGENT_PIN MATCHES "^[0-9a-f]+$")
-        message(FATAL_ERROR
-            "cmake/libreagent.pin does not hold a 40-character commit hash: '${LIBREAGENT_PIN}'. "
-            "A tag or branch name here would reintroduce exactly the moving target the pin exists "
-            "to remove.")
-    endif()
+    string(REGEX REPLACE "[ \t]+" ";" _libredarwin_agent_row "${_libredarwin_agent_row}")
+    list(GET _libredarwin_agent_row 1 LIBREAGENT_URL)
+    list(GET _libredarwin_agent_row 2 LIBREAGENT_PIN)
     FetchContent_Declare(LibreAgent
-        GIT_REPOSITORY https://github.com/LibreSCRS/LibreAgent.git
+        GIT_REPOSITORY ${LIBREAGENT_URL}
         GIT_TAG ${LIBREAGENT_PIN})
     FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core + LibreAgent::Wire
 

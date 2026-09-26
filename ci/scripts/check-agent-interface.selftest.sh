@@ -601,7 +601,7 @@ else
 fi
 
 # Thirty-five through thirty-seven: which revision has to move. CI runs this
-# check against BOTH the agent's published branch and cmake/libreagent.pin, and
+# check against both the agent's published branch and the locked revision, and
 # the stale-agent verdict used to end "Raise cmake/libreagent.pin." whatever it
 # had been handed. On the trunk side that names a file the job never reads --
 # and while both are red for the same missing type, it sends the reader to move
@@ -620,10 +620,10 @@ check_origin() {  # check_origin <label> <origin> <want-rc> <root> <la-include> 
 }
 mkderived "$WORK/c35" enum switch
 check_origin "a stale agent reached through the pin says to raise the pin" \
-    pin 1 "$WORK/c35" "$WORK/la-bool" "Raise cmake/libreagent.pin" "publish the LibreAgent revision"
+    pin 1 "$WORK/c35" "$WORK/la-bool" "Raise the LibreAgent row of deps.lock" "publish the LibreAgent revision"
 mkderived "$WORK/c36" enum switch
 check_origin "a stale agent trunk says to publish it, not to raise a pin" \
-    trunk 1 "$WORK/c36" "$WORK/la-bool" "publish the LibreAgent revision" "Raise cmake/libreagent.pin"
+    trunk 1 "$WORK/c36" "$WORK/la-bool" "publish the LibreAgent revision" "Raise the LibreAgent row"
 mkderived "$WORK/c37" enum switch
 check_origin "an unrecognised provenance refuses to judge" \
     somewhere 2 "$WORK/c37" "$WORK/la-enum" "is not a LibreAgent provenance" ""
