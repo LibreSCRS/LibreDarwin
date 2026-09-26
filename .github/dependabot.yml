@@ -1,0 +1,14 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Every action in the workflows is pinned by commit. Dependabot proposes the
+# moves -- including LibreSCRS/ci, whose commit must stay the same in every
+# `uses:` line (the shared check-workflows gate holds that).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ['*']

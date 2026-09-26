@@ -21,20 +21,26 @@ on:
   # else has no way to be checked before it lands.
   workflow_dispatch:
 
+# Nothing by default; each job names what it needs.
+permissions: {}
+
 jobs:
   format-check:
     # The format gate needs neither Xcode nor LibreMiddleware, so it runs on
     # ubuntu with the clang-format-21 the rest of the org pins. Covers the C++
     # and Objective-C++ backend sources.
     timeout-minutes: 15
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
     steps:
       # fetch-depth: 0 because the self-test runner picks its set with
       # `git ls-files`, and a shallow checkout is a known source of a
       # different set here than locally.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Install clang-format-21
         run: |
@@ -99,6 +105,8 @@ jobs:
     # backend uses on AppleClang.
     timeout-minutes: 60
     runs-on: macos-15
+    permissions:
+      contents: read
     env:
       # Where LibreMiddleware installs and where LibreDarwin (+ the FetchContent
       # LibreAgent) find it via find_package(LibreMiddleware 5.0 CONFIG).
@@ -115,9 +123,10 @@ jobs:
           brew install ninja autoconf automake libtool pkg-config bash
           python3 -m pip install --break-system-packages --user jsonschema
 
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           path: LibreDarwin
+          persist-credentials: false
 
       - name: Checkout LibreMiddleware and LibreAgent at the lock
         # Both at the commits deps.lock names, and proved to be those commits
