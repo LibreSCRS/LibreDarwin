@@ -50,18 +50,11 @@ jobs:
           sudo apt-get install -y clang-format-21
 
       - name: Check clang-format
-        # The roots live in ci/format-dirs.txt, which the scope check below
-        # reads too (in the shared gates below): a directory nobody formats
-        # cannot appear without one of the two saying so.
-        #
-        # -print0/-0 for paths with spaces, a parenthesised extension filter so
-        # the -o cannot swallow the directory list, and -r because without it an
-        # empty result makes clang-format read stdin and hang rather than fail.
-        # A wedged job in this project once held a runner until it was cancelled by hand.
+        # Every tracked C++ and Objective-C++ source, so a new directory cannot
+        # fall outside the check. -r because without it an empty list makes
+        # clang-format read stdin and hang rather than fail.
         run: |
-          mapfile -t dirs < <(grep -v '^#' ci/format-dirs.txt)
-          find "${dirs[@]}" \
-            \( -name '*.cpp' -o -name '*.h' -o -name '*.hpp' -o -name '*.mm' \) -print0 \
+          git ls-files -z -- '*.cpp' '*.h' '*.hpp' '*.mm' \
             | xargs -0 -r clang-format-21 --dry-run --Werror
 
       - name: This repository's agent and prompter sources read no unrecorded environment variable
@@ -87,20 +80,15 @@ jobs:
         run: python3 ci/scripts/check-launchd-plist.py packaging/launchd/*.plist
 
       - name: Shared gates
-        # The gates this repository shares with the rest of the project, from
-        # LibreSCRS/ci at the commit named here; which ones is that
-        # repository's profiles/LibreDarwin.txt: the formatter's scope (the
-        # roots are ci/format-dirs.txt, read by the step above too), a reason
-        # on every skip, the workflows read as data (every gate reached, every
-        # job bounded, every step placed where it can run, one LibreSCRS/ci
-        # commit throughout), deps.lock (form, reachable from upstream main,
-        # the same LibreMiddleware as the locked LibreAgent's), VERSION and
-        # CHANGELOG in agreement with every version surface and first-party
-        # floor (proved weeks before the tag, not first on it), the release
-        # workflow checking its asset set before it publishes, and every
-        # self-test this repository ships, each required to report the cases
-        # it ran and how many proved its gate red.
-        uses: LibreSCRS/ci/actions/gates@373a0f82c9af280b7a8ccc4ee30106c947394ca2
+        # From LibreSCRS/ci at the commit named here: every job bounded and
+        # one LibreSCRS/ci commit throughout, a reason on every skip, VERSION
+        # and CHANGELOG in agreement with every version surface and
+        # first-party floor (weeks before the tag, not first on it), deps.lock
+        # well formed and reachable from upstream main, and every self-test
+        # this repository ships.
+        uses: LibreSCRS/ci/actions/gates@bd36eee50ba085ef4f052ea2767cff910e2e62e7
+        with:
+          gates: check-workflows check-skip-reasons check-version deps-lock selftests
 
   build-macos:
     # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
@@ -139,7 +127,7 @@ jobs:
         # history and submodules because LibreMiddleware derives its version
         # with git describe and vendors OpenSC and curl as submodules.
         id: deps
-        uses: LibreSCRS/ci/actions/checkout-deps@373a0f82c9af280b7a8ccc4ee30106c947394ca2
+        uses: LibreSCRS/ci/actions/checkout-deps@bd36eee50ba085ef4f052ea2767cff910e2e62e7
         with:
           root: LibreDarwin
           names: LibreMiddleware LibreAgent
@@ -227,15 +215,14 @@ jobs:
         run: ctest --test-dir build --output-on-failure --no-tests=error
 
       - name: Shared gates after the build
-        # ctest reports whatever the build directory discovered, so a suite
-        # that quietly stops being registered reads as success: the test
-        # manifest compares the discovered set with ci/test-manifest.macos.txt.
-        # And the LibreAgent tree CMake really used (FETCHCONTENT_SOURCE_DIR
-        # in the cache) is still the locked commit -- the property, not what
+        # ctest runs whatever the build registered, so a test binary that
+        # quietly stops being registered reads as success: every binary in
+        # ci/test-floor.txt must still register at least its count. And the
+        # LibreAgent tree CMake really used (FETCHCONTENT_SOURCE_DIR in the
+        # cache) is still the locked commit -- the property, not what
         # configure printed.
-        uses: LibreSCRS/ci/actions/gates@373a0f82c9af280b7a8ccc4ee30106c947394ca2
+        uses: LibreSCRS/ci/actions/gates@bd36eee50ba085ef4f052ea2767cff910e2e62e7
         with:
+          gates: deps-lock-build test-floor
           root: LibreDarwin
-          phase: build
           build-dir: build
-          leg: macos

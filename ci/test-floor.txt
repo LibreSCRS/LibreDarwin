@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# <test binary>  <tests it must register at least>. Raised in the change that
+# adds tests; a binary that disappears or registers fewer is red.
+AgentCoreSeamsTest 1
+AppGroupPathsProductionTest 1
+CscaImportSocketTest 1
+MacPrompterClientTest 1
+ManagePinOperationTest 1
+OsLogSinkTest 1
+PeerCodeSigningTest 1
+PeerIdentityTest 1
+PluginDirectoryTest 1
+ProcessHardeningTest 1
+PrompterHardeningTest 1
+PrompterProtocolTest 1
+PrompterServerTest 1
+ReadCertificatesOperationTest 1
+SecCodeAuthorizerTest 1
+SignHwSmokeTest 1
+SocketFrontendTest 1
+SocketOperationChannelTest 1
+SocketTransportTest 1
+SystemLifecycleTest 1

@@ -1,4 +1,0 @@
-agent
-prompter
-pkcs11-module
-ci
