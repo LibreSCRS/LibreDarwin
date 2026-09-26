@@ -64,11 +64,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - id: pre
-        uses: LibreSCRS/ci/actions/release-preflight@5b9410f9b0e6ab6983c39f931e118e68007c12b4
+        uses: LibreSCRS/ci/actions/release-preflight@373a0f82c9af280b7a8ccc4ee30106c947394ca2
         with:
           mode: ${{ inputs.mode || 'publish' }}
-          # The floor arm has one first-party floor to find here (the
-          # LibreMiddleware find_package); fewer is a scan that read nothing.
+          # The floor arm must find at least one first-party floor (the
+          # LibreMiddleware and LibreAgent find_package calls); none is a scan
+          # that read nothing, not a clean result.
           version-min: '1'
 
   publish:
@@ -81,7 +82,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: LibreSCRS/ci/actions/release-publish@5b9410f9b0e6ab6983c39f931e118e68007c12b4
+      - uses: LibreSCRS/ci/actions/release-publish@373a0f82c9af280b7a8ccc4ee30106c947394ca2
         with:
           mode: ${{ needs.preflight.outputs.mode }}
           version: ${{ needs.preflight.outputs.version }}

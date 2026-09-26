@@ -79,7 +79,7 @@ jobs:
         # authorize() and the 2 it skipped carried 8 of the 9 call sites. The
         # check refuses to judge on that now, so the checkout is what keeps this
         # job green rather than an optimisation.
-        uses: LibreSCRS/ci/actions/checkout-deps@5b9410f9b0e6ab6983c39f931e118e68007c12b4
+        uses: LibreSCRS/ci/actions/checkout-deps@373a0f82c9af280b7a8ccc4ee30106c947394ca2
         with:
           root: LibreDarwin
           names: LibreMiddleware

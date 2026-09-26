@@ -94,10 +94,13 @@ jobs:
         # on every skip, the workflows read as data (every gate reached, every
         # job bounded, every step placed where it can run, one LibreSCRS/ci
         # commit throughout), deps.lock (form, reachable from upstream main,
-        # the same LibreMiddleware as the locked LibreAgent's), and every
+        # the same LibreMiddleware as the locked LibreAgent's), VERSION and
+        # CHANGELOG in agreement with every version surface and first-party
+        # floor (proved weeks before the tag, not first on it), the release
+        # workflow checking its asset set before it publishes, and every
         # self-test this repository ships, each required to report the cases
         # it ran and how many proved its gate red.
-        uses: LibreSCRS/ci/actions/gates@5b9410f9b0e6ab6983c39f931e118e68007c12b4
+        uses: LibreSCRS/ci/actions/gates@373a0f82c9af280b7a8ccc4ee30106c947394ca2
 
   build-macos:
     # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
@@ -136,7 +139,7 @@ jobs:
         # history and submodules because LibreMiddleware derives its version
         # with git describe and vendors OpenSC and curl as submodules.
         id: deps
-        uses: LibreSCRS/ci/actions/checkout-deps@5b9410f9b0e6ab6983c39f931e118e68007c12b4
+        uses: LibreSCRS/ci/actions/checkout-deps@373a0f82c9af280b7a8ccc4ee30106c947394ca2
         with:
           root: LibreDarwin
           names: LibreMiddleware LibreAgent
@@ -145,7 +148,7 @@ jobs:
           submodules: recursive
 
       - name: Build & install LibreMiddleware (Release, SHARED)
-        working-directory: ${{ steps.deps.outputs.libremiddleware-path }}
+        working-directory: LibreMiddleware
         run: |
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
@@ -230,7 +233,7 @@ jobs:
         # And the LibreAgent tree CMake really used (FETCHCONTENT_SOURCE_DIR
         # in the cache) is still the locked commit -- the property, not what
         # configure printed.
-        uses: LibreSCRS/ci/actions/gates@5b9410f9b0e6ab6983c39f931e118e68007c12b4
+        uses: LibreSCRS/ci/actions/gates@373a0f82c9af280b7a8ccc4ee30106c947394ca2
         with:
           root: LibreDarwin
           phase: build
