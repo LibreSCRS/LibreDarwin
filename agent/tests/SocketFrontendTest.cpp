@@ -1080,7 +1080,7 @@ TEST(SocketFrontend, DeclinedTrustConfirmationLeavesThePreviousValueInPlace)
         [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, "declined"}; });
 
     const auto reply =
-        rig.roundTrip(70, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"http://tsa.example/"})});
+        rig.roundTrip(70, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"https://tsa.example/"})});
 
     EXPECT_EQ(errName(reply), "NotAuthorized");
     EXPECT_EQ(rig.core->configStore().tsaUrls(), before) << "a declined change must not move the value";
@@ -1093,11 +1093,11 @@ TEST(SocketFrontend, ApprovedTrustConfirmationAppliesTheWrite)
         [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Ok, {}}; });
 
     const auto reply =
-        rig.roundTrip(71, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"http://tsa.example/"})});
+        rig.roundTrip(71, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"https://tsa.example/"})});
 
     ASSERT_NE(reply.find("ok"), nullptr);
     EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
-    EXPECT_EQ(rig.core->configStore().tsaUrls(), (std::vector<std::string>{"http://tsa.example/"}));
+    EXPECT_EQ(rig.core->configStore().tsaUrls(), (std::vector<std::string>{"https://tsa.example/"}));
 }
 
 // The confused-deputy guard: the human must be told what is being changed.
@@ -1183,21 +1183,21 @@ TEST(SocketFrontend, OrdinaryConfigWritesNeverAskForConfirmation)
 TEST(SocketFrontend, DeclinedTrustResetLeavesThePreviousValueInPlace)
 {
     Rig rig;
-    ASSERT_TRUE(rig.core->configStore().setTsaUrls({"http://tsa.example/"}).ok);
+    ASSERT_TRUE(rig.core->configStore().setTsaUrls({"https://tsa.example/"}).ok);
     rig.frontend->setConfirmProvider(
         [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}}; });
 
     const auto reply = rig.roundTrip(74, Agent::Wire::ResetConfig{"TsaUrls"});
 
     EXPECT_EQ(errName(reply), "NotAuthorized");
-    EXPECT_EQ(rig.core->configStore().tsaUrls(), (std::vector<std::string>{"http://tsa.example/"}))
+    EXPECT_EQ(rig.core->configStore().tsaUrls(), (std::vector<std::string>{"https://tsa.example/"}))
         << "a declined reset must not clear the value";
 }
 
 TEST(SocketFrontend, ApprovedTrustResetClearsTheValue)
 {
     Rig rig;
-    ASSERT_TRUE(rig.core->configStore().setTsaUrls({"http://tsa.example/"}).ok);
+    ASSERT_TRUE(rig.core->configStore().setTsaUrls({"https://tsa.example/"}).ok);
     rig.frontend->setConfirmProvider(
         [](const wire::ConfirmAction&) { return wire::ConfirmReply{wire::PromptReplyStatus::Ok, {}}; });
 
