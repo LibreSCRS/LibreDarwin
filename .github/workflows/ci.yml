@@ -86,7 +86,7 @@ jobs:
         # first-party floor (weeks before the tag, not first on it), deps.lock
         # well formed and reachable from upstream main, and every self-test
         # this repository ships.
-        uses: LibreSCRS/ci/actions/gates@bd36eee50ba085ef4f052ea2767cff910e2e62e7
+        uses: LibreSCRS/ci/actions/gates@ac199ae69bc187a8571c9f29763503c1a966ea2c
         with:
           gates: check-workflows check-skip-reasons check-version deps-lock selftests
 
@@ -127,7 +127,7 @@ jobs:
         # history and submodules because LibreMiddleware derives its version
         # with git describe and vendors OpenSC and curl as submodules.
         id: deps
-        uses: LibreSCRS/ci/actions/checkout-deps@bd36eee50ba085ef4f052ea2767cff910e2e62e7
+        uses: LibreSCRS/ci/actions/checkout-deps@ac199ae69bc187a8571c9f29763503c1a966ea2c
         with:
           root: LibreDarwin
           names: LibreMiddleware LibreAgent
@@ -221,7 +221,7 @@ jobs:
         # LibreAgent tree CMake really used (FETCHCONTENT_SOURCE_DIR in the
         # cache) is still the locked commit -- the property, not what
         # configure printed.
-        uses: LibreSCRS/ci/actions/gates@bd36eee50ba085ef4f052ea2767cff910e2e62e7
+        uses: LibreSCRS/ci/actions/gates@ac199ae69bc187a8571c9f29763503c1a966ea2c
         with:
           gates: deps-lock-build test-floor
           root: LibreDarwin
