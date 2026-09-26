@@ -4,7 +4,8 @@
 # NOTHING ELSE. The macOS agent host is built from source in 5.0.0; there is
 # no .pkg, no .dmg and no .zip, and no Apple Developer ID to sign one with.
 #
-# Empty is the claim, not the absence of one. The release workflow runs
+# Empty is the claim, not the absence of one. The release workflow's publish
+# job (LibreSCRS/ci release-publish, artifacts: '') runs
 # check-release-assets.sh --staged with no path, which requires this file to
 # hold no glob -- and `gh release create` is called with no path argument. A
 # file that simply did not exist would be exit 2 ("I cannot judge"), never a

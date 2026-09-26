@@ -200,16 +200,21 @@ wcase() {  # wcase <label> <want> <rows> <workflow dir>
     wired "$3" "$4" "$WORK/w.out"; rc=$?
     if [ "$rc" = "$2" ]; then ok "$1 (rc=$rc)"; else bad "$1: want rc=$2, got rc=$rc" "$WORK/w.out"; fi
 }
-# A perturbed copy of the workflow. The edit has to have changed something, or
-# a red here would be a red over the untouched file.
+# A perturbed copy of the workflow this self-test's own row names. The edit
+# has to have changed something, or a red here would be a red over the
+# untouched file.
+ROW_WHERE="$(awk -v s="$SELF" '$1 == s { print $3; exit }' "$REPO/$ROWS")"
+ROW_WF="${ROW_WHERE%%:*}"
+ROW_JOB="${ROW_WHERE#*:}"
 perturb() {  # perturb <mode> <out dir>
     mkdir -p "$2"
-    python3 - "$REPO/.github/workflows/ci.yml" "$2/ci.yml" "$SELF" "$1" <<'PY'
+    [ -n "$ROW_WHERE" ] || { echo "perturb: $ROWS has no row for $SELF"; return 3; }
+    python3 - "$REPO/.github/workflows/$ROW_WF" "$2/$ROW_WF" "$SELF" "$1" "$ROW_JOB" <<'PY'
 import sys
 import yaml
-src, dst, path, mode = sys.argv[1:5]
+src, dst, path, mode, name = sys.argv[1:6]
 doc = yaml.safe_load(open(src, encoding="utf-8"))
-job = doc["jobs"]["agent-interface"]
+job = doc["jobs"][name]
 steps = job.get("steps") or []
 mine = [s for s in steps if path in str(s.get("run", ""))]
 if not mine:
