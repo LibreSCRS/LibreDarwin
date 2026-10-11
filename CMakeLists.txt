@@ -53,6 +53,22 @@ endif()
 # The single LibreMiddleware owner: the daemon links LM through LibreAgent::Core.
 find_package(LibreMiddleware 5.0 REQUIRED CONFIG)
 
+# A universal build needs an OpenSSL with both slices. Left alone, the one found
+# above is whatever the machine has first (Homebrew's, arm64 only, on a runner),
+# and the x86_64 slice then fails to link. Refuse in configure instead.
+if(LIBREDARWIN_UNIVERSAL)
+    execute_process(COMMAND lipo -archs "${OPENSSL_CRYPTO_LIBRARY}"
+        OUTPUT_VARIABLE librescrsOpenSslArchs OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+    separate_arguments(librescrsOpenSslArchs)
+    foreach(arch IN LISTS CMAKE_OSX_ARCHITECTURES)
+        if(NOT arch IN_LIST librescrsOpenSslArchs)
+            message(FATAL_ERROR "${OPENSSL_CRYPTO_LIBRARY} has no ${arch} slice. Point OPENSSL_ROOT_DIR at a "
+                "universal OpenSSL (LibreMiddleware's thirdparty/openssl-<version>/macosx) with "
+                "OPENSSL_USE_STATIC_LIBS=TRUE.")
+        endif()
+    endforeach()
+endif()
+
 # The platform-neutral agent core (flows, scheduler, presence model, caches,
 # lease/broker policy, LM-backed seams, the 5 backend interfaces). The macOS
 # backend under agent/ implements those interfaces and builds the
