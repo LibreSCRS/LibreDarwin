@@ -231,6 +231,10 @@ wire::RequestSecrets buildChangeRequest(const Agent::PromptOptions& o)
     r.newMinLength = o.minLength;
     r.newMaxLength = o.maxLength;
     r.promptId = o.promptId;
+    // The change budget, for the same reason as the single-secret one: the
+    // core stops its own watchdog once the window is up, so a change panel
+    // shown without a clock is a panel nothing is counting.
+    r.deadlineMs = o.deadlineMs;
     return r;
 }
 

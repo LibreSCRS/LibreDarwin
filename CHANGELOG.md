@@ -55,6 +55,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
   nobody had ever run. The workflow verifies the tag's signature against the
   published key, then publishes the section of this file that names the tag's
   version.
+- The change-PIN window now counts down and closes with a timeout, like the
+  single-secret prompt. Its request carries the budget as an optional
+  `deadlineMs`; a request without it (from an older agent) still shows a
+  window with no clock.
 
 ### Changed
 

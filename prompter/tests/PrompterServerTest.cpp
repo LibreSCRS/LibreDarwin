@@ -117,7 +117,8 @@ const auto kPinRequestBytes = [] {
 };
 
 // Distinct per-role bounds (4-8 current, 6-10 new) pin the primary*/new* field
-// mapping through the codec and the dispatch.
+// mapping through the codec and the dispatch; the deadline is what the change
+// panel counts down from.
 const auto kChangeRequest = [] {
     return wire::RequestSecrets{.kind = "change_pin",
                                 .title = "Change your PIN",
@@ -127,7 +128,8 @@ const auto kChangeRequest = [] {
                                 .primaryMinLength = 4,
                                 .primaryMaxLength = 8,
                                 .newMinLength = 6,
-                                .newMaxLength = 10};
+                                .newMaxLength = 10,
+                                .deadlineMs = 180000};
 };
 
 // Providers for the paths a test must NOT route into: the variant dispatch has
@@ -334,8 +336,8 @@ TEST(PrompterServer, ChangeRequestRoutesToMultiProviderAndReplyRoundTrips)
     EXPECT_EQ(parsed->primary, (std::vector<std::uint8_t>{'1', '2', '3', '4'}));
     EXPECT_EQ(parsed->secondary, (std::vector<std::uint8_t>{'5', '6', '7', '8'}));
     {
-        // Every request field (kind, chrome, per-role bounds) survived the
-        // wire into the provider unchanged.
+        // Every request field (kind, chrome, per-role bounds, deadline)
+        // survived the wire into the provider unchanged.
         std::lock_guard<std::mutex> lk(seenMutex);
         EXPECT_EQ(seen, kChangeRequest());
     }

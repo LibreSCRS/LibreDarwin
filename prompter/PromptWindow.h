@@ -61,8 +61,8 @@ public:
     //   - a NON-EMPTY id closes the panel carrying that id AND any panel raised
     //     without an id at all. Both sides must know an address for one to be
     //     matched by it, so an unmatchable id must not be able to strand a
-    //     panel that has none — least of all the change panel, which this wire
-    //     gives no deadline to close itself with.
+    //     panel that has none — least of all one raised without a deadline,
+    //     which has nothing else to close it with.
     //   - an EMPTY id — an unaddressed dismissal, all a caller that speaks no
     //     ids can send — closes the OLDEST unaddressed panel, and only that
     //     one. It is cancelling the one prompt it knows about, not the screen.

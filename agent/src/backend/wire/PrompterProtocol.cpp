@@ -376,6 +376,10 @@ CborValue toCbor(const RequestSecrets& r)
     if (!r.promptId.empty()) {
         m.emplace("promptId", CborValue(r.promptId));
     }
+    // Absence for none, as on the single-secret request.
+    if (r.deadlineMs != 0) {
+        m.emplace("deadlineMs", CborValue::uint(r.deadlineMs));
+    }
     return CborValue(std::move(m));
 }
 
@@ -524,7 +528,10 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
         const auto newMin = optUint(m, "newMinLength");
         const auto newMax = optUint(m, "newMaxLength");
         auto secretsPromptId = optText(m, "promptId");
-        if (!display || !priMin || !priMax || !newMin || !newMax || !secretsPromptId) {
+        // Absent from an agent predating the key: optUint reads that as 0,
+        // which is "no deadline set", never an instant expiry.
+        const auto secretsDeadline = optUint(m, "deadlineMs");
+        if (!display || !priMin || !priMax || !newMin || !newMax || !secretsPromptId || !secretsDeadline) {
             return std::unexpected(PrompterParseError::WrongType);
         }
         r.title = std::move(display->title);
@@ -536,6 +543,7 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
         r.newMinLength = static_cast<std::uint32_t>(*newMin);
         r.newMaxLength = static_cast<std::uint32_t>(*newMax);
         r.promptId = std::move(*secretsPromptId);
+        r.deadlineMs = static_cast<std::uint32_t>(*secretsDeadline);
         return PrompterRequest{std::move(r)};
     }
     if (t == "ConfirmAction") {

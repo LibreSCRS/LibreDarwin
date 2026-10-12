@@ -332,6 +332,53 @@ TEST(PrompterProtocol, ChangeRequestCarriesThePromptId)
     EXPECT_EQ(std::get<RequestSecrets>(*parsed).promptId, "n7:5");
 }
 
+// The change panel counts down like the single-secret one, so its request
+// carries the same budget: a duration, absent when there is none.
+TEST(PrompterProtocol, ChangeRequestDeadlineRoundTripsAndIsAbsentWhenZero)
+{
+    RequestSecrets in;
+    in.kind = "change_pin";
+    in.deadlineMs = 180'000;
+    auto parsed = parsePrompterRequest(toCbor(in).encode());
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(std::holds_alternative<RequestSecrets>(*parsed));
+    EXPECT_EQ(std::get<RequestSecrets>(*parsed).deadlineMs, 180'000u);
+
+    in.deadlineMs = 0;
+    const auto bytes = toCbor(in).encode();
+    const auto tree = decode(bytes);
+    ASSERT_TRUE(tree.has_value());
+    EXPECT_EQ(tree->find("deadlineMs"), nullptr)
+        << "no deadline is spelled as absence, so an older prompter reads nothing";
+    auto bare = parsePrompterRequest(bytes);
+    ASSERT_TRUE(bare.has_value());
+    EXPECT_EQ(std::get<RequestSecrets>(*bare).deadlineMs, 0u);
+}
+
+// What an agent predating the key sends: no deadlineMs at all. It still
+// decodes, and reads as "no deadline set" rather than as an instant expiry.
+TEST(PrompterProtocol, ChangeRequestFromAnOlderEncoderDecodesWithNoDeadline)
+{
+    CborValue::Map m;
+    m.emplace("t", CborValue("RequestSecrets"));
+    m.emplace("kind", CborValue("change_pin"));
+    m.emplace("promptId", CborValue("n7:6"));
+    auto parsed = parsePrompterRequest(CborValue(std::move(m)).encode());
+    ASSERT_TRUE(parsed.has_value());
+    ASSERT_TRUE(std::holds_alternative<RequestSecrets>(*parsed));
+    EXPECT_EQ(std::get<RequestSecrets>(*parsed).deadlineMs, 0u);
+    EXPECT_EQ(std::get<RequestSecrets>(*parsed).promptId, "n7:6");
+}
+
+TEST(PrompterProtocol, ChangeRequestRejectsAMistypedDeadline)
+{
+    CborValue::Map m;
+    m.emplace("t", CborValue("RequestSecrets"));
+    m.emplace("kind", CborValue("change_pin"));
+    m.emplace("deadlineMs", CborValue("180000"));
+    EXPECT_EQ(parsePrompterRequest(CborValue(std::move(m)).encode()).error(), PrompterParseError::WrongType);
+}
+
 TEST(PrompterProtocol, ChangeRequestRejectsAMistypedPromptId)
 {
     CborValue::Map m;
@@ -464,7 +511,9 @@ TEST(PrompterProtocol, RequestSecretsRoundTripsAllFields)
                               .primaryMinLength = 4,
                               .primaryMaxLength = 8,
                               .newMinLength = 6,
-                              .newMaxLength = 12};
+                              .newMaxLength = 12,
+                              .promptId = "n7:9",
+                              .deadlineMs = 180'000};
     auto parsed = parsePrompterRequest(toCbor(sent).encode());
     ASSERT_TRUE(parsed.has_value());
     ASSERT_TRUE(std::holds_alternative<RequestSecrets>(*parsed));

@@ -542,6 +542,43 @@ TEST(MacPrompterClient, ChangeCancelledReplyMapsToCancelledWithoutSecrets)
     EXPECT_FALSE(r.newPin.has_value());
 }
 
+// The core stops its own watchdog once the change panel is up, so the budget
+// it stamped on the options has to reach the panel as its clock.
+TEST(MacPrompterClient, RequestPinChangeForwardsTheDeadlineToTheWireRequest)
+{
+    const std::string path = uniquePath();
+    wire::MultiPromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled; // no secrets needed for this assertion
+    FakeChangePrompter server(path, reply);
+
+    Agent::PromptOptions options;
+    options.deadlineMs = 180000;
+
+    MacPrompterClient client(path, trustAnyPeerForTest());
+    static_cast<void>(client.requestPinChange(options));
+
+    server.waitUntilServed();
+    const auto& req = server.capturedRequest();
+    ASSERT_TRUE(req.has_value());
+    EXPECT_EQ(req->deadlineMs, 180000u);
+}
+
+// A change panel whose clock ran out answers Timeout; that is not the holder
+// cancelling, and must not be reported as if it were.
+TEST(MacPrompterClient, ChangeTimeoutReplyMapsToTimeout)
+{
+    const std::string path = uniquePath();
+    wire::MultiPromptReply reply;
+    reply.status = wire::PromptReplyStatus::Timeout;
+    FakeChangePrompter server(path, reply);
+
+    MacPrompterClient client(path, trustAnyPeerForTest());
+    const auto r = client.requestPinChange(Agent::PromptOptions{});
+    EXPECT_EQ(r.status, Agent::PromptStatus::Timeout);
+    EXPECT_FALSE(r.current.has_value());
+    EXPECT_FALSE(r.newPin.has_value());
+}
+
 TEST(MacPrompterClient, ChangeErrorReplyCarriesUserMessage)
 {
     const std::string path = uniquePath();

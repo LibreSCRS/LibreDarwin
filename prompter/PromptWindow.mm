@@ -699,8 +699,8 @@ enum class Sweep : std::uint8_t {
     // The panel the id names, PLUS any panel raised without an id at all: both
     // sides have to know an address for one to be matched by it, so a panel
     // that carries none must not be strandable by a dismissal that does. That
-    // matters most for the change panel, which this wire gives no deadline —
-    // an unmatchable id would leave it standing with nothing left to close it.
+    // matters most for a panel raised without a deadline: an unmatchable id
+    // would leave it standing with nothing left to close it.
     Addressed,
     // A dismissal that names nothing: the OLDEST unaddressed panel, and only
     // that one. A caller that knows no ids is cancelling the one prompt it
@@ -869,10 +869,11 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
             (void)answered;
             impl->panels.erase(entry);
           };
-          // RequestSecrets carries no deadline on this wire, so the change
-          // panel stands until it is answered or dismissed — a clock it was
-          // never given must not be invented here.
-          [panel showWithDeadlineMs:0 cascadeStep:impl->cascade++ soleStanding:soleStanding];
+          // The same clock as the single-secret panel: a visible countdown and
+          // Timeout when it runs out. A request without a deadline (0) stands
+          // until it is answered or dismissed — a clock it was never given
+          // must not be invented here.
+          [panel showWithDeadlineMs:req.deadlineMs cascadeStep:impl->cascade++ soleStanding:soleStanding];
       }
     });
 

@@ -35,7 +35,10 @@ using LibreSCRS::Agent::Wire::CborValue;
 // DEPENDS ON changes shape.
 //   1 -- RequestSecret / RequestSecrets / ConfirmAction / CancelCurrent, no
 //        deadlines, no "timeout" reply word, no Reset, no "v"
-//   2 -- entry deadlines, the "timeout" reply word, Reset/ResetDone, and "v"
+//   2 -- entry deadlines (RequestSecret and RequestSecrets), the "timeout"
+//        reply word, Reset/ResetDone, and "v". The RequestSecrets deadline
+//        joined version 2 before any release carried it, so no released
+//        helper speaks 2 without it.
 inline constexpr std::uint32_t kPrompterProtocolVersion = 2;
 
 enum class PromptKind : std::uint8_t { Pin, Can, Mrz };
@@ -186,6 +189,12 @@ struct RequestSecrets
     // Addressed like the single-secret prompt: a change modal is a window the
     // agent may have to dismiss by name.
     std::string promptId;
+    // How long the holder has, exactly as PromptRequest::deadlineMs: a
+    // DURATION in milliseconds from the moment the window is shown, answered
+    // with Timeout when it runs out. 0 means "no deadline set" and is spelled
+    // as ABSENCE on the wire, so a prompter predating the key reads nothing.
+    // There is no alternative entry form here, so no second budget either.
+    std::uint32_t deadlineMs{0};
     bool operator==(const RequestSecrets&) const = default;
 };
 
