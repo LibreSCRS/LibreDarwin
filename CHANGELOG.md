@@ -50,6 +50,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **`librescrs-pkcs11-agent.dylib`, a PKCS#11 module for applications that
+  load one** (Firefox, Thunderbird, ssh). It holds no secret: it forwards every
+  call to the agent over the App Group socket and, before sending anything,
+  checks the signing identity of the process serving that socket, and with a
+  team id its designated requirement too.
 - A release workflow and a `KEYS` file. Until now this repository had neither,
   so its first tag would also have been the first execution of a pipeline
   nobody had ever run. The workflow verifies the tag's signature against the
@@ -62,6 +67,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **Every binary now targets macOS 15.0.** The agent and the prompter were
+  built for the version of the SDK they were compiled against.
 - **The App Group is named after the signing team.** A build configured with
   `LIBRESCRS_TEAM_ID` uses `<team>.org.librescrs.LibreMac`; one without a team
   (CI, tests, the ad-hoc dev harness) keeps `group.org.librescrs.LibreMac`.
