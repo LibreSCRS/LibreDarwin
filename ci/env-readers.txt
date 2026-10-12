@@ -1,7 +1,7 @@
-# env-readers.txt — the environment reads the agent and prompter sources are
-# allowed, one per row. check-no-env-handles.sh fails on any read under
-# agent/src, agent/include or prompter/ that is not recorded here, and on any
-# row that no longer matches a read.
+# env-readers.txt — the environment reads the agent, prompter and PKCS#11 module
+# sources are allowed, one per row. check-no-env-handles.sh fails on any read
+# under agent/src, agent/include, prompter/ and pkcs11-module/src that is not
+# recorded here, and on any row that no longer matches a read.
 #
 # Format:   <path>  <call, exactly as written>  <reason>
 #

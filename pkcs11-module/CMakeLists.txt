@@ -1,11 +1,23 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# SKELETON — the card-less, secret-less PKCS#11 facade dylib.
-# Browsers (Firefox/Chrome) and the CTK extension load it; it forwards the
-# 5-method seam (CertDer / Login / Logout / SignRaw / Decrypt, NO PIN args) to
-# the agent over the App-Group socket, advertising CKF_PROTECTED_AUTHENTICATION_PATH.
-# It links NO LibreMiddleware and does NO card I/O.
-#
-# TODO: implement the Cryptoki C_* ABI over the socket; sign + notarize as its
-# own browser-loadable unit. No target yet.
-message(STATUS "LibreDarwin: pkcs11-module is a skeleton (no targets yet)")
+# librescrs-pkcs11-agent.dylib -- the PKCS#11 module other applications load
+# (Firefox, Thunderbird, ssh). It holds no secret and touches no card: every
+# call goes to the user's agent over the App Group socket, after checking that
+# the process serving that socket is the agent this build trusts. The Cryptoki
+# surface is the shared facade; only the factory is this platform's.
+add_library(librescrs-pkcs11-agent MODULE src/SocketAgentClientFactory.cpp)
+set_target_properties(librescrs-pkcs11-agent PROPERTIES
+    PREFIX ""
+    SUFFIX ".dylib"
+    OUTPUT_NAME "librescrs-pkcs11-agent")
+target_link_libraries(librescrs-pkcs11-agent PRIVATE
+    LibreAgent::Pkcs11SocketClient
+    LibreDarwinWireCore)
+# The facade, whole, and one exported name. Never LibreAgent::Pkcs11Facade by
+# bare name: that builds a module with no entry point in it.
+librescrs_pkcs11_module_link(librescrs-pkcs11-agent)
+install(TARGETS librescrs-pkcs11-agent LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/librescrs)
+
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()

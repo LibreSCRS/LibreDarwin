@@ -34,6 +34,7 @@
 #  21  not a git work tree                                   -> 2
 #  22  no ci/env-readers.txt                                 -> 2
 #  23  a tracked source missing from the work tree           -> 2 (grep cannot read it)
+#  24  getenv("LIBRESCRS_…") in pkcs11-module/src            -> 1 (the module is scanned)
 set -uo pipefail
 
 CHECK="$(cd "$(dirname "$0")" && pwd)/check-no-env-handles.sh"
@@ -182,6 +183,16 @@ out="$(run "$r")"; rc=$?; check 22 2 $rc
 r="$(make_repo c23 agent/src/backend/Paths.cpp 'const char* v = std::getenv("LIBRESCRS_AGENT_SOCK");')"
 rm "$r/agent/src/backend/Paths.cpp"
 out="$(run "$r")"; rc=$?; check 23 2 $rc
+
+# case 24: the PKCS#11 module runs inside the application that loaded it; a
+# reader there takes configuration from that application's environment.
+r="$(make_repo c24 pkcs11-module/src/SocketAgentClientFactory.cpp \
+    'const char* s = std::getenv("LIBRESCRS_AGENT_SOCK");')"
+out="$(run "$r")"; rc=$?; check 24 1 $rc
+case "$out" in
+*"pkcs11-module/src/SocketAgentClientFactory.cpp:1"*) ;;
+*) echo "  case 24: FAIL — did not name file:line"; fail=$((fail + 1)) ;;
+esac
 
 echo "selftest: $pass passed, $fail failed"
 printf 'selftest: %s cases, %s red-proved\n' "$cases" "$red"

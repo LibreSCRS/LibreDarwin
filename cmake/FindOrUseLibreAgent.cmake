@@ -4,10 +4,11 @@
 # Hybrid LibreAgent consumption (mirrors LibreLinux's file of the same name):
 # prefer find_package(CONFIG) when LIBREDARWIN_USE_INSTALLED_AGENT_CORE=ON,
 # otherwise build from source via FetchContent. Either path provides the
-# namespaced LibreAgent::Core (the neutral agent core) AND LibreAgent::Wire
-# (the shared socket-wire codec/framing/message model) imported/alias targets
-# the macOS backend links; LibreAgent::ClientQt (a Qt client library) stays
-# off — LibreDarwin is the daemon side, not a client.
+# namespaced LibreAgent::Core (the neutral agent core), LibreAgent::Wire
+# (the shared socket-wire codec/framing/message model), and the PKCS#11 facade
+# with its socket transport (LibreAgent::Pkcs11Facade, ::Pkcs11SocketClient)
+# the PKCS#11 module is built from; LibreAgent::ClientQt (a Qt client library)
+# stays off — LibreDarwin is the daemon side, not a client.
 #
 # Dev builds re-point FetchContent at a local sibling checkout with
 #   -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT=/path/to/LibreAgent
@@ -37,10 +38,12 @@ if(LIBREDARWIN_USE_INSTALLED_AGENT_CORE)
     # component's find_dependency(Qt6) and fails hard for a dependency this
     # backend never asked for. Naming them also makes an agent package built
     # without one of them fail configuration BY NAME here, instead of the
-    # fixture test quietly disappearing at link time. Three are needed: the
-    # neutral core and the wire vocabulary the daemon links, and the
-    # master-list fixture the anchor-import test links.
-    find_package(LibreAgent 5.0 REQUIRED CONFIG COMPONENTS Core Wire TestSupport)
+    # fixture test quietly disappearing at link time. Five are needed: the
+    # neutral core and the wire vocabulary the daemon links, the master-list
+    # fixture the anchor-import test links, and the Cryptoki facade and its
+    # socket transport the PKCS#11 module is built from.
+    find_package(LibreAgent 5.0 REQUIRED CONFIG
+        COMPONENTS Core Wire TestSupport Pkcs11Facade Pkcs11SocketClient)
     message(STATUS "LibreAgent: using installed package (CONFIG)")
 else()
     message(STATUS "LibreAgent: building from source (FetchContent)")
@@ -54,6 +57,13 @@ else()
     set(LIBREAGENT_BUILD_CORE ON CACHE BOOL "" FORCE)
     set(LIBREAGENT_BUILD_WIRE ON CACHE BOOL "" FORCE)
     set(LIBREAGENT_BUILD_CLIENT_QT OFF CACHE BOOL "" FORCE)
+    # The PKCS#11 facade and its socket transport default OFF in the agent, and
+    # option() does not overwrite a cache variable that already exists -- so the
+    # switches have to be seeded BEFORE the subproject is configured. Without
+    # them the module links targets that were never defined, on the DEFAULT
+    # consumption path.
+    set(LIBREAGENT_BUILD_PKCS11_FACADE ON CACHE BOOL "" FORCE)
+    set(LIBREAGENT_BUILD_PKCS11_SOCKET_CLIENT ON CACHE BOOL "" FORCE)
 
     # A fixed revision, not a branch: the client's contract conformance is
     # proven against exactly this revision, and a moving branch would let the
@@ -80,7 +90,7 @@ else()
     FetchContent_Declare(LibreAgent
         GIT_REPOSITORY ${LIBREAGENT_URL}
         GIT_TAG ${LIBREAGENT_PIN})
-    FetchContent_MakeAvailable(LibreAgent) # provides LibreAgent::Core + LibreAgent::Wire
+    FetchContent_MakeAvailable(LibreAgent) # provides Core, Wire, Pkcs11Facade, Pkcs11SocketClient
 
     # No -fexperimental-library patching happens here any more. Both fetched
     # targets carry it as a PUBLIC usage requirement from LibreAgent's own

@@ -126,8 +126,9 @@ include(CTest)
 
 add_subdirectory(agent)
 
-# Card-less, secret-less PKCS#11 facade dylib (browser-loadable) that forwards to
-# the agent over the App-Group socket. Full implementation is pending.
+# librescrs-pkcs11-agent.dylib: the card-less, secret-less PKCS#11 module other
+# applications load. It forwards every call to the agent over the App-Group
+# socket, after checking that the process serving it is the agent.
 add_subdirectory(pkcs11-module)
 
 # The agent-owned macOS credential window (secure PIN / CAN / MRZ). Optional so a

@@ -15,7 +15,7 @@ find_library(BSM_LIB bsm REQUIRED) # audit_token_to_pid / _pidversion (PeerIdent
 # creation (the memfd_create analog), the private agent<->prompter CBOR
 # protocol, BSM peer identity, and the process hardening both secret-holding
 # binaries call first. Links NO LibreMiddleware/LibreAgent::Core,
-# so the agent-owned prompter (and, later, the PKCS#11 facade) can reuse it
+# so the agent-owned prompter and the PKCS#11 module can reuse it
 # without pulling the card stack. The libc++ std::expected/std::format this
 # layer uses on AppleClang need -fexperimental-library, which the root
 # CMakeLists sets for the whole build.

@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# check-no-env-handles.sh — this repository's agent and prompter sources take no
-# configuration from the environment, beyond the readers recorded in
-# ci/env-readers.txt.
+# check-no-env-handles.sh — this repository's agent, prompter and PKCS#11 module
+# sources take no configuration from the environment, beyond the readers
+# recorded in ci/env-readers.txt.
 #
 # Every LIBRESCRS_* variable these sources used to honour was a handle into a
 # process that holds card secrets: `launchctl setenv` reaches every job the
 # user's launchd starts, so a variable that moved a socket, skipped a peer check
 # or named another plugin directory was a switch any process running as the
-# user could flip. The socket paths, the container and the peer identities are
-# compiled in; the plugin directory is an argument (`--plugin-dir`), which
-# `launchctl setenv` cannot reach.
+# user could flip. The PKCS#11 module runs inside whatever application loaded
+# it, so the environment it would read is that application's. The socket paths,
+# the container and the peer identities are compiled in; the plugin directory
+# is an argument (`--plugin-dir`), which `launchctl setenv` cannot reach.
 #
 # What this measures, and what it does not. It reads the sources of THIS
-# repository under agent/src, agent/include and prompter/, and nothing else. The
-# agent process also runs LibreMiddleware code, linked in through the agent
-# core, and that code reads variables of its own -- LIBRESCRS_PKCS11_MODULE (the
-# module it loads), LIBRESCRS_CERTIFICATES_DIR (the trust anchors),
-# LIBRESCRS_DSS_JAR, SSL_CERT_FILE / SSL_CERT_DIR, OPENSC_CONF, OPENSSL_CONF and
-# a few debug switches. The agent's main() removes every variable it does not
-# name before that code can read one (restrictEnvironment, ProcessHardening.h);
-# this check does not judge that call or those readers.
+# repository under agent/src, agent/include, prompter/ and pkcs11-module/src,
+# and nothing else. The agent process also runs LibreMiddleware code, linked in
+# through the agent core, and that code reads variables of its own --
+# LIBRESCRS_PKCS11_MODULE (the module it loads), LIBRESCRS_CERTIFICATES_DIR (the
+# trust anchors), LIBRESCRS_DSS_JAR, SSL_CERT_FILE / SSL_CERT_DIR, OPENSC_CONF,
+# OPENSSL_CONF and a few debug switches. The agent's main() removes every
+# variable it does not name before that code can read one (restrictEnvironment,
+# ProcessHardening.h); this check does not judge that call or those readers.
 #
 # Two rules:
 #
@@ -70,11 +71,11 @@ READERS=ci/env-readers.txt
 [ -f "$READERS" ] \
     || { echo "FATAL: no $READERS — without the recorded readers no reader can be judged" >&2; exit 2; }
 
-mapfile -t files < <(git ls-files -- 'agent/src/*' 'agent/include/*' 'prompter/*' \
+mapfile -t files < <(git ls-files -- 'agent/src/*' 'agent/include/*' 'prompter/*' 'pkcs11-module/src/*' \
     | grep -Ev '(^|/)tests/')
 
 if [ "${#files[@]}" -eq 0 ]; then
-    echo "FATAL: no production source under agent/src, agent/include or prompter — nothing scanned is not clean" >&2
+    echo "FATAL: no production source under agent/src, agent/include, prompter or pkcs11-module/src — nothing scanned is not clean" >&2
     exit 2
 fi
 

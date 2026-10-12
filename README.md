@@ -32,8 +32,11 @@ a thin client of this agent.
   | `log::LogSink` | `OsLogSink` — `os_log` sink injected via `log::init` |
 - **`prompter/`** — the agent-owned secure credential window (PIN / CAN / MRZ),
   a separate helper the daemon drives.
-- **`pkcs11-module/`** — the card-less, secret-less PKCS#11 facade dylib that
-  browsers load; forwards to the agent over the socket. *(Skeleton — future work.)*
+- **`pkcs11-module/`** — `librescrs-pkcs11-agent.dylib`, the card-less,
+  secret-less PKCS#11 module Firefox, Thunderbird and ssh load. It forwards
+  every call to the agent over the App-Group socket, after checking the code
+  signature of the process serving it; it holds no secret and links no
+  LibreMiddleware.
 - **`packaging/launchd/`** — the LaunchAgent plist. The daemon **self-binds** its
   App-Group container socket at runtime; there is no launchd socket activation
   (a per-user socket path can't ride `SMAppService`).
@@ -62,11 +65,11 @@ and the libFuzzer gate on the untrusted decoder — lives in `LibreAgent` and is
 consumed here as an already-tested dependency. `LibreMac` can build and link
 against this agent today.
 
-Still skeletal and explicitly scoped as future work: the card-less **PKCS#11
-facade** (`pkcs11-module/`) is a stub that browsers will load, and the
-CryptoTokenKit integration lives on the `LibreMac` client side. Hardened-runtime
-signing and notarization are applied at the `LibreMac` packaging stage, not in
-this repo.
+The card-less **PKCS#11 module** (`pkcs11-module/`) is built from the shared
+Cryptoki facade in `LibreAgent`; only the factory that names the socket and the
+agent identity it requires is this repository's. The CryptoTokenKit integration
+lives on the `LibreMac` client side. Hardened-runtime signing and notarization
+are applied at the `LibreMac` packaging stage, not in this repo.
 
 ## Building
 

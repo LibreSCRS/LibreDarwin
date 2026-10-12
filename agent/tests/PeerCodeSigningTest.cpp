@@ -12,10 +12,14 @@
 // this test binary, which no team signed, so the positive half waits for a
 // Developer ID build.
 #include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
+#include <LibreSCRS/Darwin/backend/PeerIdentity.h>
+#include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 
 #include <gtest/gtest.h>
 
 #include <mach/mach.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <optional>
 #include <string>
@@ -174,6 +178,30 @@ TEST(SignatureMatchesBuild, UnentitledTestBinaryDoesNotMatch)
     // In a build with no team, red if reading this process's groups is stubbed
     // to report the build's.
     EXPECT_FALSE(selfMatchesBuild(kAgentSigningId));
+}
+
+TEST(PeerCodeSigning, TheAgentIdentityIsTheAgentsSigningIdInTheBuildsGroup)
+{
+    // The PKCS#11 module and the prompter hold the agent to this; restated
+    // here rather than read from the code under test.
+    const auto id = expectedAgentIdentity();
+    EXPECT_EQ(id.signingId, "org.librescrs.agent");
+    const auto team = configuredTeamId();
+    EXPECT_EQ(id.appGroup, team ? *team + ".org.librescrs.LibreMac" : "group.org.librescrs.LibreMac");
+    EXPECT_EQ(id.teamId, team);
+}
+
+TEST(PeerCodeSigning, AClientRefusesAServerThatIsNotTheAgent)
+{
+    // The module's check, from the client's end: this test binary serves the
+    // socket, and it is not the agent.
+    int sv[2];
+    ASSERT_EQ(socketpair(AF_UNIX, SOCK_STREAM, 0, sv), 0);
+    // Fail-closed would also say false; make sure the peer WAS read.
+    ASSERT_TRUE(capturePeerCredentials(sv[0]).has_value());
+    EXPECT_FALSE(verifyConnectedPeer(sv[0], expectedAgentIdentity()));
+    close(sv[0]);
+    close(sv[1]);
 }
 
 } // namespace
