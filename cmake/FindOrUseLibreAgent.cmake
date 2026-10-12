@@ -41,7 +41,10 @@ if(LIBREDARWIN_USE_INSTALLED_AGENT_CORE)
     # fixture test quietly disappearing at link time. Five are needed: the
     # neutral core and the wire vocabulary the daemon links, the master-list
     # fixture the anchor-import test links, and the Cryptoki facade and its
-    # socket transport the PKCS#11 module is built from.
+    # socket transport the PKCS#11 module is built from. Both of those are off
+    # by default in the agent, so the installed LibreAgent package must have
+    # been built with LIBREAGENT_BUILD_PKCS11_FACADE=ON and
+    # LIBREAGENT_BUILD_PKCS11_SOCKET_CLIENT=ON.
     find_package(LibreAgent 5.0 REQUIRED CONFIG
         COMPONENTS Core Wire TestSupport Pkcs11Facade Pkcs11SocketClient)
     message(STATUS "LibreAgent: using installed package (CONFIG)")

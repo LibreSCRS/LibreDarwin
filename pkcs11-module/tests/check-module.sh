@@ -48,7 +48,7 @@ if [[ -z "$module" || -z "$min" ]]; then
     exit 2
 fi
 
-for tool in lipo nm otool strings; do
+for tool in lipo nm otool grep; do
     command -v "$tool" >/dev/null 2>&1 || { echo "FATAL: $tool not found -- nothing measured" >&2; exit 2; }
 done
 [[ -f "$module" ]] || { echo "FATAL: no module at $module -- nothing measured" >&2; exit 2; }
@@ -61,6 +61,12 @@ fi
 
 rc=0
 fail() { echo "FAIL: $*" >&2; rc=1; }
+# 15, 15.0 and 15.0.0 name the same version.
+normver() {
+    local v="$1"
+    while [[ "$v" == *.0 ]]; do v="${v%.0}"; done
+    printf '%s' "$v"
+}
 
 for a in $archs; do
     # 1. The exported C_* names.
@@ -96,14 +102,21 @@ for a in $archs; do
         inBuild && $1 == "minos" { print $2; exit }')"
     if [[ -z "$minos" ]]; then
         fail "$a: no LC_BUILD_VERSION minos"
-    elif [[ "$minos" != "$min" ]]; then
+    elif [[ "$(normver "$minos")" != "$(normver "$min")" ]]; then
         fail "$a: minos $minos, expected $min"
     fi
 done
 
-# 4. Anywhere in the file, any slice.
-if strings -a "$module" | grep -q 'LIBRESCRS_AGENT_SOCK'; then
+# 4. Anywhere in the file, any slice. grep reads the file itself: piped from
+# strings, an early match makes grep -q exit, strings dies of SIGPIPE and
+# pipefail turns the match into "not found".
+grep -aq 'LIBRESCRS_AGENT_SOCK' "$module"
+st=$?
+if [[ "$st" = 0 ]]; then
     fail "the module contains LIBRESCRS_AGENT_SOCK, the test-only socket override"
+elif [[ "$st" != 1 ]]; then
+    echo "FATAL: grep could not read $module (exit $st) -- nothing measured" >&2
+    exit 2
 fi
 
 if [[ "$rc" = 0 ]]; then

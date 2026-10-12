@@ -128,11 +128,13 @@ add_subdirectory(agent)
 
 # librescrs-pkcs11-agent.dylib: the card-less, secret-less PKCS#11 module other
 # applications load. It forwards every call to the agent over the App-Group
-# socket, after checking that the process serving it is the agent.
+# socket, after checking the serving process's signing identity (and, when the
+# build names a team, its designated requirement).
 add_subdirectory(pkcs11-module)
 
-# The agent-owned macOS credential window (secure PIN / CAN / MRZ). Optional so a
-# headless/CI build can drop the UI target. Full implementation is pending.
+# librescrs-prompter: the agent-owned macOS credential window (secure PIN / CAN /
+# MRZ), served over its own socket to the agent alone. Optional so a headless
+# build can drop the UI target.
 option(LIBREDARWIN_BUILD_PROMPTER "Build the macOS credential prompter" ON)
 if(LIBREDARWIN_BUILD_PROMPTER)
     add_subdirectory(prompter)

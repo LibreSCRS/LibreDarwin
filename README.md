@@ -34,9 +34,9 @@ a thin client of this agent.
   a separate helper the daemon drives.
 - **`pkcs11-module/`** — `librescrs-pkcs11-agent.dylib`, the card-less,
   secret-less PKCS#11 module Firefox, Thunderbird and ssh load. It forwards
-  every call to the agent over the App-Group socket, after checking the code
-  signature of the process serving it; it holds no secret and links no
-  LibreMiddleware.
+  every call to the agent over the App-Group socket, after checking the signing
+  identity of the process serving it (and, in a build that names a team, its
+  designated requirement); it holds no secret and links no LibreMiddleware.
 - **`packaging/launchd/`** — the LaunchAgent plist. The daemon **self-binds** its
   App-Group container socket at runtime; there is no launchd socket activation
   (a per-user socket path can't ride `SMAppService`).
