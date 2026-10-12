@@ -4,7 +4,7 @@
 
 /// @file
 /// @brief The identities the two ends of the private prompter socket require of
-///        each other, in one place.
+///        each other, and the agent's the PKCS#11 module requires, in one place.
 ///
 /// Both are compiled in, and so is the team id their designated requirement
 /// names (@ref configuredTeamId). Neither end reads an override from the environment:
@@ -19,9 +19,10 @@
 
 namespace LibreSCRS::Darwin {
 
-/// @brief What the prompter requires of the process connecting to prompter.sock:
-///        the agent's signing identifier, the App-Group entitlement, and -- when
-///        a team id is configured -- the designated requirement.
+/// @brief What the prompter requires of the process connecting to prompter.sock,
+///        and the PKCS#11 module of the process serving agent.sock: the agent's
+///        signing identifier, the App-Group entitlement, and -- when a team id
+///        is configured -- the designated requirement.
 [[nodiscard]] inline ExpectedPeerIdentity expectedAgentIdentity()
 {
     return ExpectedPeerIdentity{
