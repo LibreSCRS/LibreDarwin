@@ -18,6 +18,7 @@ PrompterServerTest 1
 ReadCertificatesOperationTest 1
 SecCodeAuthorizerTest 1
 SignHwSmokeTest 1
+SocketAgentClientFactoryTest 1
 SocketFrontendTest 1
 SocketOperationChannelTest 1
 SocketTransportTest 1
