@@ -67,8 +67,6 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- **Every binary now targets macOS 15.0.** The agent and the prompter were
-  built for the version of the SDK they were compiled against.
 - **The App Group is named after the signing team.** A build configured with
   `LIBRESCRS_TEAM_ID` uses `<team>.org.librescrs.LibreMac`; one without a team
   (CI, tests, the ad-hoc dev harness) keeps `group.org.librescrs.LibreMac`.
@@ -135,3 +133,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 - The floor this host asks of the agent and of the middleware follows the new
   major.
+
+### Fixed
+
+- **Every binary now targets macOS 15, the minimum LibreMac states.** The agent
+  and the prompter had been built for macOS 27, the build machine's own
+  release, so on an earlier macOS they would not have started.
