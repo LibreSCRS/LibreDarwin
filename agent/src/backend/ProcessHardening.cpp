@@ -5,8 +5,14 @@
 // for the placement contract (each binary's main() only).
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 
+#include <crt_externs.h>
 #include <sys/ptrace.h>
 #include <sys/resource.h>
+
+#include <algorithm>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 namespace LibreSCRS::Darwin {
 
@@ -18,6 +24,22 @@ bool hardenSecretProcess() noexcept
     const rlimit noCore{0, 0};
     const int limited = ::setrlimit(RLIMIT_CORE, &noCore);
     return denied == 0 && limited == 0;
+}
+
+void restrictEnvironment(std::span<const std::string_view> keep)
+{
+    // Collect first: unsetenv rewrites the array being walked.
+    std::vector<std::string> drop;
+    for (char** entry = *_NSGetEnviron(); entry != nullptr && *entry != nullptr; ++entry) {
+        const std::string_view pair{*entry};
+        const std::string_view name = pair.substr(0, pair.find('='));
+        if (std::ranges::find(keep, name) == keep.end()) {
+            drop.emplace_back(name);
+        }
+    }
+    for (const auto& name : drop) {
+        ::unsetenv(name.c_str());
+    }
 }
 
 } // namespace LibreSCRS::Darwin

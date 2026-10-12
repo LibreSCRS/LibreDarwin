@@ -95,6 +95,10 @@ std::optional<Arguments> parseArguments(std::span<char* const> args)
 
 int main(int argc, char** argv)
 {
+    // Must stay first, before anything reads the environment: the agent keeps
+    // only what it needs (ProcessHardening.h says why).
+    LibreSCRS::Darwin::restrictEnvironment(LibreSCRS::Darwin::kAgentEnvironment);
+
     // Deny debugger attach + core dumps BEFORE anything secret-bearing exists
     // (this process will hold plaintext CAN/PIN + live PACE/SM keys). Covers
     // ad-hoc/dev builds; hardened-runtime get-task-allow=false is the

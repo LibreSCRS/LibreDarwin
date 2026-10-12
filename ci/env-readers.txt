@@ -11,3 +11,4 @@
 
 agent/src/backend/AppGroupPaths.cpp  std::getenv("HOME")  Fallback for the real home when the passwd lookup fails; the container is derived from it, and the passwd home is tried first.
 agent/src/backend/wire/AnonFd.cpp  std::getenv("TMPDIR")  Directory for an anonymous file that is unlinked at once and passed as a descriptor; nothing is read back from the path.
+agent/src/backend/ProcessHardening.cpp  _NSGetEnviron()  Walks the environment only to remove what the agent does not name; no value is read.

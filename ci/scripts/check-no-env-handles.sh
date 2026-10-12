@@ -18,8 +18,10 @@
 # agent process also runs LibreMiddleware code, linked in through the agent
 # core, and that code reads variables of its own -- LIBRESCRS_PKCS11_MODULE (the
 # module it loads), LIBRESCRS_CERTIFICATES_DIR (the trust anchors),
-# LIBRESCRS_DSS_JAR, SSL_CERT_FILE / SSL_CERT_DIR and a few debug switches. None
-# of those is judged here, and a green run says nothing about them.
+# LIBRESCRS_DSS_JAR, SSL_CERT_FILE / SSL_CERT_DIR, OPENSC_CONF, OPENSSL_CONF and
+# a few debug switches. The agent's main() removes every variable it does not
+# name before that code can read one (restrictEnvironment, ProcessHardening.h);
+# this check does not judge that call or those readers.
 #
 # Two rules:
 #

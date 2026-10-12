@@ -27,8 +27,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
   prompter expects (`LIBRESCRS_AGENT_SIGNING_ID`). The plugin directory, loaded
   into the process that holds card secrets, is now a `--plugin-dir` argument
   (`LIBRESCRS_PLUGIN_DIR` is gone); `packaging/install-dev.sh` passes it.
-  LibreMiddleware code running in the agent still reads variables of its own
-  (`LIBRESCRS_PKCS11_MODULE`, `LIBRESCRS_CERTIFICATES_DIR` among them).
+- **The agent keeps only `HOME`, `TMPDIR` and `TZ` from its environment**, so
+  `launchctl setenv` can no longer name a PKCS#11 module, trust anchors, an
+  OpenSC or OpenSSL configuration or a provider directory for it.
+  LibreMiddleware's debug variables (`LIBRESCRS_SIGN_TRACE`, `PKCS11_DEBUG`,
+  `LIBRESCRS_OPENSC_DEBUG`, `LIBRESCRS_PROBE_TRACE`, `LIBRESCRS_PCSC_TRACE`)
+  no longer reach the agent either.
 - Without a Developer ID signature the agent and prompter cannot verify who
   connects to them beyond same-user ownership of the socket; a process running
   as your user can raise the credential window. Developer-ID builds verify the
