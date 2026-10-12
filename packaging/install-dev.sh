@@ -38,6 +38,10 @@
 # for testing or for a binary this harness does not otherwise touch.
 set -euo pipefail
 
+# This harness signs ad hoc, for a build that names no team, so the agent's
+# App Group is the team-less one (appGroupFor in PeerCodeSigning.cpp is the
+# rule; a build configured with LIBRESCRS_TEAM_ID uses "<team>.org.librescrs.LibreMac"
+# and refuses to start under this signature).
 APP_GROUP="group.org.librescrs.LibreMac"
 # The agent resolves its container itself and takes no override, so this is
 # the one place it can be: the canonical App-Group container.

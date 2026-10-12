@@ -8,10 +8,12 @@
   per-user path templating.
 
   Self-bind: the agent resolves the App-Group container socket at runtime
-  ($HOME/Library/Group Containers/group.org.librescrs.LibreMac/agent.sock) and
-  bind()s it itself, so there is NO Sockets key. SMAppService cannot carry a
-  per-user SockPathName, which is precisely why socket-activation is off the
-  modern path; self-bind resolves the conflict. The container does not exist
+  ($HOME/Library/Group Containers/<group>/agent.sock, where <group> is
+  <team>.org.librescrs.LibreMac for a build that names a signing team and
+  group.org.librescrs.LibreMac for one that does not) and bind()s it itself,
+  so there is NO Sockets key. SMAppService cannot carry a per-user
+  SockPathName, which is precisely why socket-activation is off the modern
+  path; self-bind resolves the conflict. The container does not exist
   until the sandboxed host first runs, so the host creates it (+ primes the CTK
   registration) and THEN registers/loads this agent.
 

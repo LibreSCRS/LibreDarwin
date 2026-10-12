@@ -5,7 +5,7 @@
 // (sandbox-bypass) home directory and the group container derived from it.
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h> // kAppGroup
+#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h> // appGroup
 
 #include <pwd.h>
 #include <unistd.h>
@@ -25,7 +25,7 @@ std::filesystem::path realHomeDir()
 
 std::filesystem::path appGroupContainerDir()
 {
-    return realHomeDir() / "Library" / "Group Containers" / kAppGroup;
+    return realHomeDir() / "Library" / "Group Containers" / appGroup();
 }
 
 } // namespace LibreSCRS::Darwin

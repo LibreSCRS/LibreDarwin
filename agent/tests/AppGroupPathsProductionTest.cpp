@@ -7,7 +7,7 @@
 // every job the user's launchd starts, and the container is where both sockets
 // live.
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h> // kAppGroup
+#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 
 #include <gtest/gtest.h>
 
@@ -16,18 +16,22 @@
 
 #include <cstdlib>
 #include <filesystem>
+#include <string>
 
 namespace {
 
 using namespace LibreSCRS::Darwin;
 
-// Derived here from the passwd database, not from realHomeDir(), so the
-// expectation does not share the code under test.
+// Derived here from the passwd database, not from realHomeDir(), and with the
+// group's rule restated rather than taken from appGroup(), so the expectation
+// does not share the code under test.
 std::filesystem::path canonicalContainer()
 {
     const struct passwd* pw = getpwuid(getuid());
     EXPECT_NE(pw, nullptr);
-    return std::filesystem::path(pw != nullptr ? pw->pw_dir : "") / "Library" / "Group Containers" / kAppGroup;
+    const auto team = configuredTeamId();
+    const std::string group = team ? *team + ".org.librescrs.LibreMac" : "group.org.librescrs.LibreMac";
+    return std::filesystem::path(pw != nullptr ? pw->pw_dir : "") / "Library" / "Group Containers" / group;
 }
 
 TEST(AppGroupPathsProduction, ContainerIsTheCanonicalPath)

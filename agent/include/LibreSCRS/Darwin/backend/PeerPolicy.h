@@ -25,7 +25,7 @@ namespace LibreSCRS::Darwin {
 [[nodiscard]] inline ExpectedPeerIdentity expectedAgentIdentity()
 {
     return ExpectedPeerIdentity{
-        .signingId = std::string(kAgentSigningId), .appGroup = std::string(kAppGroup), .teamId = configuredTeamId()};
+        .signingId = std::string(kAgentSigningId), .appGroup = appGroup(), .teamId = configuredTeamId()};
 }
 
 /// @brief What the agent requires of the process serving prompter.sock: the
@@ -34,7 +34,7 @@ namespace LibreSCRS::Darwin {
 [[nodiscard]] inline ExpectedPeerIdentity expectedPrompterIdentity()
 {
     return ExpectedPeerIdentity{
-        .signingId = std::string(kPrompterSigningId), .appGroup = std::string(kAppGroup), .teamId = configuredTeamId()};
+        .signingId = std::string(kPrompterSigningId), .appGroup = appGroup(), .teamId = configuredTeamId()};
 }
 
 /// @brief The check the agent runs on a freshly connected prompter socket before

@@ -49,6 +49,14 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The App Group is named after the signing team.** A build configured with
+  `LIBRESCRS_TEAM_ID` uses `<team>.org.librescrs.LibreMac`; one without a team
+  (CI, tests, the ad-hoc dev harness) keeps `group.org.librescrs.LibreMac`.
+  macOS 27 refuses a sandboxed process an unprovisioned `group.` container,
+  while a group prefixed with the team that signed it needs no provisioning
+  profile. The agent's container, its sockets and the group it requires of
+  its peers all follow the one rule.
+
 - The launchd job keeps an agent that exited cleanly stopped
   (`KeepAlive` = `SuccessfulExit: false`, `ThrottleInterval` 10 s): stopping the
   agent on purpose no longer starts it again at once. A crash is still

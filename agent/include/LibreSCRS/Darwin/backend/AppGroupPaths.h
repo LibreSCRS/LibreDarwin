@@ -14,7 +14,7 @@ namespace LibreSCRS::Darwin {
 // $HOME (then the temp dir) if the passwd lookup fails.
 [[nodiscard]] std::filesystem::path realHomeDir();
 
-// The shared App-Group container (kAppGroup) BOTH agent-owned binaries must
+// The shared App-Group container (appGroup()) BOTH agent-owned binaries must
 // resolve identically: the agent binds agent.sock + connects prompter.sock
 // here, and the prompter serves prompter.sock from the same place — any drift
 // in the group id or the sandbox-bypass rationale would silently split the two

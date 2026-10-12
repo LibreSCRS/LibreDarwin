@@ -123,6 +123,19 @@ std::optional<std::string> configuredTeamId()
     return std::string(teamId);
 }
 
+std::string appGroupFor(std::string_view teamId)
+{
+    // macOS 27 refuses an unprovisioned "group." container to a sandboxed
+    // process; a group named after the signing team needs no profile.
+    return teamId.empty() ? std::string("group.org.librescrs.LibreMac")
+                          : std::string(teamId) + ".org.librescrs.LibreMac";
+}
+
+std::string appGroup()
+{
+    return appGroupFor(configuredTeamId().value_or(""));
+}
+
 std::optional<std::string> designatedRequirementFor(std::string_view teamId, std::string_view signingId)
 {
     if (!isPlain(teamId, {}) || !isPlain(signingId, ".-_")) {

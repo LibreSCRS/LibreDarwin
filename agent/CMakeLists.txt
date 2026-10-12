@@ -29,11 +29,12 @@ add_library(LibreDarwinWireCore STATIC
     src/backend/SingleInstanceLock.cpp)
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # The team id the agent and the prompter hold each other (and themselves, at
-# start-up) to through the designated requirement. A compiled constant, never
-# read from the environment. Empty = no designated-requirement check, which is
-# what an ad-hoc signed build needs; a build signed with a Developer ID sets it.
+# start-up) to through the designated requirement, and the App Group they meet
+# in is named after it (appGroupFor). A compiled constant, never read from the
+# environment. Empty = no designated-requirement check and the group.-prefixed
+# group, which is what an ad-hoc signed build needs; a Developer ID build sets it.
 set(LIBRESCRS_TEAM_ID "" CACHE STRING
-    "Apple Team ID whose signature the agent and prompter require of each other (empty: no check)")
+    "Apple Team ID the agent and prompter require of each other and name their App Group after (empty: none)")
 if(NOT LIBRESCRS_TEAM_ID STREQUAL "" AND NOT LIBRESCRS_TEAM_ID MATCHES "^[A-Z0-9]+$")
     message(FATAL_ERROR "LIBRESCRS_TEAM_ID must be upper-case letters and digits, got '${LIBRESCRS_TEAM_ID}'")
 endif()

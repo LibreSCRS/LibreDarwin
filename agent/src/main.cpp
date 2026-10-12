@@ -201,7 +201,7 @@ int main(int argc, char** argv)
         LibreSCRS::Darwin::SecCodeAuthorizer::Policy{
             .trustTierSigningIds = {},
             .allowedSigningIds = {},
-            .requiredAppGroup = std::string(Darwin::kAppGroup),
+            .requiredAppGroup = Darwin::appGroup(),
             .teamId = Darwin::configuredTeamId(),
         });
     // The prompter client verifies the SERVING peer's code-signing identity (a

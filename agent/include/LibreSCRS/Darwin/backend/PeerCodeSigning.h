@@ -41,17 +41,23 @@ struct ExpectedPeerIdentity
 };
 
 // Canonical identities of the two agent-owned binaries (their embedded
-// CFBundleIdentifier, which codesign uses as the default signing identifier)
-// and the App Group both are provisioned into.
+// CFBundleIdentifier, which codesign uses as the default signing identifier).
 inline constexpr std::string_view kAgentSigningId = "org.librescrs.agent";
 inline constexpr std::string_view kPrompterSigningId = "org.librescrs.prompter";
-inline constexpr std::string_view kAppGroup = "group.org.librescrs.LibreMac";
 
 // The team id this build was configured with (the LIBRESCRS_TEAM_ID CMake cache
 // value, compiled in). nullopt when it is empty, which keeps the checks as they
 // were before the designated requirement existed. Never read from the
 // environment: a variable could switch the check off for every job launchd starts.
 [[nodiscard]] std::optional<std::string> configuredTeamId();
+
+// The App Group the host, its token extension and both agent-owned binaries
+// share, named after `teamId`: "<team>.org.librescrs.LibreMac", or
+// "group.org.librescrs.LibreMac" when there is no team (CI, tests).
+[[nodiscard]] std::string appGroupFor(std::string_view teamId);
+
+// The App Group of this build: appGroupFor(configuredTeamId()).
+[[nodiscard]] std::string appGroup();
 
 // The designated requirement text for `signingId` signed by `teamId`, or nullopt
 // when either is empty or carries anything but letters, digits and (for the

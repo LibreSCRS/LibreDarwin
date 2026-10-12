@@ -24,23 +24,23 @@ using namespace LibreSCRS::Darwin;
 
 namespace {
 
-const ExpectedPeerIdentity kExpectedAgent{std::string(kAgentSigningId), std::string(kAppGroup)};
+const ExpectedPeerIdentity kExpectedAgent{std::string(kAgentSigningId), appGroup()};
 
 TEST(PeerCodeSigning, MatchingSigningIdAndAppGroupPasses)
 {
-    PeerCodeSigning peer{std::string(kAgentSigningId), {std::string(kAppGroup)}};
+    PeerCodeSigning peer{std::string(kAgentSigningId), {appGroup()}};
     EXPECT_TRUE(matchesExpectedPeer(peer, kExpectedAgent));
 }
 
 TEST(PeerCodeSigning, ExtraAppGroupsDoNotHideTheRequiredOne)
 {
-    PeerCodeSigning peer{std::string(kAgentSigningId), {"group.example.other", std::string(kAppGroup)}};
+    PeerCodeSigning peer{std::string(kAgentSigningId), {"group.example.other", appGroup()}};
     EXPECT_TRUE(matchesExpectedPeer(peer, kExpectedAgent));
 }
 
 TEST(PeerCodeSigning, WrongSigningIdFailsEvenWithTheAppGroup)
 {
-    PeerCodeSigning peer{std::string("com.evil.app"), {std::string(kAppGroup)}};
+    PeerCodeSigning peer{std::string("com.evil.app"), {appGroup()}};
     EXPECT_FALSE(matchesExpectedPeer(peer, kExpectedAgent));
 }
 
@@ -54,7 +54,7 @@ TEST(PeerCodeSigning, SigningIdAloneWithoutTheAppGroupFails)
 
 TEST(PeerCodeSigning, UnsignedPeerFailsClosed)
 {
-    PeerCodeSigning peer{std::nullopt, {std::string(kAppGroup)}};
+    PeerCodeSigning peer{std::nullopt, {appGroup()}};
     EXPECT_FALSE(matchesExpectedPeer(peer, kExpectedAgent));
 }
 
@@ -66,11 +66,11 @@ TEST(PeerCodeSigning, UnidentifiablePeerResolvesEmptyAndFailsClosed)
     EXPECT_FALSE(matchesExpectedPeer(resolvePeerCodeSigning(creds, std::nullopt), kExpectedAgent));
 }
 
-const ExpectedPeerIdentity kExpectedTeamAgent{std::string(kAgentSigningId), std::string(kAppGroup), "ABCDE12345"};
+const ExpectedPeerIdentity kExpectedTeamAgent{std::string(kAgentSigningId), appGroup(), "ABCDE12345"};
 
 PeerCodeSigning claimingAgent(std::optional<bool> designatedRequirementValid)
 {
-    return PeerCodeSigning{std::string(kAgentSigningId), {std::string(kAppGroup)}, designatedRequirementValid};
+    return PeerCodeSigning{std::string(kAgentSigningId), {appGroup()}, designatedRequirementValid};
 }
 
 TEST(PeerCodeSigning, TeamIdRequiresDesignatedRequirement)
@@ -85,7 +85,7 @@ TEST(PeerCodeSigning, TeamIdRequiresDesignatedRequirement)
 
 TEST(PeerCodeSigning, TeamIdDoesNotReplaceTheClaimedIdentity)
 {
-    PeerCodeSigning wrongId{std::string("com.evil.app"), {std::string(kAppGroup)}, true};
+    PeerCodeSigning wrongId{std::string("com.evil.app"), {appGroup()}, true};
     EXPECT_FALSE(matchesExpectedPeer(wrongId, kExpectedTeamAgent));
     PeerCodeSigning noGroup{std::string(kAgentSigningId), {}, true};
     EXPECT_FALSE(matchesExpectedPeer(noGroup, kExpectedTeamAgent));
@@ -96,6 +96,14 @@ TEST(PeerCodeSigning, WithoutTeamIdTheDesignatedRequirementIsNotConsulted)
     // Empty team id = the behaviour before the check existed.
     EXPECT_TRUE(matchesExpectedPeer(claimingAgent(std::nullopt), kExpectedAgent));
     EXPECT_TRUE(matchesExpectedPeer(claimingAgent(false), kExpectedAgent));
+}
+
+TEST(PeerCodeSigning, AppGroupIsNamedAfterTheTeam)
+{
+    // Spelled out here rather than built from a shared constant, so the test
+    // does not share the rule it checks.
+    EXPECT_EQ(appGroupFor(""), "group.org.librescrs.LibreMac");
+    EXPECT_EQ(appGroupFor("ABCDE12345"), "ABCDE12345.org.librescrs.LibreMac");
 }
 
 TEST(PeerCodeSigning, DesignatedRequirementNamesTheTeamAndTheIdentifier)
