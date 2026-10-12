@@ -23,4 +23,8 @@ namespace LibreSCRS::Darwin {
 // the agent's sockets for anyone able to set the user's environment.
 [[nodiscard]] std::filesystem::path appGroupContainerDir();
 
+// Where the agent listens and every client connects. One definition, so the
+// two cannot drift.
+[[nodiscard]] std::filesystem::path agentSocketPath();
+
 } // namespace LibreSCRS::Darwin

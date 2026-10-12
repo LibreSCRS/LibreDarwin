@@ -140,7 +140,7 @@ int main(int argc, char** argv)
         Agent::log::errorf("failed to create the App-Group container {}: {}", container.string(), ec.message());
         return 1;
     }
-    const std::string socketPath = (container / "agent.sock").string();
+    const std::string socketPath = Darwin::agentSocketPath().string();
     const std::string prompterSocket = (container / "prompter.sock").string();
     const fs::path configFile = container / "config.json";
     const fs::path cacheRoot = container / "cache";

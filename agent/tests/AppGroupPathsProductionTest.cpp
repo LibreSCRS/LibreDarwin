@@ -34,6 +34,12 @@ std::filesystem::path canonicalContainer()
     return std::filesystem::path(pw != nullptr ? pw->pw_dir : "") / "Library" / "Group Containers" / group;
 }
 
+TEST(AppGroupPathsProduction, AgentSocketIsInTheCanonicalContainer)
+{
+    unsetenv("LIBRESCRS_AGENT_CONTAINER");
+    EXPECT_EQ(agentSocketPath(), canonicalContainer() / "agent.sock");
+}
+
 TEST(AppGroupPathsProduction, ContainerIsTheCanonicalPath)
 {
     unsetenv("LIBRESCRS_AGENT_CONTAINER");

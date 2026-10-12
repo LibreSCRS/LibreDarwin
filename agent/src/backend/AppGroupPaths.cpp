@@ -28,4 +28,9 @@ std::filesystem::path appGroupContainerDir()
     return realHomeDir() / "Library" / "Group Containers" / appGroup();
 }
 
+std::filesystem::path agentSocketPath()
+{
+    return appGroupContainerDir() / "agent.sock";
+}
+
 } // namespace LibreSCRS::Darwin

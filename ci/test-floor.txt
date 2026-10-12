@@ -3,7 +3,7 @@
 # <test binary>  <tests it must register at least>. Raised in the change that
 # adds tests; a binary that disappears or registers fewer is red.
 AgentCoreSeamsTest 1
-AppGroupPathsProductionTest 1
+AppGroupPathsProductionTest 2
 CscaImportSocketTest 1
 MacPrompterClientTest 1
 ManagePinOperationTest 1
