@@ -33,6 +33,15 @@ versioning follows [Semantic Versioning](https://semver.org/).
   LibreMiddleware's debug variables (`LIBRESCRS_SIGN_TRACE`, `PKCS11_DEBUG`,
   `LIBRESCRS_OPENSC_DEBUG`, `LIBRESCRS_PROBE_TRACE`, `LIBRESCRS_PCSC_TRACE`)
   no longer reach the agent either.
+- **The agent and the prompter refuse to start, with exit code 4, when their
+  own signature does not match the build**: when it lacks the build's App
+  Group, or, for a build that names a team, fails that team's designated
+  requirement. Until now only the team was checked, and its failure exited 2,
+  the same code as a bad argument; a binary signed into the wrong App Group
+  started, served a container its clients never look in, and passed a smoke
+  test that expected 2 from a bogus argument. The check runs before the
+  arguments are read, so an unsigned build-tree agent now exits 4; sign it
+  with `packaging/install-dev.sh --sign-only` to run it by hand.
 - Without a Developer ID signature the agent and prompter cannot verify who
   connects to them beyond same-user ownership of the socket; a process running
   as your user can raise the credential window. Developer-ID builds verify the

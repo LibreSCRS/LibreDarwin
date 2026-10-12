@@ -87,10 +87,17 @@ inline constexpr std::string_view kPrompterSigningId = "org.librescrs.prompter";
 // signed by `teamId`?
 [[nodiscard]] bool selfSatisfiesDesignatedRequirement(std::string_view teamId, std::string_view signingId);
 
-// The start-up self-check: true when no team id is configured, otherwise whether
-// this process satisfies the requirement its peers will hold it to. A build that
-// names a team id but was signed by someone else would otherwise start and be
-// refused by every peer with nothing to say why.
-[[nodiscard]] bool selfMatchesConfiguredTeam(std::string_view selfSigningId);
+// Does a signature match this build? `drValid` is whether the designated
+// requirement of the configured team holds (true when the build names no team);
+// `groups` are the App Groups the signature claims, and they must contain
+// `group`, the build's own. Pure, so it is unit-testable without real signing.
+[[nodiscard]] bool signatureMatchesBuild(bool drValid, std::string_view group, const std::vector<std::string>& groups);
+
+// The start-up self-check: does THIS process's signature match the build
+// (signatureMatchesBuild over its own designated requirement and App Groups)?
+// A binary signed for another team, or into another App Group, would otherwise
+// start and be refused by every peer with nothing to say why -- or serve a
+// container its clients never look in.
+[[nodiscard]] bool selfMatchesBuild(std::string_view selfSigningId);
 
 } // namespace LibreSCRS::Darwin

@@ -202,14 +202,15 @@ TEST(PrompterComposition, SecondInstanceExitsThreeWithoutRunningTheLoop)
     EXPECT_NE(recorder.warnings.front().find("lock held"), std::string::npos);
 }
 
-TEST(PrompterComposition, FailedSelfCheckExitsTwoBeforeTheApplicationOrTheSocket)
+TEST(PrompterComposition, FailedSelfCheckExitsFourBeforeTheApplicationOrTheSocket)
 {
-    // A build that names a team id but was not signed by that team refuses to
-    // start, with the cause, instead of standing up a window its agent would
-    // then refuse to talk to.
+    // A binary whose signature does not match the build (the team, or the App
+    // Group) refuses to start, with the cause, instead of standing up a window
+    // its agent would then refuse to talk to -- or one in a container the
+    // agent never looks in.
     Recorder recorder;
-    EXPECT_EQ(Composition::run(recorder.hooks(true, {}, false)), 2);
+    EXPECT_EQ(Composition::run(recorder.hooks(true, {}, false)), 4);
     EXPECT_EQ(recorder.calls, (std::vector<std::string>{"harden", "selfCheck"}));
     ASSERT_EQ(recorder.warnings.size(), 1u);
-    EXPECT_NE(recorder.warnings.front().find("not signed by that team"), std::string::npos);
+    EXPECT_NE(recorder.warnings.front().find("signature does not match this build"), std::string::npos);
 }

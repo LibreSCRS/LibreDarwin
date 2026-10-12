@@ -66,6 +66,34 @@ struct CfRef
     }
 };
 
+// The com.apple.security.application-groups entitlement `task`'s signature
+// claims; empty when it claims none or the value is not an array of strings.
+std::vector<std::string> appGroupsOf(SecTaskRef task)
+{
+    std::vector<std::string> groups;
+    CFErrorRef err = nullptr;
+    CFStringRef key = CFSTR("com.apple.security.application-groups");
+    if (CFTypeRef value = SecTaskCopyValueForEntitlement(task, key, &err)) {
+        if (CFGetTypeID(value) == CFArrayGetTypeID()) {
+            auto array = static_cast<CFArrayRef>(value);
+            const CFIndex n = CFArrayGetCount(array);
+            for (CFIndex i = 0; i < n; ++i) {
+                auto item = static_cast<CFStringRef>(CFArrayGetValueAtIndex(array, i));
+                if (CFGetTypeID(item) == CFStringGetTypeID()) {
+                    if (auto g = cfStringToStd(item)) {
+                        groups.push_back(std::move(*g));
+                    }
+                }
+            }
+        }
+        CFRelease(value);
+    }
+    if (err != nullptr) {
+        CFRelease(err);
+    }
+    return groups;
+}
+
 // SecCodeCheckValidity of `code` against the designated requirement for
 // `signingId` signed by `teamId`. Anything that cannot be built or checked is a
 // failure.
@@ -170,25 +198,7 @@ PeerCodeSigning resolvePeerCodeSigning(const PeerCredentials& creds, const std::
         err = nullptr;
     }
 
-    CFStringRef key = CFSTR("com.apple.security.application-groups");
-    if (CFTypeRef value = SecTaskCopyValueForEntitlement(task, key, &err)) {
-        if (CFGetTypeID(value) == CFArrayGetTypeID()) {
-            auto array = static_cast<CFArrayRef>(value);
-            const CFIndex n = CFArrayGetCount(array);
-            for (CFIndex i = 0; i < n; ++i) {
-                auto item = static_cast<CFStringRef>(CFArrayGetValueAtIndex(array, i));
-                if (CFGetTypeID(item) == CFStringGetTypeID()) {
-                    if (auto g = cfStringToStd(item)) {
-                        out.appGroups.push_back(std::move(*g));
-                    }
-                }
-            }
-        }
-        CFRelease(value);
-    }
-    if (err != nullptr) {
-        CFRelease(err);
-    }
+    out.appGroups = appGroupsOf(task);
     CFRelease(task);
 
     if (teamId) {
@@ -230,10 +240,20 @@ bool selfSatisfiesDesignatedRequirement(std::string_view teamId, std::string_vie
     return satisfiesDesignatedRequirement(self.ref, teamId, signingId);
 }
 
-bool selfMatchesConfiguredTeam(std::string_view selfSigningId)
+bool signatureMatchesBuild(bool drValid, std::string_view group, const std::vector<std::string>& groups)
+{
+    return drValid && std::find(groups.begin(), groups.end(), group) != groups.end();
+}
+
+bool selfMatchesBuild(std::string_view selfSigningId)
 {
     const auto teamId = configuredTeamId();
-    return !teamId || selfSatisfiesDesignatedRequirement(*teamId, selfSigningId);
+    const bool drValid = !teamId || selfSatisfiesDesignatedRequirement(*teamId, selfSigningId);
+    CfRef<SecTaskRef> self(SecTaskCreateFromSelf(nullptr));
+    if (self.ref == nullptr) {
+        return false;
+    }
+    return signatureMatchesBuild(drValid, appGroup(), appGroupsOf(self.ref));
 }
 
 } // namespace LibreSCRS::Darwin

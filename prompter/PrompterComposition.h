@@ -19,9 +19,10 @@ struct Hooks
     // hardening is incomplete, which is reported through `warn` and is not fatal
     // (the agent treats it the same way).
     std::function<bool()> harden;
-    // The start-up self-check (selfMatchesConfiguredTeam): false means the build
-    // names a team id its own signature does not satisfy. The process then ends
-    // with exit code 2 before the application or the socket exists.
+    // The start-up self-check (selfMatchesBuild): false means the binary's own
+    // signature does not match the build -- the App Group, or the designated
+    // requirement of the team id the build names. The process then ends with
+    // exit code 4 before the application or the socket exists.
     std::function<bool()> selfCheck;
     // Create the application object (NSApplication, activation policy). The
     // window that will hold the typed secret belongs to it.
@@ -36,8 +37,8 @@ struct Hooks
 
 // Calls harden -> selfCheck -> appInit -> bind -> runLoop and returns the process
 // exit code: 0 after the run loop returns, 1 when bind failed (the run loop never
-// starts), 2 when the self-check failed (nothing after it runs), 3 when another
-// prompter already serves the socket path (bind refused before touching it).
+// starts), 3 when another prompter already serves the socket path (bind refused
+// before touching it), 4 when the self-check failed (nothing after it runs).
 int run(const Hooks& hooks);
 
 } // namespace LibreSCRS::Darwin::PrompterComposition

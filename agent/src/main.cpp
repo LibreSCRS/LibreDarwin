@@ -115,13 +115,15 @@ int main(int argc, char** argv)
     if (!hardened) {
         Agent::log::warn("process hardening incomplete (PT_DENY_ATTACH / RLIMIT_CORE=0 failed)");
     }
-    // A build that names a team id holds its peers to that team's designated
-    // requirement, so it must meet the requirement itself. A mis-signed build
-    // stops here, with the cause, before it binds a socket or touches the
-    // container -- rather than being refused by its prompter with nothing said.
-    if (!Darwin::selfMatchesConfiguredTeam(Darwin::kAgentSigningId)) {
-        Agent::log::error("built with a team id but not signed by that team; refusing to start");
-        return 2;
+    // The build holds its peers to its App Group and, when it names a team id,
+    // to that team's designated requirement, so its own signature must meet
+    // both. A mis-signed binary stops here, with the cause, before it binds a
+    // socket or touches the container -- rather than being refused by its
+    // prompter with nothing said, or serving a container its clients never
+    // look in. Exit 4 is this refusal and nothing else.
+    if (!Darwin::selfMatchesBuild(Darwin::kAgentSigningId)) {
+        Agent::log::error("signature does not match this build (team or App Group); refusing to start");
+        return 4;
     }
 
     const auto arguments = parseArguments(std::span<char* const>(argv, static_cast<std::size_t>(argc)));

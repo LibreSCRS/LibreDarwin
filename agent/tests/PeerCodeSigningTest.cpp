@@ -151,12 +151,29 @@ TEST(PeerCodeSigning, UnsignedByTheTeamSelfFailsTheRequirement)
     EXPECT_FALSE(selfSatisfiesDesignatedRequirement("ABCDE12345", kAgentSigningId));
 }
 
-TEST(PeerCodeSigning, NoConfiguredTeamIdPassesTheSelfCheck)
+TEST(SignatureMatchesBuild, NeedsTheGroupAlways)
 {
-    // This build configures no team id, so the self-check has nothing to hold
-    // the binary to.
-    ASSERT_EQ(configuredTeamId(), std::nullopt);
-    EXPECT_TRUE(selfMatchesConfiguredTeam(kAgentSigningId));
+    EXPECT_TRUE(signatureMatchesBuild(true, "group.org.librescrs.LibreMac", {"group.org.librescrs.LibreMac"}));
+    EXPECT_TRUE(signatureMatchesBuild(true, "ABCDE12345.org.librescrs.LibreMac",
+                                      {"group.example.other", "ABCDE12345.org.librescrs.LibreMac"}));
+    // Built for a team, signed into the team-less group (or the other way
+    // round): the agent would serve a container its clients never look in.
+    EXPECT_FALSE(signatureMatchesBuild(true, "ABCDE12345.org.librescrs.LibreMac", {"group.org.librescrs.LibreMac"}));
+    EXPECT_FALSE(signatureMatchesBuild(true, "group.org.librescrs.LibreMac", {"ABCDE12345.org.librescrs.LibreMac"}));
+    EXPECT_FALSE(
+        signatureMatchesBuild(true, "ABCDE12345.org.librescrs.LibreMac", {"VWXYZ67890.org.librescrs.LibreMac"}));
+    EXPECT_FALSE(signatureMatchesBuild(true, "group.org.librescrs.LibreMac", {}));
+    // The group is right but the team's designated requirement does not hold.
+    EXPECT_FALSE(signatureMatchesBuild(false, "group.org.librescrs.LibreMac", {"group.org.librescrs.LibreMac"}));
+}
+
+TEST(SignatureMatchesBuild, UnentitledTestBinaryDoesNotMatch)
+{
+    // The linker-signed test binary carries no App Group at all, so it fails
+    // the group whether or not the build names a team.
+    // In a build with no team, red if reading this process's groups is stubbed
+    // to report the build's.
+    EXPECT_FALSE(selfMatchesBuild(kAgentSigningId));
 }
 
 } // namespace

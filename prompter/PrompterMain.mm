@@ -59,7 +59,7 @@ LibreSCRS::Darwin::PrompterComposition::Hooks defaultHooks()
     auto state = std::make_shared<State>();
     return LibreSCRS::Darwin::PrompterComposition::Hooks{
         .harden = LibreSCRS::Darwin::hardenSecretProcess,
-        .selfCheck = [] { return LibreSCRS::Darwin::selfMatchesConfiguredTeam(LibreSCRS::Darwin::kPrompterSigningId); },
+        .selfCheck = [] { return LibreSCRS::Darwin::selfMatchesBuild(LibreSCRS::Darwin::kPrompterSigningId); },
         .appInit =
             [] {
                 // LSUIElement (no Dock icon / menu bar); the windows are
