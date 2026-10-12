@@ -15,6 +15,12 @@ if(LIBREDARWIN_UNIVERSAL)
     set(CMAKE_OSX_ARCHITECTURES "x86_64;arm64" CACHE STRING "" FORCE)
 endif()
 
+# The oldest macOS this build runs on. Set before project(), so every target in
+# the build -- the fetched agent core and its static archives included -- is
+# compiled for it; unset, clang targets the SDK's own version and the binaries
+# refuse to start on anything older, whatever the app's Info.plist claims.
+set(CMAKE_OSX_DEPLOYMENT_TARGET "15.0" CACHE STRING "Minimum macOS version")
+
 project(LibreDarwin
     VERSION ${GIT_VERSION_MAJOR}.${GIT_VERSION_MINOR}.${GIT_VERSION_PATCH}
     LANGUAGES CXX)
