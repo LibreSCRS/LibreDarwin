@@ -94,6 +94,7 @@ A::Wire::CertInfo toCertInfo(const A::CertSnapshot& c)
     out.ekus = c.ekuOids;
     out.chainSubjectCns = c.chainSubjectCns;
     out.trustStatus = c.trustStatus;
+    out.alwaysAuthenticate = c.alwaysAuthenticate;
     for (const auto& group : c.fields) {
         std::map<std::string, A::Wire::CertField> fields;
         for (const auto& f : group.fields) {

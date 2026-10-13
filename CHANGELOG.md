@@ -67,6 +67,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The agent reports, per certificate, whether the card asks for the PIN
+  before every use of its key**, and asks for it again for every raw signature or
+  decryption with such a key (batch document signing asks once per batch).
 - **The App Group is named after the signing team.** A build configured with
   `LIBRESCRS_TEAM_ID` uses `<team>.org.librescrs.LibreMac`; one without a team
   (CI, tests, the ad-hoc dev harness) keeps `group.org.librescrs.LibreMac`.

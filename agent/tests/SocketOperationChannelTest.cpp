@@ -25,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <new>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -438,6 +439,46 @@ TEST(SocketOperationChannel, CredentialsResultEnqueuedBeforeFinished)
     const auto second = recvEvent(w.client);
     EXPECT_EQ(*second.find("t")->asText(), "OpFinished");
     EXPECT_EQ(second.find("op")->asUInt(), 23u);
+
+    ::close(w.client);
+    w.tr.reset();
+    std::filesystem::remove(w.path);
+}
+
+// The card's per-operation consent rule rides every certificate the socket
+// result carries, in both values.
+TEST(SocketOperationChannel, CertificatesResultCarriesTheCardsConsentRule)
+{
+    Wired w = wireUp();
+    ASSERT_NE(w.connId, 0u);
+    auto state = std::make_shared<Ops::OperationState>();
+    SocketOperationChannel channel(*w.tr, w.connId, 23, state);
+
+    A::CertSnapshot marked;
+    marked.certId = "aa";
+    marked.signingCapable = true;
+    marked.alwaysAuthenticate = true;
+    A::CertSnapshot ordinary;
+    ordinary.certId = "bb";
+    ordinary.signingCapable = true;
+    EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{std::vector<A::CertSnapshot>{marked, ordinary}}));
+
+    const auto event = recvEvent(w.client);
+    const auto* res = event.find("result");
+    ASSERT_NE(res, nullptr);
+    const auto* certsVal = res->find("certs");
+    ASSERT_NE(certsVal, nullptr);
+    const auto* certs = certsVal->asArray();
+    ASSERT_NE(certs, nullptr);
+    ASSERT_EQ(certs->size(), 2u);
+    const auto flagOf = [](const A::Wire::CborValue& c) -> std::optional<bool> {
+        const auto* v = c.find("alwaysAuthenticate");
+        return v == nullptr ? std::nullopt : v->asBool();
+    };
+    EXPECT_EQ(*(*certs)[0].find("certId")->asText(), "aa");
+    EXPECT_EQ(flagOf((*certs)[0]), std::optional<bool>{true});
+    EXPECT_EQ(*(*certs)[1].find("certId")->asText(), "bb");
+    EXPECT_EQ(flagOf((*certs)[1]), std::optional<bool>{false});
 
     ::close(w.client);
     w.tr.reset();

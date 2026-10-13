@@ -47,6 +47,7 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <iostream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -339,7 +340,7 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     // certs=[…]) — see Agent::Wire::toCbor(OpResultReady). Read the cert list there, not
     // at the frame's top level.
     std::string certId;
-    std::string inventory; // dumped on skip — the triage evidence for a miss
+    std::string inventory; // every certificate, printed before signing
     const auto* resultMap = certResult.find("result");
     const auto* certs = resultMap != nullptr ? resultMap->find("certs") : nullptr;
     if (certs != nullptr && certs->asArray() != nullptr) {
@@ -347,15 +348,20 @@ TEST(SignHwSmoke, PresenceReadAndSign)
             const auto* sc = c.find("signingCapable");
             const auto* id = c.find("certId");
             const auto* ku = c.find("keyUsageBits");
+            const auto* aa = c.find("alwaysAuthenticate");
             inventory += "\n  cert id=" + (id && id->asText() ? id->asText()->substr(0, 12) : std::string("?")) +
                          " signingCapable=" + ((sc && sc->asBool().value_or(false)) ? "true" : "false") +
-                         " keyUsageBits=" + std::to_string(ku ? ku->asUInt().value_or(0) : 0);
-            if (sc != nullptr && sc->asBool().value_or(false) && id != nullptr && id->asText() != nullptr) {
+                         " keyUsageBits=" + std::to_string(ku ? ku->asUInt().value_or(0) : 0) +
+                         " alwaysAuthenticate=" + ((aa && aa->asBool().value_or(false)) ? "true" : "false");
+            if (certId.empty() && sc != nullptr && sc->asBool().value_or(false) && id != nullptr &&
+                id->asText() != nullptr) {
                 certId = *id->asText();
-                break;
             }
         }
     }
+    // Printed on every run: the record of which keys the card marks for
+    // per-operation consent, which a passing run would otherwise discard.
+    std::cout << "certificate inventory:" << (inventory.empty() ? " (empty cert list)" : inventory) << std::endl;
     if (certId.empty()) {
         ::close(client);
         GTEST_SKIP() << "no signing-capable certificate on the card; inventory:"
