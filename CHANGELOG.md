@@ -70,6 +70,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - **The agent reports, per certificate, whether the card asks for the PIN
   before every use of its key**, and asks for it again for every raw signature or
   decryption with such a key (batch document signing asks once per batch).
+- The credential prompt keeps OK (and Return) disabled while the PIN, CAN or
+  MRZ field is empty, and the change-PIN prompt until each of its fields holds
+  at least one character. An empty answer used to reach the agent, which reads
+  it as a cancellation.
 - **The App Group is named after the signing team.** A build configured with
   `LIBRESCRS_TEAM_ID` uses `<team>.org.librescrs.LibreMac`; one without a team
   (CI, tests, the ad-hoc dev harness) keeps `group.org.librescrs.LibreMac`.

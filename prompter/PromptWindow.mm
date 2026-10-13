@@ -20,6 +20,7 @@
 #import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -225,7 +226,8 @@ NSString* informativeText(const std::string& description, const std::string& req
 // zero bound is "unset" on the wire (the request codec omits zero fields):
 // min 0 imposes no lower limit and max 0 no upper limit, so unknown card
 // policy degrades to "let the card decide" rather than a permanently
-// disabled OK.
+// disabled OK. `changeInputsAcceptable` lifts an unset minimum to 1, because
+// an empty field is never an answer.
 bool withinBounds(std::size_t len, std::uint32_t minLen, std::uint32_t maxLen)
 {
     return len >= minLen && (maxLen == 0 || len <= maxLen);
@@ -233,8 +235,11 @@ bool withinBounds(std::size_t len, std::uint32_t minLen, std::uint32_t maxLen)
 
 bool changeInputsAcceptable(const PanelState& state, std::size_t currentLen, std::size_t newLen, bool confirmMatchesNew)
 {
-    return withinBounds(currentLen, state.primaryMinLength, state.primaryMaxLength) &&
-           withinBounds(newLen, state.newMinLength, state.newMaxLength) && confirmMatchesNew;
+    // An empty field is never an answer: the agent treats an empty secret as a
+    // cancellation, so an unset minimum counts as 1 rather than 0.
+    return withinBounds(currentLen, std::max<std::uint32_t>(state.primaryMinLength, 1), state.primaryMaxLength) &&
+           withinBounds(newLen, std::max<std::uint32_t>(state.newMinLength, 1), state.newMaxLength) &&
+           confirmMatchesNew;
 }
 
 std::size_t utf8Length(NSString* value)
@@ -461,6 +466,7 @@ NSString* promptHeading(const wire::PromptRequest& req)
     panel.contentView = stack;
     [panel setContentSize:fitting];
     [panel setInitialFirstResponder:primaryField];
+    [self refreshOkGate];
     return self;
 }
 
@@ -553,6 +559,9 @@ NSString* promptHeading(const wire::PromptRequest& req)
 - (void)refreshOkGate
 {
     if (!changeFlow) {
+        // An empty secret is read by the agent as a cancellation, so OK (and
+        // Return) stay disabled until something has been typed.
+        okButton.enabled = utf8Length(primaryField.stringValue) > 0;
         return;
     }
     // Per-role length gating: OK stays disabled until every field passes
