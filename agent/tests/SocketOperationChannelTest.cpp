@@ -113,29 +113,37 @@ Wired wireUp()
     w.path = uniquePath();
     w.tr = std::move(*SocketTransport::create(w.path));
 
-    std::mutex m;
-    std::condition_variable cv;
-    std::atomic<std::uint64_t> id{0};
-    w.tr->setRequestSink([&](SocketTransport::Inbound&& in) {
-        id.store(in.connId);
-        cv.notify_all();
+    // The sink stays installed after wireUp() returns and runs on the transport's
+    // queue, so the handshake state must outlive this frame: the sink owns a share.
+    struct Handshake
+    {
+        std::mutex m;
+        std::condition_variable cv;
+        std::uint64_t id{0};
+    };
+    auto hs = std::make_shared<Handshake>();
+    w.tr->setRequestSink([hs](SocketTransport::Inbound&& in) {
+        const std::lock_guard<std::mutex> lk(hs->m);
+        hs->id = in.connId;
+        hs->cv.notify_all();
     });
     w.client = connectClient(w.path);
     const auto hello = A::Wire::toCbor(A::Wire::RequestEnvelope{1, A::Wire::Hello{1, std::nullopt}}).encode();
     EXPECT_TRUE(A::Wire::sendFrame(w.client, hello).has_value());
-    std::unique_lock<std::mutex> lk(m);
-    cv.wait_for(lk, std::chrono::seconds(2), [&] { return id.load() != 0; });
-    w.connId = id.load();
+    std::unique_lock<std::mutex> lk(hs->m);
+    hs->cv.wait_for(lk, std::chrono::seconds(2), [&] { return hs->id != 0; });
+    w.connId = hs->id;
     return w;
 }
 
-A::Wire::CborValue recvEvent(int client)
+// Fatal on failure, so callers never dereference an event that did not arrive.
+void recvEvent(int client, A::Wire::CborValue& out)
 {
     auto frame = A::Wire::recvFrame(client);
-    EXPECT_TRUE(frame.has_value());
+    ASSERT_TRUE(frame.has_value());
     auto decoded = A::Wire::decode(frame->body);
-    EXPECT_TRUE(decoded.has_value());
-    return *decoded;
+    ASSERT_TRUE(decoded.has_value());
+    out = *decoded;
 }
 
 TEST(SocketOperationChannel, EmitsProgressAndFinished)
@@ -147,13 +155,15 @@ TEST(SocketOperationChannel, EmitsProgressAndFinished)
     SocketOperationChannel channel(*w.tr, w.connId, 77, state);
 
     channel.emitPropertiesChanged();
-    const auto progress = recvEvent(w.client);
+    A::Wire::CborValue progress;
+    ASSERT_NO_FATAL_FAILURE(recvEvent(w.client, progress));
     EXPECT_EQ(*progress.find("t")->asText(), "OpProgress");
     EXPECT_EQ(progress.find("op")->asUInt(), 77u);
     EXPECT_EQ(progress.find("phase")->asUInt(), static_cast<std::uint64_t>(Ops::OperationPhase::Signing));
 
     channel.emitFinished(Ops::OperationStatus::Ok, LibreSCRS::Agent::ErrorCode::None, "k", "f");
-    const auto finished = recvEvent(w.client);
+    A::Wire::CborValue finished;
+    ASSERT_NO_FATAL_FAILURE(recvEvent(w.client, finished));
     EXPECT_EQ(*finished.find("t")->asText(), "OpFinished");
     EXPECT_EQ(finished.find("status")->asUInt(), static_cast<std::uint64_t>(Ops::OperationStatus::Ok));
 
@@ -195,7 +205,8 @@ TEST(SocketOperationChannel, AllocationFailureInEmitIsDroppedNotFatal)
     // The channel and transport stay usable: a subsequent valid emit is the
     // FIRST event the client sees — the dropped emits never reached the wire.
     channel.emitFinished(Ops::OperationStatus::Ok, LibreSCRS::Agent::ErrorCode::None, "k2", "f2");
-    const auto finished = recvEvent(w.client);
+    A::Wire::CborValue finished;
+    ASSERT_NO_FATAL_FAILURE(recvEvent(w.client, finished));
     EXPECT_EQ(*finished.find("t")->asText(), "OpFinished");
     EXPECT_EQ(finished.find("status")->asUInt(), static_cast<std::uint64_t>(Ops::OperationStatus::Ok));
     EXPECT_EQ(*finished.find("msgKey")->asText(), "k2");
@@ -432,11 +443,13 @@ TEST(SocketOperationChannel, CredentialsResultEnqueuedBeforeFinished)
     EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{payload}));
     channel.emitFinished(Ops::OperationStatus::Ok, A::ErrorCode::None, "k", "f");
 
-    const auto first = recvEvent(w.client);
+    A::Wire::CborValue first;
+    ASSERT_NO_FATAL_FAILURE(recvEvent(w.client, first));
     EXPECT_EQ(*first.find("t")->asText(), "OpResultReady");
     EXPECT_EQ(first.find("op")->asUInt(), 23u);
 
-    const auto second = recvEvent(w.client);
+    A::Wire::CborValue second;
+    ASSERT_NO_FATAL_FAILURE(recvEvent(w.client, second));
     EXPECT_EQ(*second.find("t")->asText(), "OpFinished");
     EXPECT_EQ(second.find("op")->asUInt(), 23u);
 
@@ -463,7 +476,8 @@ TEST(SocketOperationChannel, CertificatesResultCarriesTheCardsConsentRule)
     ordinary.signingCapable = true;
     EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{std::vector<A::CertSnapshot>{marked, ordinary}}));
 
-    const auto event = recvEvent(w.client);
+    A::Wire::CborValue event;
+    ASSERT_NO_FATAL_FAILURE(recvEvent(w.client, event));
     const auto* res = event.find("result");
     ASSERT_NE(res, nullptr);
     const auto* certsVal = res->find("certs");
