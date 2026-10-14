@@ -499,4 +499,38 @@ TEST(SocketOperationChannel, CertificatesResultCarriesTheCardsConsentRule)
     std::filesystem::remove(w.path);
 }
 
+// The key facts ride every certificate the socket result carries.
+TEST(SocketOperationChannel, CertificatesResultCarriesTheKeyFacts)
+{
+    Wired w = wireUp();
+    ASSERT_NE(w.connId, 0u);
+    auto state = std::make_shared<Ops::OperationState>();
+    SocketOperationChannel channel(*w.tr, w.connId, 24, state);
+
+    A::CertSnapshot lk;
+    lk.certId = "lk";
+    lk.signingCapable = true;
+    lk.keyId = {0xF7, 0x13, 0x4B, 0x02};
+    lk.keyType = A::KeyType::Ec;
+    lk.keyBits = 384;
+    lk.canDerive = true;
+    EXPECT_TRUE(channel.emitResult(Ops::ResultPayload{std::vector<A::CertSnapshot>{lk}}));
+
+    A::Wire::CborValue event;
+    ASSERT_NO_FATAL_FAILURE(recvEvent(w.client, event));
+    const auto* certs = event.find("result")->find("certs")->asArray();
+    ASSERT_NE(certs, nullptr);
+    ASSERT_EQ(certs->size(), 1u);
+    const auto& c = (*certs)[0];
+    ASSERT_NE(c.find("keyId"), nullptr);
+    EXPECT_EQ(*c.find("keyId")->asBytes(), (A::Wire::CborValue::Bytes{0xF7, 0x13, 0x4B, 0x02}));
+    EXPECT_EQ(*c.find("keyType")->asText(), "EC");
+    EXPECT_EQ(c.find("keyBits")->asUInt(), std::optional<std::uint64_t>{384});
+    EXPECT_EQ(c.find("canDerive")->asBool(), std::optional<bool>{true});
+
+    ::close(w.client);
+    w.tr.reset();
+    std::filesystem::remove(w.path);
+}
+
 } // namespace

@@ -1833,3 +1833,33 @@ TEST(SocketFrontend, AWithdrawnReaderTakesItsWorkerAndItsHoldWithIt)
     EXPECT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(1))) << "control: a live reader's worker takes the flag";
     ops.setReaderHold(Agent::ObjectId(1), false);
 }
+
+// The mechanism is checked at the door: an unknown token is answered
+// InvalidRequest and the connection stays, a known one goes on to the broker
+// (which, with no card in the reader, answers UnknownCard).
+TEST(SocketFrontend, ARawSignWithAnUnknownMechanismIsInvalidRequest)
+{
+    Rig rig;
+    const auto refused = rig.roundTrip(40, Agent::Wire::PkSignRaw{"nope", "c", "rsa-pss", {0x01}});
+    EXPECT_EQ(errName(refused), "InvalidRequest");
+    const auto served =
+        rig.roundTrip(41, Agent::Wire::PkSignRaw{"nope", "c", "ecdsa", std::vector<std::uint8_t>(32, 0x01)});
+    EXPECT_EQ(errName(served), "UnknownCard") << "the connection survived and the known mechanism reached the broker";
+}
+
+TEST(SocketFrontend, ARawDecryptWithAnUnknownMechanismIsInvalidRequest)
+{
+    Rig rig;
+    EXPECT_EQ(errName(rig.roundTrip(42, Agent::Wire::PkDecrypt{"nope", "c", "ecdsa", {0x01}})), "InvalidRequest");
+    EXPECT_EQ(errName(rig.roundTrip(43, Agent::Wire::PkDecrypt{"nope", "c", "rsa-pkcs", {0x01}})), "UnknownCard");
+}
+
+// A request the key refuses before any prompt is the caller's: InvalidRequest,
+// the same name a malformed request gets.
+TEST(SocketFrontend, AnInvalidInputIsInvalidRequest)
+{
+    using CO = Agent::Pkcs11Broker::CryptoOutcome;
+    EXPECT_EQ(detail::mapCryptoOutcome(CO::InvalidInput), Agent::Wire::SyncError::InvalidRequest);
+    EXPECT_EQ(detail::mapCryptoOutcome(CO::CardError), Agent::Wire::SyncError::CommunicationError);
+    EXPECT_EQ(detail::mapCryptoOutcome(CO::RateLimited), Agent::Wire::SyncError::RateLimited);
+}

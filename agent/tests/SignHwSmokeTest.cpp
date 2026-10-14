@@ -32,6 +32,7 @@
 #include <LibreSCRS/Agent/backend/PrompterClientBase.h>
 #include <LibreSCRS/Agent/presence/MonitorBridge.h>
 #include <LibreSCRS/Agent/presence/PluginCapabilityResolver.h>
+#include <LibreSCRS/Agent/util/HexEncode.h>
 #include <LibreSCRS/Plugin/CardPluginService.h>
 #include <LibreSCRS/Secure/String.h>
 
@@ -349,10 +350,16 @@ TEST(SignHwSmoke, PresenceReadAndSign)
             const auto* id = c.find("certId");
             const auto* ku = c.find("keyUsageBits");
             const auto* aa = c.find("alwaysAuthenticate");
+            const auto* kt = c.find("keyType");
+            const auto* kb = c.find("keyBits");
+            const auto* kid = c.find("keyId");
             inventory += "\n  cert id=" + (id && id->asText() ? id->asText()->substr(0, 12) : std::string("?")) +
                          " signingCapable=" + ((sc && sc->asBool().value_or(false)) ? "true" : "false") +
                          " keyUsageBits=" + std::to_string(ku ? ku->asUInt().value_or(0) : 0) +
-                         " alwaysAuthenticate=" + ((aa && aa->asBool().value_or(false)) ? "true" : "false");
+                         " alwaysAuthenticate=" + ((aa && aa->asBool().value_or(false)) ? "true" : "false") +
+                         " keyType=" + (kt && kt->asText() ? *kt->asText() : std::string("?")) +
+                         " keyBits=" + std::to_string(kb ? kb->asUInt().value_or(0) : 0) + " keyId=" +
+                         (kid && kid->asBytes() ? LibreSCRS::Agent::toHex(*kid->asBytes()) : std::string("?"));
             if (certId.empty() && sc != nullptr && sc->asBool().value_or(false) && id != nullptr &&
                 id->asText() != nullptr) {
                 certId = *id->asText();

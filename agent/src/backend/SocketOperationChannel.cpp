@@ -95,6 +95,10 @@ A::Wire::CertInfo toCertInfo(const A::CertSnapshot& c)
     out.chainSubjectCns = c.chainSubjectCns;
     out.trustStatus = c.trustStatus;
     out.alwaysAuthenticate = c.alwaysAuthenticate;
+    out.keyId = c.keyId;
+    out.keyType = c.keyType;
+    out.keyBits = c.keyBits;
+    out.canDerive = c.canDerive;
     for (const auto& group : c.fields) {
         std::map<std::string, A::Wire::CertField> fields;
         for (const auto& f : group.fields) {

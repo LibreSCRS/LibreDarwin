@@ -10,6 +10,7 @@
 #include <LibreSCRS/Agent/PresenceTypes.h>
 #include <LibreSCRS/Agent/backend/OperationChannel.h> // Operations::SignedArtifact
 #include <LibreSCRS/Agent/config/ConfigStore.h>       // Config::CscaAnchorState (detail::recordedStateFor)
+#include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>      // Pkcs11Broker::CryptoOutcome (detail::mapCryptoOutcome)
 #include <LibreSCRS/Agent/trust/CscaAnchorImport.h>   // Trust::AnchorState (detail::recordedStateFor)
 #include <LibreSCRS/Auth/AuthRequirement.h>           // LibreSCRS::Auth::PreReadAuthMethod (applyCardResolution)
 
@@ -302,6 +303,9 @@ namespace detail {
 /// accepted, and `signerPinned` is the aggregate: true only when every publisher
 /// was established.
 [[nodiscard]] Agent::Config::CscaAnchorState recordedStateFor(const Agent::Trust::AnchorState& imported);
+
+/// Pkcs11Broker outcome -> the socket's named error. Exposed for its table test.
+[[nodiscard]] Agent::Wire::SyncError mapCryptoOutcome(Agent::Pkcs11Broker::CryptoOutcome oc) noexcept;
 
 } // namespace detail
 

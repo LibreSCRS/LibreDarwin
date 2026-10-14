@@ -67,6 +67,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The socket agent reports each certificate's key ID, key type, key size and
+  whether it can derive, serves the EC public key of a certificate on a NIST
+  curve, and runs exactly the mechanism a raw signature or decryption names; an
+  unknown mechanism, or input that does not fit the key, is refused as
+  `InvalidRequest` before any PIN prompt.
 - **The agent reports, per certificate, whether the card asks for the PIN
   before every use of its key**, and asks for it again for every raw signature or
   decryption with such a key (batch document signing asks once per batch).

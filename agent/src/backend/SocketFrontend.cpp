@@ -60,6 +60,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <type_traits>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -138,34 +139,6 @@ ReadDoc readDocument(int fd, std::size_t cap)
         }
         out.insert(out.end(), buf.data(), buf.data() + static_cast<std::size_t>(n));
     }
-}
-
-// Pkcs11Broker::CryptoOutcome -> wire sync error. A dismissed prompt has its
-// own name now; CardError still fails closed to CommunicationError, which is
-// what it means. Ok is not an outcome this function is called for.
-A::Wire::SyncError mapCryptoOutcome(A::Pkcs11Broker::CryptoOutcome oc) noexcept
-{
-    using CO = A::Pkcs11Broker::CryptoOutcome;
-    switch (oc) {
-    case CO::KeyNotFound:
-        return A::Wire::SyncError::KeyNotFound;
-    case CO::AuthFailed:
-        return A::Wire::SyncError::AuthFailed;
-    case CO::NotSupported:
-        return A::Wire::SyncError::NotSupported;
-    case CO::UnknownCard:
-        return A::Wire::SyncError::UnknownCard;
-    case CO::UserNotLoggedIn:
-        return A::Wire::SyncError::UserNotLoggedIn;
-    case CO::RateLimited:
-        return A::Wire::SyncError::RateLimited;
-    case CO::Cancelled:
-        return A::Wire::SyncError::Cancelled;
-    case CO::Ok:
-    case CO::CardError:
-        break;
-    }
-    return A::Wire::SyncError::CommunicationError;
 }
 
 A::Wire::SyncError mapLoginOutcome(A::Pkcs11Broker::LoginOutcome oc) noexcept
@@ -340,6 +313,37 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
 }
 
 } // namespace
+
+// Pkcs11Broker::CryptoOutcome -> wire sync error. A dismissed prompt has its
+// own name now; CardError still fails closed to CommunicationError, which is
+// what it means. Ok is not an outcome this function is called for.
+A::Wire::SyncError detail::mapCryptoOutcome(A::Pkcs11Broker::CryptoOutcome oc) noexcept
+{
+    using CO = A::Pkcs11Broker::CryptoOutcome;
+    switch (oc) {
+    case CO::KeyNotFound:
+        return A::Wire::SyncError::KeyNotFound;
+    case CO::AuthFailed:
+        return A::Wire::SyncError::AuthFailed;
+    case CO::NotSupported:
+        return A::Wire::SyncError::NotSupported;
+    case CO::UnknownCard:
+        return A::Wire::SyncError::UnknownCard;
+    case CO::UserNotLoggedIn:
+        return A::Wire::SyncError::UserNotLoggedIn;
+    case CO::RateLimited:
+        return A::Wire::SyncError::RateLimited;
+    case CO::Cancelled:
+        return A::Wire::SyncError::Cancelled;
+    case CO::InvalidInput:
+        // Refused before any prompt: the request does not fit the key.
+        return A::Wire::SyncError::InvalidRequest;
+    case CO::Ok:
+    case CO::CardError:
+        break;
+    }
+    return A::Wire::SyncError::CommunicationError;
+}
 
 SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, std::string version,
                                std::shared_ptr<LibreSCRS::Plugin::CardPluginService> plugins)
@@ -1986,7 +1990,9 @@ void SocketFrontend::handleCertDer(std::uint64_t connId, std::uint64_t req, cons
         [tr, connId, req](const std::vector<std::uint8_t>& der) {
             postReply(tr, connId, A::Wire::makeReply(req, A::Wire::CertDerReply{der}));
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
+            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
+        },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().certDer(msg.reader, msg.cert, c, reply);
 }
@@ -1996,12 +2002,23 @@ void SocketFrontend::handlePkPublicKey(std::uint64_t connId, std::uint64_t req, 
 {
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
-    A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>, std::vector<std::uint8_t>> reply{
-        [tr, connId, req](const std::vector<std::uint8_t>& n, const std::vector<std::uint8_t>& e) {
-            A::Wire::PublicKeyReply pk = A::Wire::RsaPublicKey{n, e};
+    A::Reply<A::Pkcs11Broker::CryptoOutcome, A::Pkcs11Broker::PublicKey> reply{
+        [tr, connId, req](const A::Pkcs11Broker::PublicKey& key) {
+            const A::Wire::PublicKeyReply pk = std::visit(
+                [](const auto& k) -> A::Wire::PublicKeyReply {
+                    using K = std::decay_t<decltype(k)>;
+                    if constexpr (std::is_same_v<K, A::Operations::RsaPublicKey>) {
+                        return A::Wire::RsaPublicKey{k.modulus, k.exponent};
+                    } else {
+                        return A::Wire::EcPublicKey{k.crv, k.x, k.y};
+                    }
+                },
+                key);
             postReply(tr, connId, A::Wire::makeReply(req, pk));
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
+            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
+        },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().publicKey(msg.reader, msg.cert, c, reply);
 }
@@ -2030,30 +2047,47 @@ void SocketFrontend::handlePkLogout(std::uint64_t connId, std::uint64_t req, con
 void SocketFrontend::handlePkSignRaw(std::uint64_t connId, std::uint64_t req, const A::Wire::PkSignRaw& msg,
                                      const A::CallerToken& caller)
 {
+    // The mechanism the caller named, exactly: an unknown token is refused
+    // here, before any card is touched; a known one runs as itself.
+    const auto mechanism = A::signMechanismFromToken(msg.mech);
+    if (!mechanism) {
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
+        return;
+    }
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& sig) {
             postReply(tr, connId, A::Wire::makeReply(req, A::Wire::RawSignatureReply{sig}));
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
+            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
+        },
         A::Pkcs11Broker::CryptoOutcome::CardError};
-    m_core.pkcs11().signRaw(msg.reader, msg.cert, A::Mechanism::RsaPkcs1Sign, A::MechParamsEmpty{}, msg.data, c, reply);
+    m_core.pkcs11().signRaw(msg.reader, msg.cert, *mechanism, A::MechParamsEmpty{}, msg.data, c, reply);
 }
 
 void SocketFrontend::handlePkDecrypt(std::uint64_t connId, std::uint64_t req, const A::Wire::PkDecrypt& msg,
                                      const A::CallerToken& caller)
 {
+    // The mechanism the caller named, exactly: an unknown token is refused
+    // here, before any card is touched; a known one runs as itself.
+    const auto mechanism = A::decryptMechanismFromToken(msg.mech);
+    if (!mechanism) {
+        replyError(connId, req, A::Wire::SyncError::InvalidRequest);
+        return;
+    }
     auto* tr = &m_transport;
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& plain) {
             postReply(tr, connId, A::Wire::makeReply(req, A::Wire::RawSignatureReply{plain}));
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, mapCryptoOutcome(oc)); },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
+            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
+        },
         A::Pkcs11Broker::CryptoOutcome::CardError};
-    m_core.pkcs11().decrypt(msg.reader, msg.cert, A::Mechanism::RsaPkcs1Decrypt, A::MechParamsEmpty{}, msg.data, c,
-                            reply);
+    m_core.pkcs11().decrypt(msg.reader, msg.cert, *mechanism, A::MechParamsEmpty{}, msg.data, c, reply);
 }
 
 // --- presence (deferred capability resolve) ----------------------------------
