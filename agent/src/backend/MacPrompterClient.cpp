@@ -8,6 +8,7 @@
 
 #include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 
+#include <LibreSCRS/Agent/SecureZero.h>
 #include <LibreSCRS/Agent/backend/Logging.h>
 #include <LibreSCRS/Agent/operations/PromptPolicy.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
@@ -353,7 +354,7 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
     // The raw frame body carries the secret inline for Ok replies; zero it the
     // moment it is parsed, whatever the outcome (parsePromptReply scrubbed its
     // own decoded intermediates, and decode() zeroed the canonical re-encode).
-    Agent::Wire::secureZero(frame.body);
+    Agent::secureZero(frame.body);
     if (!reply.has_value()) {
         return errorResult("prompter reply malformed");
     }
@@ -452,7 +453,7 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
     // the moment it is parsed, whatever the outcome (parseMultiPromptReply
     // scrubbed its own decoded intermediates, and decode() zeroed the
     // canonical re-encode).
-    Agent::Wire::secureZero(frame.body);
+    Agent::secureZero(frame.body);
     if (!reply.has_value()) {
         return changeErrorResult("prompter reply malformed");
     }
