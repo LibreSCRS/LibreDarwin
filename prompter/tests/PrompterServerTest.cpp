@@ -8,6 +8,7 @@
 // replaced socket path is bound again. Real sockets + latches; only the
 // replaced-path test polls, since the guard is a timer. The AppKit window +
 // real SecTask peer-auth are exercised manually / in the HW gate.
+#include "ArtifactText.h"
 #include "PrompterServer.h"
 
 #include <LibreSCRS/Agent/wire/Framing.h>
@@ -983,6 +984,20 @@ TEST(PrompterServer, NextInstanceStartsOnceThePreviousHasStopped)
     second->stop();
     EXPECT_FALSE(std::filesystem::exists(path + ".lock")) << "stop() left the lock file behind";
     std::filesystem::remove(path);
+}
+
+// The two category tokens the agent mints for raw card operations read as
+// operations, never as a document called "pkcs11".
+TEST(ArtifactText, ThePkcs11TokensReadAsOperations)
+{
+    const auto sign = operationForArtifact("pkcs11");
+    ASSERT_TRUE(sign.has_value());
+    EXPECT_STREQ(sign->key, "prompter_operation_pkcs11");
+    const auto derive = operationForArtifact("pkcs11-derive");
+    ASSERT_TRUE(derive.has_value());
+    EXPECT_STREQ(derive->key, "prompter_operation_pkcs11_derive");
+    EXPECT_FALSE(operationForArtifact("invoice.pdf").has_value()) << "a document name stays a document";
+    EXPECT_FALSE(operationForArtifact("").has_value());
 }
 
 } // namespace

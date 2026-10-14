@@ -1854,6 +1854,16 @@ TEST(SocketFrontend, ARawDecryptWithAnUnknownMechanismIsInvalidRequest)
     EXPECT_EQ(errName(rig.roundTrip(43, Agent::Wire::PkDecrypt{"nope", "c", "rsa-pkcs", {0x01}})), "UnknownCard");
 }
 
+// Pkcs11.Derive is served: it reaches the broker (no card -> UnknownCard), it
+// is not the "unhandled request family" InvalidRequest.
+TEST(SocketFrontend, ADeriveIsServed)
+{
+    Rig rig;
+    std::vector<std::uint8_t> point(65, 0x33);
+    point[0] = 0x04;
+    EXPECT_EQ(errName(rig.roundTrip(44, Agent::Wire::PkDerive{"nope", "c", point})), "UnknownCard");
+}
+
 // A request the key refuses before any prompt is the caller's: InvalidRequest,
 // the same name a malformed request gets.
 TEST(SocketFrontend, AnInvalidInputIsInvalidRequest)

@@ -17,6 +17,8 @@
 // (read-before-hide) and the fields are scrubbed on every outcome.
 #include "PromptWindow.h"
 
+#include "ArtifactText.h"
+
 #import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
 
@@ -213,6 +215,10 @@ NSString* informativeText(const std::string& description, const std::string& req
                                                                          @(listed.omitted)]];
             }
         }
+    } else if (const auto operation = LibreSCRS::Darwin::operationForArtifact(artifact)) {
+        // An agent-minted operation token: say what is about to happen.
+        [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_operation", "Operation:"),
+                           localized(operation->key, operation->fallback)];
     } else if (!artifact.empty()) {
         [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_document", "Document:"),
                            nsstr(artifact)];

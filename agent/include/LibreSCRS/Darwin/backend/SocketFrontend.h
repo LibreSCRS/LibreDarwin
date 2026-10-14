@@ -175,6 +175,8 @@ private:
                          const Agent::CallerToken& caller);
     void handlePkDecrypt(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkDecrypt& msg,
                          const Agent::CallerToken& caller);
+    void handlePkDerive(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkDerive& msg,
+                        const Agent::CallerToken& caller);
 
     // Reply helpers.
     void replyError(std::uint64_t connId, std::uint64_t req, Agent::Wire::SyncError code);

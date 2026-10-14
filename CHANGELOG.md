@@ -50,6 +50,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- `Pkcs11.Derive`: ECDH with the card's EC key (raw secret, no key-derivation
+  function), advertised with the `ec-keys` feature token.
 - **`librescrs-pkcs11-agent.dylib`, a PKCS#11 module for applications that
   load one** (Firefox, Thunderbird, ssh). It holds no secret: it forwards every
   call to the agent over the App Group socket and, before sending anything,
@@ -67,6 +69,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- The PIN prompt names a raw card operation as such ("Cryptographic token
+  operation", "Key agreement with the card key") instead of showing its
+  category token as a document name.
 - The socket agent reports each certificate's key ID, key type, key size and
   whether it can derive, serves the EC public key of a certificate on a NIST
   curve, and runs exactly the mechanism a raw signature or decryption names; an

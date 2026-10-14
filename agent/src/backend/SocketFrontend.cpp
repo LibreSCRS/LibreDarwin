@@ -484,6 +484,8 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handlePkSignRaw(connId, req, *m, caller);
     } else if (const auto* m = std::get_if<A::Wire::PkDecrypt>(&body)) {
         handlePkDecrypt(connId, req, *m, caller);
+    } else if (const auto* m = std::get_if<A::Wire::PkDerive>(&body)) {
+        handlePkDerive(connId, req, *m, caller);
     } else if (const auto* m = std::get_if<A::Wire::LayoutVisual>(&body)) {
         handleLayoutVisual(connId, req, *m);
     } else if (std::get_if<A::Wire::GetAppearanceFont>(&body)) {
@@ -506,7 +508,7 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         // is worth today. Instead, adding an alternative to Wire::Request breaks
         // THIS line, which forces a person to look at this chain rather than
         // let the new message class disappear into the else.
-        static_assert(std::variant_size_v<A::Wire::Request> == 26,
+        static_assert(std::variant_size_v<A::Wire::Request> == 27,
                       "Wire::Request grew or shrank: give the new alternative a branch above "
                       "(or confirm the floor is right for it) and update this count");
         log::warnf("socket: unhandled request family on conn {} req {}", connId, req);
@@ -2088,6 +2090,31 @@ void SocketFrontend::handlePkDecrypt(std::uint64_t connId, std::uint64_t req, co
         },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().decrypt(msg.reader, msg.cert, *mechanism, A::MechParamsEmpty{}, msg.data, c, reply);
+}
+
+void SocketFrontend::handlePkDerive(std::uint64_t connId, std::uint64_t req, const A::Wire::PkDerive& msg,
+                                    const A::CallerToken& caller)
+{
+    auto* tr = &m_transport;
+    A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
+    A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
+        [tr, connId, req](const std::vector<std::uint8_t>& z) {
+            // The secret's CBOR copy is wiped once the frame is queued for the
+            // client; the queued frame leaves with the send.
+            tr->post([tr, connId, message = A::Wire::makeReply(req, A::Wire::DerivedSecretReply{z})]() mutable {
+                tr->sendTo(connId, message);
+                message.scrub();
+            });
+        },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
+            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
+        },
+        A::Pkcs11Broker::CryptoOutcome::CardError};
+    // ECDH with CKD_NULL and no shared data: the raw secret, the only
+    // derivation this surface runs.
+    m_core.pkcs11().derive(msg.reader, msg.cert,
+                           A::MechParamsEcdh{.peerPublicPoint = msg.data, .kdf = A::kEcdhKdfNull, .sharedData = {}}, c,
+                           reply);
 }
 
 // --- presence (deferred capability resolve) ----------------------------------
