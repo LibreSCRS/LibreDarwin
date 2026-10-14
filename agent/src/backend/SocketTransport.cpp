@@ -8,6 +8,7 @@
 // launch_activate_socket is an optional inherited-fd fallback.
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 
+#include <LibreSCRS/Agent/SecureZero.h>
 #include <LibreSCRS/Agent/backend/Logging.h>
 
 #include <launch.h>
@@ -21,6 +22,7 @@
 #include <cstring>
 #include <filesystem>
 #include <format>
+#include <span>
 #include <utility>
 
 namespace LibreSCRS::Darwin {
@@ -143,7 +145,8 @@ SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
         ssize_t w = -1;
         if (!f.ancillarySent && !f.fds.empty()) {
             iovec iov{};
-            iov.iov_base = f.bytes.data() + f.sent;
+            // sendmsg only reads the iovec; iov_base is non-const by the POSIX type.
+            iov.iov_base = const_cast<std::uint8_t*>(f.bytes.data()) + f.sent;
             iov.iov_len = f.bytes.size() - f.sent;
             alignas(struct cmsghdr) std::array<std::uint8_t, CMSG_SPACE(sizeof(int) * Agent::Wire::kMaxFrameFds)>
                 control{};
@@ -578,8 +581,10 @@ void SocketTransport::enqueueSend(Connection& conn, std::vector<std::uint8_t> fr
                                   std::vector<Agent::Wire::UniqueFd> fds)
 {
     const std::size_t frameBytes = framed.size();
+    // Wiped on every exit, a throw from the copy below included.
+    const Agent::SecureZeroOnExit wipeFramed{framed};
     OutFrame f;
-    f.bytes = std::move(framed);
+    f.bytes = Secure::Buffer{std::span<const std::uint8_t>{framed}};
     f.fds = std::move(fds);
     conn.outQueue.push_back(std::move(f));
     conn.queuedBytes += frameBytes;
@@ -640,7 +645,11 @@ void SocketTransport::sendTo(std::uint64_t connId, const Agent::Wire::CborValue&
     if (it == m_connections.end()) {
         return;
     }
-    auto framed = Agent::Wire::encodeFrame(message.encode(), static_cast<std::uint32_t>(fds.size()));
+    // The encoded body may carry a secret (a decrypted or derived reply); the
+    // framed copy is the one that is queued, so the body is wiped on every exit.
+    auto body = message.encode();
+    const Agent::SecureZeroOnExit wipeBody{body};
+    auto framed = Agent::Wire::encodeFrame(body, static_cast<std::uint32_t>(fds.size()));
     // enqueueSend may close (and erase) this connection when the queue bound
     // is exceeded; nothing below may read `it` or the connection afterward.
     enqueueSend(*it->second, std::move(framed), std::move(fds));

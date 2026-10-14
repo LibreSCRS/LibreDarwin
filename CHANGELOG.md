@@ -16,6 +16,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **The socket agent wipes its copies of a decrypted plaintext or a derived
+  secret** on the way to the client: the reply message, its encoded body and
+  the queued frame, whether the frame is sent or dropped with its connection.
 - **The agent and the prompter no longer take configuration from their
   environment.** `launchctl setenv` reaches every job the user's launchd
   starts, so each variable they honoured was a switch any process running as
@@ -69,9 +72,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
-- The PIN prompt names a raw card operation as such ("Cryptographic token
-  operation", "Key agreement with the card key") instead of showing its
-  category token as a document name.
+- The credential prompt (PIN, CAN or MRZ) names a raw card operation as such
+  ("Cryptographic token operation", "Key agreement with the card key") instead
+  of showing its category token as a document name.
 - The socket agent reports each certificate's key ID, key type, key size and
   whether it can derive, serves the EC public key of a certificate on a NIST
   curve, and runs exactly the mechanism a raw signature or decryption names; an

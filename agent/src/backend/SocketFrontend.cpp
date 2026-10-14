@@ -25,6 +25,8 @@
 #include <LibreSCRS/Agent/CryptoWorkerContext.h>
 #include <LibreSCRS/Agent/FeatureTokens.h>
 #include <LibreSCRS/Agent/Reply.h>
+#include <LibreSCRS/Agent/SecureZero.h>
+#include <LibreSCRS/Secure/Buffer.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
 #include <LibreSCRS/Agent/backend/Logging.h>
 
@@ -200,6 +202,33 @@ void postReply(SocketTransport* tr, std::uint64_t connId, A::Wire::CborValue mes
 {
     tr->post([tr, connId, message] { tr->sendTo(connId, message); });
 }
+
+// A reply that carries a secret (decrypted plaintext, a derived secret). post()
+// copies its closure more than once on the way to the loop, so the closure
+// holds only a shared Secure::Buffer, which cleanses itself whether the
+// closure runs or not. The wire message exists only while it is sent; it and
+// the reply struct it was built from are wiped on every way out, a throwing
+// build or send included.
+template <typename SecretReply>
+void postSecretReply(SocketTransport* tr, std::uint64_t connId, std::uint64_t req,
+                     const std::vector<std::uint8_t>& secret, std::vector<std::uint8_t> SecretReply::* field)
+{
+    auto held = std::make_shared<const Secure::Buffer>(std::span<const std::uint8_t>{secret});
+    tr->post([tr, connId, req, held, field] {
+        SecretReply out;
+        const A::SecureZeroOnExit wipeField(out.*field);
+        out.*field = std::vector<std::uint8_t>(held->data(), held->data() + held->size());
+        auto message = A::Wire::makeReply(req, out);
+        try {
+            tr->sendTo(connId, message);
+        } catch (...) {
+            message.scrub();
+            throw;
+        }
+        message.scrub();
+    });
+}
+
 void postErr(SocketTransport* tr, std::uint64_t connId, std::uint64_t req, A::Wire::SyncError code)
 {
     postReply(tr, connId, A::Wire::makeErrorReply(req, A::Wire::ErrInfo{code, std::nullopt, std::nullopt}));
@@ -2083,7 +2112,7 @@ void SocketFrontend::handlePkDecrypt(std::uint64_t connId, std::uint64_t req, co
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& plain) {
-            postReply(tr, connId, A::Wire::makeReply(req, A::Wire::RawSignatureReply{plain}));
+            postSecretReply(tr, connId, req, plain, &A::Wire::RawSignatureReply::sig);
         },
         [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
             postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
@@ -2099,12 +2128,7 @@ void SocketFrontend::handlePkDerive(std::uint64_t connId, std::uint64_t req, con
     A::Pkcs11Broker::Caller c{caller, requesterLabel(caller)};
     A::Reply<A::Pkcs11Broker::CryptoOutcome, std::vector<std::uint8_t>> reply{
         [tr, connId, req](const std::vector<std::uint8_t>& z) {
-            // The secret's CBOR copy is wiped once the frame is queued for the
-            // client; the queued frame leaves with the send.
-            tr->post([tr, connId, message = A::Wire::makeReply(req, A::Wire::DerivedSecretReply{z})]() mutable {
-                tr->sendTo(connId, message);
-                message.scrub();
-            });
+            postSecretReply(tr, connId, req, z, &A::Wire::DerivedSecretReply::z);
         },
         [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
             postErr(tr, connId, req, detail::mapCryptoOutcome(oc));

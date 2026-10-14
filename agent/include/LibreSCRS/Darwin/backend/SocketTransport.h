@@ -9,6 +9,7 @@
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <LibreSCRS/Agent/backend/AgentTransport.h>
+#include <LibreSCRS/Secure/Buffer.h>
 #include <LibreSCRS/Auth/AuthRequirement.h> // LibreSCRS::Auth::PreReadAuthMethod (CardRouting::preAuth)
 
 #include <dispatch/dispatch.h>
@@ -211,7 +212,10 @@ private:
 
     struct OutFrame
     {
-        std::vector<std::uint8_t> bytes;        // full framed bytes (header + body)
+        // Full framed bytes (header + body). A frame may carry a secret (a
+        // decrypted or derived reply), so the storage cleanses itself however
+        // the frame leaves: sent and popped, or dropped with its connection.
+        Secure::Buffer bytes;
         std::vector<Agent::Wire::UniqueFd> fds; // owned; sent via SCM_RIGHTS on the first sendmsg
         std::size_t sent{0};
         bool ancillarySent{false};
