@@ -169,6 +169,8 @@ private:
                        const Agent::CallerToken& caller);
     void handlePkLogout(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkLogout& msg,
                         const Agent::CallerToken& caller);
+    void handlePkLoginState(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkLoginState& msg,
+                            const Agent::CallerToken& caller);
     void handlePkPublicKey(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkPublicKey& msg,
                            const Agent::CallerToken& caller);
     void handlePkSignRaw(std::uint64_t connId, std::uint64_t req, const Agent::Wire::PkSignRaw& msg,

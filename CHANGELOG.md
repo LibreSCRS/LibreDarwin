@@ -53,6 +53,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The socket agent answers `Pkcs11.LoginState`** — whether a PKCS#11 client's
+  login on the card in a reader still holds, without extending it — and offers
+  the `login-state` feature token. The PKCS#11 module asks it so that Firefox
+  sees a login the agent has ended as one, and asks for the PIN again.
 - `Pkcs11.Derive`: ECDH with the card's EC key (raw secret, no key-derivation
   function), advertised with the `ec-keys` feature token.
 - **`librescrs-pkcs11-agent.dylib`, a PKCS#11 module for applications that

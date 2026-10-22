@@ -1864,6 +1864,18 @@ TEST(SocketFrontend, ADeriveIsServed)
     EXPECT_EQ(errName(rig.roundTrip(44, Agent::Wire::PkDerive{"nope", "c", point})), "UnknownCard");
 }
 
+// Pkcs11.LoginState is served: it reaches the broker and answers whether the
+// caller's login holds -- for a reader with no card, that it does not. Not the
+// "unhandled request family" InvalidRequest.
+TEST(SocketFrontend, ALoginStateIsServed)
+{
+    Rig rig;
+    const auto reply = rig.roundTrip(45, Agent::Wire::PkLoginState{"nope"});
+    EXPECT_EQ(errName(reply), "");
+    ASSERT_NE(reply.find("active"), nullptr);
+    EXPECT_EQ(reply.find("active")->asBool(), std::optional<bool>{false});
+}
+
 // A request the key refuses before any prompt is the caller's: InvalidRequest,
 // the same name a malformed request gets.
 TEST(SocketFrontend, AnInvalidInputIsInvalidRequest)

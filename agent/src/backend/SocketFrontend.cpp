@@ -507,6 +507,8 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handlePkLogin(connId, req, *m, caller);
     } else if (const auto* m = std::get_if<A::Wire::PkLogout>(&body)) {
         handlePkLogout(connId, req, *m, caller);
+    } else if (const auto* m = std::get_if<A::Wire::PkLoginState>(&body)) {
+        handlePkLoginState(connId, req, *m, caller);
     } else if (const auto* m = std::get_if<A::Wire::PkPublicKey>(&body)) {
         handlePkPublicKey(connId, req, *m, caller);
     } else if (const auto* m = std::get_if<A::Wire::PkSignRaw>(&body)) {
@@ -537,7 +539,7 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         // is worth today. Instead, adding an alternative to Wire::Request breaks
         // THIS line, which forces a person to look at this chain rather than
         // let the new message class disappear into the else.
-        static_assert(std::variant_size_v<A::Wire::Request> == 27,
+        static_assert(std::variant_size_v<A::Wire::Request> == 28,
                       "Wire::Request grew or shrank: give the new alternative a branch above "
                       "(or confirm the floor is right for it) and update this count");
         log::warnf("socket: unhandled request family on conn {} req {}", connId, req);
@@ -2073,6 +2075,15 @@ void SocketFrontend::handlePkLogout(std::uint64_t connId, std::uint64_t req, con
 {
     m_core.pkcs11().logout(msg.reader, A::Pkcs11Broker::Caller{caller, requesterLabel(caller)});
     sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
+}
+
+void SocketFrontend::handlePkLoginState(std::uint64_t connId, std::uint64_t req, const A::Wire::PkLoginState& msg,
+                                        const A::CallerToken& caller)
+{
+    // Lease bookkeeping only, like Logout: no card, no prompt.
+    const bool active =
+        m_core.pkcs11().loginActive(msg.reader, A::Pkcs11Broker::Caller{caller, requesterLabel(caller)});
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::LoginStateReply{active}));
 }
 
 void SocketFrontend::handlePkSignRaw(std::uint64_t connId, std::uint64_t req, const A::Wire::PkSignRaw& msg,
