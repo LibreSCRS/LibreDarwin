@@ -27,6 +27,9 @@
 #include <LibreSCRS/Agent/backend/Authorizer.h>
 #include <LibreSCRS/Agent/backend/PrompterClientBase.h>
 #include <LibreSCRS/Agent/presence/CapabilityResolver.h>
+#include <LibreSCRS/Auth/ErrorKeys.h>
+#include <LibreSCRS/Plugin/CardPlugin.h>
+#include <LibreSCRS/SmartCard/CardSession.h>
 
 #include <gtest/gtest.h>
 
@@ -45,6 +48,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 namespace LibreSCRS::Plugin {
 class CardPluginService;
@@ -54,10 +58,48 @@ namespace LibreSCRS::Darwin::TestSupport {
 
 namespace Agent = ::LibreSCRS::Agent;
 
-// Hermetic fakes: the resolver returns nothing (no plugin), the prompter is
-// never reached on the tested paths, the seams resolve nothing.
+// A plugin that only declares what it serves: enough for the insertion probe
+// to call a card served.
+class ServingPlugin final : public LibreSCRS::Plugin::CardPlugin
+{
+public:
+    ServingPlugin()
+    {
+        setIdentity("serving-stub", "stub", 0);
+    }
+    LibreSCRS::Plugin::CardCapabilities capabilities() const override
+    {
+        return LibreSCRS::Plugin::CardCapabilities::PKI;
+    }
+    std::span<const LibreSCRS::Plugin::Atr> supportedAtrs() const noexcept override
+    {
+        return {};
+    }
+
+protected:
+    LibreSCRS::Plugin::ReadResult doReadCard(LibreSCRS::SmartCard::CardSession& /*session*/,
+                                             GroupCallback /*onGroup*/) const override
+    {
+        return LibreSCRS::Plugin::ReadResult::communicationError(LibreSCRS::Auth::ErrorKeys::genericComm());
+    }
+};
+
+// Hermetic fakes: the resolver serves no card unless a case sets @c serving
+// before the first card is published; the prompter is never reached on the
+// tested paths, the seams resolve nothing.
 struct FakeResolver final : Agent::CapabilityResolver
-{};
+{
+    std::shared_ptr<const LibreSCRS::Plugin::CardPlugin> serving;
+
+    std::vector<std::shared_ptr<const LibreSCRS::Plugin::CardPlugin>>
+    resolveCandidates(std::span<const std::uint8_t> /*atr*/, LibreSCRS::SmartCard::CardSession& /*session*/) override
+    {
+        if (serving) {
+            return {serving};
+        }
+        return {};
+    }
+};
 
 struct NoPrompter final : Agent::Operations::PrompterClientBase
 {

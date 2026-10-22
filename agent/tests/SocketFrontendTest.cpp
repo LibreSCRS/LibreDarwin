@@ -35,6 +35,7 @@
 #include <LibreSCRS/Agent/presence/CapabilityResolver.h>
 #include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialSnapshot
 #include <LibreSCRS/Agent/value/ErrorTaxonomy.h>    // ErrorCode
+#include <LibreSCRS/Auth/ErrorKeys.h>               // genericComm (a refused open)
 #include <LibreSCRS/Plugin/CardPluginService.h>     // the registry a depositor is bound over
 #include <LibreSCRS/SmartCard/CardSession.h>        // detail::makeDetachedCardSession (LIBRESCRS_INTERNAL_BUILD)
 #include <LibreSCRS/Secure/String.h>                // the BlockingPrompter's dummy Ok secrets
@@ -48,6 +49,7 @@
 
 #include <chrono>
 #include <array>
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
@@ -57,10 +59,12 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <thread>
 #include <utility>
+#include <vector>
 
 using namespace LibreSCRS::Darwin;
 using namespace LibreSCRS::Darwin::TestSupport;
@@ -1697,65 +1701,140 @@ const std::array<BenchReader, 3> kBench{{
      "HID Global OMNIKEY 5422 Smartcard Reader [OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00"},
 }};
 
-// Export the bench through the PRODUCTION presence path: onReaderPublished ->
-// onCardPublished -> deferred held-session resolve on the reader's worker ->
-// applyCardResolution -> publishCard, with the detached session factory so no
-// PC/SC daemon is needed. Cards go in the order PresenceModel emits an
-// insertion: the card object, then the reader's HasCard/Card flip. The fake
-// resolver knows no plugin, so each resolve exhausts its retries and publishes
-// the card with no capabilities -- the export still happens, which is what the
-// hold is keyed on. Returns once every card is exported (bounded); a fatal
-// failure here aborts only this helper, so callers wrap it in
-// ASSERT_NO_FATAL_FAILURE.
-void exportBench(Rig& rig)
+// Counts the connections the reader workers open. The first @p failFirst are
+// refused, the way a card another process holds exclusively refuses them. The
+// count is shared-owned, so a worker that outlives the case counts into live
+// memory.
+Agent::Operations::SessionFactory countingSessionFactory(std::shared_ptr<std::atomic<int>> opens, int failFirst = 0)
 {
-    rig.core->operationManager().setSessionFactoryForTest(detachedSessionFactory());
-    for (const auto& b : kBench) {
+    return [opens = std::move(opens), failFirst](const std::string& reader)
+               -> std::expected<std::shared_ptr<LibreSCRS::SmartCard::CardSession>, LibreSCRS::SmartCard::OpenError> {
+        if (opens->fetch_add(1) < failFirst) {
+            return std::unexpected{LibreSCRS::SmartCard::OpenError{
+                LibreSCRS::SmartCard::OpenError::Kind::ReaderUnavailable, LibreSCRS::Auth::ErrorKeys::genericComm(),
+                std::string{"SCARD_E_SHARING_VIOLATION"}}};
+        }
+        return LibreSCRS::SmartCard::detail::makeDetachedCardSession(reader);
+    };
+}
+
+// The cards the transport has exported, read on its loop.
+std::vector<Agent::Wire::CardState> exportedCards(Rig& rig)
+{
+    SocketTransport* trp = rig.transport.get();
+    __block std::vector<Agent::Wire::CardState> cards;
+    dispatch_sync(trp->loopQueue(), ^{
+      cards = trp->currentState().cards;
+    });
+    return cards;
+}
+
+// Export @p readers' cards through the PRODUCTION presence path:
+// onReaderPublished -> onCardPublished -> deferred held-session resolve on the
+// reader's worker -> applyCardResolution -> publishCard, with a detached
+// session factory so no PC/SC daemon is needed. Cards go in the order
+// PresenceModel emits an insertion: the card object, then the reader's
+// HasCard/Card flip. When @p served the rig's resolver finds a plugin for every
+// card; otherwise none, and each card is exported with no capabilities.
+// Returns once every card is exported (bounded); a fatal failure here aborts
+// only this helper, so callers wrap it in ASSERT_NO_FATAL_FAILURE.
+void exportCards(Rig& rig, std::span<const BenchReader> readers, bool served,
+                 Agent::Operations::SessionFactory factory = detachedSessionFactory())
+{
+    if (served) {
+        rig.resolver.serving = std::make_shared<ServingPlugin>();
+    }
+    rig.core->operationManager().setSessionFactoryForTest(std::move(factory));
+    for (const auto& b : readers) {
         Agent::ReaderState r;
         r.id = b.reader;
         r.name = b.name;
         rig.frontend->onReaderPublished(r);
     }
-    for (const auto& b : kBench) {
+    for (const auto& b : readers) {
         Agent::CardState c;
         c.id = b.card;
         c.reader = b.reader;
         rig.frontend->onCardPublished(c);
         rig.frontend->onReaderPropertiesChanged(b.reader, Agent::PropertyDelta{.hasCard = true, .card = b.card});
     }
-    SocketTransport* trp = rig.transport.get();
-    const auto publishedCards = [trp] {
-        __block std::size_t n = 0;
-        dispatch_sync(trp->loopQueue(), ^{
-          n = trp->currentState().cards.size();
-        });
-        return n;
-    };
     const auto start = std::chrono::steady_clock::now();
-    while (publishedCards() < kBench.size() && std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+    while (exportedCards(rig).size() < readers.size() &&
+           std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    ASSERT_EQ(publishedCards(), kBench.size()) << "every card was exported within 5 s";
+    ASSERT_EQ(exportedCards(rig).size(), readers.size()) << "every card was exported within 5 s";
+}
+
+void exportBench(Rig& rig, bool served)
+{
+    exportCards(rig, kBench, served);
 }
 
 } // namespace
 
-// Export of a card on the CONTACT slot of a dual-interface unit asks the
-// reader's worker for a bare power hold, so the same single-chip card's
-// contactless twin stops flapping in and out of the CL slot; a card on the CL
-// slot, or in a single-interface reader, never does. Read back through the
+// Export of a card a plugin serves on the CONTACT slot of a dual-interface
+// unit asks the reader's worker for the power hold, so the same single-chip
+// card's contactless twin stops flapping in and out of the CL slot; a card on
+// the CL slot, or in a single-interface reader, never does. Read back through the
 // operation manager's hold flag -- the thing the worker acts on -- not through
 // a log line. All three workers exist after the export (each card resolved on
 // its own), so a false here is the flag, not an absent worker.
 TEST(SocketFrontend, ExportOfAContactSlotCardHoldsTheReaderAndOtherSlotsDoNot)
 {
     Rig rig;
-    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig, /*served=*/true));
 
     auto& ops = rig.core->operationManager();
     EXPECT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(2))) << "the OMNIKEY contact slot is held on export";
     EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(3))) << "the OMNIKEY CL slot is never held";
     EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(1))) << "a single-interface reader is never held";
+}
+
+// A card no plugin serves is not held, even on the contact slot: the insertion
+// probe has just released it, and a hold would take the reader straight back
+// for a card the agent cannot use. All three workers exist after the export,
+// so a false here is the flag, not an absent worker.
+TEST(SocketFrontend, AnUnservedCardOnTheContactSlotIsNotHeld)
+{
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig, /*served=*/false));
+
+    auto& ops = rig.core->operationManager();
+    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(2))) << "the OMNIKEY contact slot holds an unserved card";
+}
+
+// A card no plugin serves is opened once on insertion. The probe's answer is
+// definitive, so the host does not ask again: each repeat would connect to a
+// card that belongs to someone else, probe it and let it go. The single-
+// interface reader keeps the hold out of the count.
+TEST(SocketFrontend, AnUnservedCardIsOpenedOnceOnInsertion)
+{
+    Rig rig;
+    auto opens = std::make_shared<std::atomic<int>>(0);
+    ASSERT_NO_FATAL_FAILURE(
+        exportCards(rig, std::span{kBench}.first(1), /*served=*/false, countingSessionFactory(opens)));
+
+    const auto cards = exportedCards(rig);
+    ASSERT_EQ(cards.size(), 1U);
+    EXPECT_EQ(cards.front().caps, 0U);
+    EXPECT_EQ(opens->load(), 1) << "an unserved card was opened again after the probe said no plugin serves it";
+}
+
+// A probe that could not open the card says nothing about it, so the host asks
+// again; once an open succeeds the card is exported with what its plugins
+// serve. Two refused opens, then the served one.
+TEST(SocketFrontend, AProbeThatCouldNotOpenTheCardIsRetried)
+{
+    Rig rig;
+    auto opens = std::make_shared<std::atomic<int>>(0);
+    ASSERT_NO_FATAL_FAILURE(
+        exportCards(rig, std::span{kBench}.first(1), /*served=*/true, countingSessionFactory(opens, /*failFirst=*/2)));
+
+    const auto cards = exportedCards(rig);
+    ASSERT_EQ(cards.size(), 1U);
+    EXPECT_EQ(cards.front().caps, kPkiCap) << "exported with what its plugin serves";
+    EXPECT_EQ(opens->load(), 3) << "two refused opens, then the one that served";
 }
 
 // The prompt gate stamps every dialog with the reader holding the card. The
@@ -1767,7 +1846,7 @@ TEST(SocketFrontend, ExportOfAContactSlotCardHoldsTheReaderAndOtherSlotsDoNot)
 TEST(SocketFrontend, ThePromptGateNamesTheReaderHoldingTheCard)
 {
     Rig rig;
-    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig, /*served=*/false));
 
     const auto& gate = rig.core->promptSerializer();
     const auto contact = gate.readerIdentityFor("12");
@@ -1792,7 +1871,7 @@ TEST(SocketFrontend, ThePromptGateNamesTheReaderHoldingTheCard)
 TEST(SocketFrontend, CardRemovalReleasesTheHold)
 {
     Rig rig;
-    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig, /*served=*/true));
     auto& ops = rig.core->operationManager();
     ASSERT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(2)));
 
@@ -1815,7 +1894,7 @@ TEST(SocketFrontend, CardRemovalReleasesTheHold)
 TEST(SocketFrontend, AWithdrawnReaderTakesItsWorkerAndItsHoldWithIt)
 {
     Rig rig;
-    ASSERT_NO_FATAL_FAILURE(exportBench(rig));
+    ASSERT_NO_FATAL_FAILURE(exportBench(rig, /*served=*/true));
     auto& ops = rig.core->operationManager();
     ASSERT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(2)));
 

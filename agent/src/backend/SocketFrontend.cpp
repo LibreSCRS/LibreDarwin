@@ -2217,17 +2217,26 @@ void SocketFrontend::scheduleCardResolve(const A::CardState& card)
     const bool queued = m_core.operationManager().enqueueOnReaderWorker(
         card.reader, readerName, [this, tr, card](Ops::CardSessionHolder& holder) {
             const auto resolution = holder.fullResolution();
+            // An open that failed says nothing about the card, so the loop may
+            // ask again; a resolution, even an empty one, is the answer.
+            const bool opened = resolution.has_value();
+            std::uint32_t caps = 0;
+            auto preAuth = LibreSCRS::Auth::PreReadAuthMethod::None;
             // Card1.CardType (single-candidate case): the SAME held-session
             // candidate list caps/preAuth were just resolved from. Ambiguous
             // (more than one match) or empty (no match) both mean "not yet
             // known" -- stays empty; a real read resolves it authoritatively
             // via the property-update path (SocketTransport::updateCardType).
             std::string cardType;
-            if (resolution.candidates.size() == 1 && resolution.candidates.front()) {
-                cardType = resolution.candidates.front()->pluginId();
+            if (opened) {
+                caps = resolution->capabilities;
+                preAuth = resolution->preReadAuth;
+                if (resolution->candidates.size() == 1 && resolution->candidates.front()) {
+                    cardType = resolution->candidates.front()->pluginId();
+                }
             }
-            tr->post([this, card, caps = resolution.capabilities, preAuth = resolution.preReadAuth, cardType] {
-                applyCardResolution(card, caps, preAuth, cardType);
+            tr->post([this, card, opened, caps, preAuth, cardType] {
+                applyCardResolution(card, opened, caps, preAuth, cardType);
             });
         });
     if (!queued) {
@@ -2241,14 +2250,17 @@ void SocketFrontend::scheduleCardResolve(const A::CardState& card)
     }
 }
 
-void SocketFrontend::applyCardResolution(A::CardState card, std::uint32_t caps,
+void SocketFrontend::applyCardResolution(A::CardState card, bool opened, std::uint32_t caps,
                                          LibreSCRS::Auth::PreReadAuthMethod preAuth, const std::string& cardType)
 {
     const auto it = m_pendingCards.find(card.id.value());
     if (it == m_pendingCards.end()) {
         return; // withdrawn while resolving
     }
-    if (caps == 0 && it->second.attempts < kMaxResolveAttempts) {
+    // Only a card the probe could not open is asked about again. A card no
+    // plugin serves has been answered, and every repeat would connect to a
+    // card that belongs to someone else, probe it and let it go.
+    if (!opened && it->second.attempts < kMaxResolveAttempts) {
         ++it->second.attempts;
         m_transport.postAfter(std::chrono::duration_cast<std::chrono::microseconds>(kResolveRetryDelay), [this, card] {
             if (m_pendingCards.contains(card.id.value())) {
@@ -2263,14 +2275,16 @@ void SocketFrontend::applyCardResolution(A::CardState card, std::uint32_t caps,
     A::CardState refined{card.id, card.reader, caps, preAuth, cardType, card.atrHex};
     m_transport.publishCard(refined);
 
-    // Power hold: a card on the CONTACT slot of a dual-interface unit keeps its
-    // reader powered (a bare second session in the reader's worker, no secret,
-    // no traffic) so the same single-chip card's contactless twin stops flapping
-    // in and out of the CL slot. Classified from the transport's presence
-    // roster, the same lookup the prompt dialog uses; a single-interface reader
-    // is never held. Released by main.cpp's card-removed hook. Mirror of
-    // AgentFrontend::applyCardResolution.
-    if (isContactSlotOfDualInterfaceUnit(m_transport.presenceRoster(), std::to_string(card.id.value()))) {
+    // Power hold: a card a plugin serves on the CONTACT slot of a
+    // dual-interface unit keeps its reader powered -- the reader's one session,
+    // parked with no secrets while no operation uses it -- so the same
+    // single-chip card's contactless twin stops flapping in and out of the CL
+    // slot. A card no plugin serves is not held: the probe has just let it go,
+    // and a hold would take the reader back for a card the agent cannot use.
+    // Classified from the transport's presence roster, the same lookup the
+    // prompt dialog uses; a single-interface reader is never held. Released by
+    // main.cpp's card-removed hook. Mirror of AgentFrontend::applyCardResolution.
+    if (caps != 0 && isContactSlotOfDualInterfaceUnit(m_transport.presenceRoster(), std::to_string(card.id.value()))) {
         m_core.operationManager().setReaderHold(card.reader, true);
         std::string readerName;
         if (const auto rn = m_readerNames.find(card.reader.value()); rn != m_readerNames.end()) {

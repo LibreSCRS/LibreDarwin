@@ -189,13 +189,16 @@ private:
 
     // Presence: the deferred held-session capability resolve (loop thread).
     void scheduleCardResolve(const Agent::CardState& card);
-    // The core's OWN vocabulary, not the wire mirror: this feeds
-    // A::CardState::preReadAuth (never crosses the CBOR wire from here —
-    // SocketTransport::publishCard does that conversion). @p cardType is the
-    // single held-session candidate's pluginId (empty if ambiguous/no match),
-    // resolved alongside caps/preAuth at the same deferred point.
-    void applyCardResolution(Agent::CardState card, std::uint32_t caps, LibreSCRS::Auth::PreReadAuthMethod preAuth,
-                             const std::string& cardType);
+    // @p opened is false when the probe could not open the card: the only
+    // case asked about again, a bounded number of times, before the card is
+    // published with no capabilities. The core's OWN vocabulary, not the wire
+    // mirror: @p preAuth feeds A::CardState::preReadAuth (never crosses the
+    // CBOR wire from here — SocketTransport::publishCard does that
+    // conversion). @p cardType is the single held-session candidate's pluginId
+    // (empty if ambiguous/no match), resolved alongside caps/preAuth at the
+    // same deferred point.
+    void applyCardResolution(Agent::CardState card, bool opened, std::uint32_t caps,
+                             LibreSCRS::Auth::PreReadAuthMethod preAuth, const std::string& cardType);
 
     // A Sign artifact stashed for the grace-window GetSignResult recovery.
     void stashSignArtifact(std::uint64_t opId, const Agent::CallerToken& owner,
