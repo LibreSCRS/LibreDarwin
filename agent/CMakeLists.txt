@@ -87,9 +87,8 @@ target_compile_definitions(librescrs-agent PRIVATE
     LIBREDARWIN_VERSION_STR="${PROJECT_VERSION}")
 
 # Bundle-ready: the LibreMac host stages this binary at
-# Contents/MacOS/librescrs-agent with LM dylibs + the pkcs11 module at
-# Contents/Frameworks/. @executable_path/../Frameworks covers
-# that layout; the bare @executable_path entry covers the dev-harness libexec
+# Contents/MacOS/librescrs-agent with LM dylibs at Contents/Frameworks/.
+# @executable_path/../Frameworks covers that layout; the bare @executable_path entry covers the dev-harness libexec
 # install (co-located dylibs, none today, kept for symmetry with the prompter).
 set_target_properties(librescrs-agent PROPERTIES
     INSTALL_RPATH "@executable_path;@executable_path/../Frameworks"

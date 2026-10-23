@@ -52,7 +52,7 @@ TEST(ProcessHardening, ChildKeepsOnlyTheNamedEnvironment)
     if (child == 0) {
         ::setenv("HOME", "/kept/home", 1);
         ::setenv("TZ", "UTC", 1);
-        ::setenv("LIBRESCRS_PKCS11_MODULE", "/tmp/foreign.dylib", 1);
+        ::setenv("LIBRESCRS_CERTIFICATES_DIR", "/tmp/foreign", 1);
         ::setenv("OPENSC_CONF", "/tmp/foreign.conf", 1);
         ::setenv("OPENSSL_MODULES", "/tmp/foreign", 1);
         ::setenv("SSL_CERT_DIR", "/tmp/foreign", 1);
@@ -68,7 +68,7 @@ TEST(ProcessHardening, ChildKeepsOnlyTheNamedEnvironment)
         LibreSCRS::Darwin::restrictEnvironment(LibreSCRS::Darwin::kAgentEnvironment);
 
         for (const char* gone :
-             {"LIBRESCRS_PKCS11_MODULE", "OPENSC_CONF", "OPENSSL_MODULES", "SSL_CERT_DIR", "HOMEX"}) {
+             {"LIBRESCRS_CERTIFICATES_DIR", "OPENSC_CONF", "OPENSSL_MODULES", "SSL_CERT_DIR", "HOMEX"}) {
             if (::getenv(gone) != nullptr) {
                 ::_exit(1); // a variable nobody named survived
             }

@@ -66,7 +66,7 @@ jobs:
         # remains is recorded in ci/env-readers.txt with its reason, and a new
         # one is red until it is. This reads THIS repository's sources only:
         # the LibreMiddleware code linked into the agent process reads variables
-        # of its own (LIBRESCRS_PKCS11_MODULE, LIBRESCRS_CERTIFICATES_DIR and
+        # of its own (LIBRESCRS_CERTIFICATES_DIR, LIBRESCRS_DSS_JAR and
         # others), and a green step says nothing about those. Its self-test runs
         # with the others below.
         run: ./ci/scripts/check-no-env-handles.sh

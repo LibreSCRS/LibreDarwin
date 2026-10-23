@@ -28,10 +28,10 @@ bool hardenSecretProcess() noexcept;
 
 // Removes every environment variable not named in `keep`. `launchctl setenv`
 // reaches every job in the user's launchd, and the code linked into the agent
-// reads variables that name a PKCS#11 module, an OpenSC or OpenSSL
-// configuration, a provider directory or trust anchors -- each a way to put
-// someone else's code or roots into the process that receives the PIN. Keeping
-// a list of what is needed closes the ones nobody has listed yet.
+// reads variables that name an OpenSC or OpenSSL configuration, a provider
+// directory or trust anchors -- each a way to put someone else's code or roots
+// into the process that receives the PIN. Keeping a list of what is needed
+// closes the ones nobody has listed yet.
 //
 // Call it first in main(), before anything reads the environment. It cannot
 // undo what was read before main(): the loader's DYLD_* (refused by the

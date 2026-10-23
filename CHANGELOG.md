@@ -31,8 +31,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
   into the process that holds card secrets, is now a `--plugin-dir` argument
   (`LIBRESCRS_PLUGIN_DIR` is gone); `packaging/install-dev.sh` passes it.
 - **The agent keeps only `HOME`, `TMPDIR` and `TZ` from its environment**, so
-  `launchctl setenv` can no longer name a PKCS#11 module, trust anchors, an
-  OpenSC or OpenSSL configuration or a provider directory for it.
+  `launchctl setenv` can no longer name trust anchors, an OpenSC or OpenSSL
+  configuration or a provider directory for it.
   LibreMiddleware's debug variables (`LIBRESCRS_SIGN_TRACE`, `PKCS11_DEBUG`,
   `LIBRESCRS_OPENSC_DEBUG`, `LIBRESCRS_PROBE_TRACE`, `LIBRESCRS_PCSC_TRACE`)
   no longer reach the agent either.
@@ -76,6 +76,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **The hardware signing smoke test names no PKCS#11 module.** The agent signs
+  through the card's plugin on the session it already holds, so the test no
+  longer derives `LIBRESCRS_PKCS11_MODULE` from the plugin directory, and the
+  comments that listed that variable among the ones LibreMiddleware reads are
+  gone with it: LibreMiddleware no longer reads it.
 - The credential prompt (PIN, CAN or MRZ) names a raw card operation as such
   ("Cryptographic token operation", "Key agreement with the card key") instead
   of showing its category token as a document name.
