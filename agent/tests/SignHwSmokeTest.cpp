@@ -21,6 +21,7 @@
 //
 // The agent signs through the card's plugin on the session it already holds,
 // so no PKCS#11 module is named or loaded.
+#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Agent/wire/Cbor.h>
@@ -278,6 +279,14 @@ std::optional<std::string> waitForCard(int client)
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
     }
     return std::nullopt;
+}
+
+// Runs without hardware: the binary is signed with the smart-card entitlement
+// after linking (agent/tests/CMakeLists.txt), or CryptoTokenKit shows it no
+// reader and the gate below would skip as if no card were present.
+TEST(SignHwSmoke, BinaryCarriesTheSmartcardEntitlement)
+{
+    EXPECT_TRUE(selfHasSmartcardEntitlement());
 }
 
 TEST(SignHwSmoke, PresenceReadAndSign)

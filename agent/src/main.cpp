@@ -125,6 +125,14 @@ int main(int argc, char** argv)
         Agent::log::error("signature does not match this build (team or App Group); refusing to start");
         return 4;
     }
+    // CryptoTokenKit shows a process without this entitlement no reader and
+    // opens it no card, so the agent would start and never see one. Exit 5 is
+    // this refusal and nothing else.
+    if (!Darwin::selfHasSmartcardEntitlement()) {
+        Agent::log::error("not signed with com.apple.security.smartcard: cards and reader events are unavailable; "
+                          "refusing to start");
+        return 5;
+    }
 
     const auto arguments = parseArguments(std::span<char* const>(argv, static_cast<std::size_t>(argc)));
     if (!arguments) {

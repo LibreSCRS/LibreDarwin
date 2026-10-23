@@ -37,6 +37,19 @@ endforeach()
 # gtest's failed list instead, so the pattern misses and the failure stands.
 set_tests_properties(SignHwSmokeTest PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SKIPPED \\] [^ \n]+\n*$")
 
+# CryptoTokenKit shows a process without com.apple.security.smartcard no reader
+# and opens it no card. The binaries that build a real MonitorService or call the
+# real CardSession::open (SocketFrontendTest's sign flows open "Test Reader") are
+# signed ad hoc with the entitlement after every link, so they see what the
+# agent sees and the hardware smoke does not skip as if no card were present.
+# The rest keep the linker's signature, and PeerCodeSigningTest relies on that.
+foreach(card_test SignHwSmokeTest SocketFrontendTest)
+    add_custom_command(TARGET ${card_test} POST_BUILD
+        COMMAND codesign --force --sign - --entitlements ${CMAKE_CURRENT_SOURCE_DIR}/smartcard-entitlement.plist
+                $<TARGET_FILE:${card_test}>
+        VERBATIM)
+endforeach()
+
 # ReadCertificatesOperationTest drives the agent's own operation, reached through
 # LibreAgent::Core's public headers like every other consumer (this host carried
 # a copy of it until the core exported one). It builds a session via the

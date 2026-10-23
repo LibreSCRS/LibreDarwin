@@ -76,7 +76,8 @@ die() { echo "error: $*" >&2; exit 1; }
 #
 # Ad-hoc (re-)signs a dev-built binary with the signing identifier + the
 # com.apple.security.application-groups entitlement its peer checks
-# (PeerPolicy.h on the C++ side; the LibreMac Swift client on the other).
+# (PeerPolicy.h on the C++ side; the LibreMac Swift client on the other), and,
+# for the agent alone, com.apple.security.smartcard.
 # `codesign --force` replaces whatever signature is already there -- the
 # linker's ad-hoc one after a fresh build, or our own from a previous run --
 # so calling this again on the same binary is a no-op in effect: idempotent.
@@ -113,6 +114,15 @@ sign_dev_binary() {
     # calls) -- safe to claim EXIT here and hand it back below. If that ever
     # changes, save/restore the incoming trap instead of clearing it.
     trap 'rm -f "$ents"' EXIT
+    # Only the agent opens cards: without com.apple.security.smartcard
+    # CryptoTokenKit shows it no reader, and it refuses to start (exit 5). The
+    # prompter never touches a card, so it does not get the key.
+    local smartcard=""
+    if [ "$identifier" = "$LABEL" ]; then
+        smartcard="
+    <key>com.apple.security.smartcard</key>
+    <true/>"
+    fi
     cat > "$ents" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -121,14 +131,14 @@ sign_dev_binary() {
     <key>com.apple.security.application-groups</key>
     <array>
         <string>$APP_GROUP</string>
-    </array>
+    </array>$smartcard
 </dict>
 </plist>
 PLIST
     codesign --force -s - --identifier "$identifier" --entitlements "$ents" "$bin"
     rm -f "$ents"
     trap - EXIT
-    echo "signed (ad-hoc): $bin identifier=$identifier group=$APP_GROUP"
+    echo "signed (ad-hoc): $bin identifier=$identifier group=$APP_GROUP${smartcard:+ smartcard}"
 }
 
 ensure_container() {

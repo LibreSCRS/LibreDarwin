@@ -256,4 +256,15 @@ bool selfMatchesBuild(std::string_view selfSigningId)
     return signatureMatchesBuild(drValid, appGroup(), appGroupsOf(self.ref));
 }
 
+bool selfHasSmartcardEntitlement()
+{
+    CfRef<SecTaskRef> self(SecTaskCreateFromSelf(nullptr));
+    if (self.ref == nullptr) {
+        return false;
+    }
+    CfRef<CFTypeRef> value(SecTaskCopyValueForEntitlement(self.ref, CFSTR("com.apple.security.smartcard"), nullptr));
+    return value.ref != nullptr && CFGetTypeID(value.ref) == CFBooleanGetTypeID() &&
+           CFBooleanGetValue(static_cast<CFBooleanRef>(value.ref));
+}
+
 } // namespace LibreSCRS::Darwin

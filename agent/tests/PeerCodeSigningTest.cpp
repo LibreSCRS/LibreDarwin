@@ -180,6 +180,13 @@ TEST(SignatureMatchesBuild, UnentitledTestBinaryDoesNotMatch)
     EXPECT_FALSE(selfMatchesBuild(kAgentSigningId));
 }
 
+TEST(PeerCodeSigning, UnsignedTestBinaryHasNoSmartcardEntitlement)
+{
+    // This binary keeps the linker's signature, which carries no entitlement;
+    // the agent's start-up check must read that as a refusal (exit 5).
+    EXPECT_FALSE(selfHasSmartcardEntitlement());
+}
+
 TEST(PeerCodeSigning, TheAgentIdentityIsTheAgentsSigningIdInTheBuildsGroup)
 {
     // The PKCS#11 module and the prompter hold the agent to this; restated

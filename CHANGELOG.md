@@ -45,6 +45,13 @@ versioning follows [Semantic Versioning](https://semver.org/).
   test that expected 2 from a bogus argument. The check runs before the
   arguments are read, so an unsigned build-tree agent now exits 4; sign it
   with `packaging/install-dev.sh --sign-only` to run it by hand.
+- **The agent refuses to start, with exit code 5, when its signature lacks
+  `com.apple.security.smartcard`.** CryptoTokenKit shows a process without it
+  no reader and opens it no card, so such an agent started, served its socket
+  and never saw a card. The check runs right after the one that exits 4, in
+  development builds too: `packaging/install-dev.sh` now adds the entitlement
+  when it signs the agent (never the prompter, which opens no card), and the
+  tests that reach a real card session are signed with it after every link.
 - Without a Developer ID signature the agent and prompter cannot verify who
   connects to them beyond same-user ownership of the socket; a process running
   as your user can raise the credential window. Developer-ID builds verify the

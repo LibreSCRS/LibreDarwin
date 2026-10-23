@@ -100,4 +100,9 @@ inline constexpr std::string_view kPrompterSigningId = "org.librescrs.prompter";
 // container its clients never look in.
 [[nodiscard]] bool selfMatchesBuild(std::string_view selfSigningId);
 
+// Does THIS process's signature carry com.apple.security.smartcard = true?
+// Without it CryptoTokenKit shows the process no reader and opens no card, so an
+// agent signed without it would start, serve its socket and never see a card.
+[[nodiscard]] bool selfHasSmartcardEntitlement();
+
 } // namespace LibreSCRS::Darwin
