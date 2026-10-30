@@ -146,16 +146,26 @@ jobs:
           cmake --install build
 
       - name: Configure LibreDarwin
+        # The agent core links OpenSSL itself (find_package). Left alone it finds
+        # Homebrew's, which is not what ships and moves with the runner image:
+        # openssl@4 there failed the build on an ASN1_STRING made opaque. The
+        # release links LibreMiddleware's static thirdparty OpenSSL; so does this.
         working-directory: LibreDarwin
         env:
           LIBREAGENT_SRC: ${{ steps.deps.outputs.libreagent-path }}
         run: |
+          shopt -s nullglob
+          ossl=("$GITHUB_WORKSPACE"/LibreMiddleware/thirdparty/openssl-*/macosx)
+          [ "${#ossl[@]}" -eq 1 ] || { echo "::error::want one thirdparty/openssl-*/macosx in LibreMiddleware, found ${#ossl[@]}"; exit 1; }
           cmake -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_PREFIX_PATH="$LM_PREFIX" \
+            -DOPENSSL_ROOT_DIR="${ossl[0]}" \
+            -DOPENSSL_USE_STATIC_LIBS=TRUE \
             -DLIBREDARWIN_WERROR=ON \
             -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT="$LIBREAGENT_SRC"
+          grep -E '^OPENSSL_CRYPTO_LIBRARY' build/CMakeCache.txt
 
       - name: Check -fexperimental-library is uniform
         # Runs BEFORE the build, because the point is to catch a translation unit
