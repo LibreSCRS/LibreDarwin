@@ -115,7 +115,7 @@ jobs:
         # line as LM's own release.yml macOS job). bash: actions/checkout-deps
         # and the shared gates need bash 4 or later, and macOS ships 3.2.
         run: |
-          brew install ninja autoconf automake libtool pkg-config bash
+          brew install ninja googletest autoconf automake libtool pkg-config bash
           python3 -m pip install --break-system-packages --user jsonschema
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
