@@ -206,7 +206,7 @@ NSString* informativeText(const std::string& description, const std::string& req
     }
     if (!requester.empty()) {
         [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_requested_by", "Requested by:"),
-                           requesterName(requester)];
+                           LibreSCRS::Darwin::requesterName(requester)];
     }
     // A batch sign carries the UNTRUSTED per-document names in `artifacts`: list
     // them plainly BELOW the trusted requester line (the formatter neutralizes
