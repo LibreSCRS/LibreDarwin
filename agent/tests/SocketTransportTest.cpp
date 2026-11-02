@@ -170,9 +170,25 @@ TEST(SocketTransport, AFullDescriptorTablePausesAcceptingInsteadOfSpinning)
 
     const auto helloBytes =
         Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
-    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
-    EXPECT_TRUE(sink.waitFor(1, std::chrono::seconds(2))) << "the queued client was never served";
+    // Darwin's accept() takes the connection off the queue before it fails
+    // with EMFILE, so the client that arrived while the table was full is
+    // gone; what must hold there is that accepting resumes for the next one.
+    int served = client;
+    if (!Agent::Wire::sendFrame(client, helloBytes).has_value()) {
+#ifdef __APPLE__
+        served = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        ASSERT_GE(served, 0);
+        ASSERT_EQ(::connect(served, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+        ASSERT_TRUE(Agent::Wire::sendFrame(served, helloBytes).has_value());
+#else
+        FAIL() << "the queued client's connection was dropped";
+#endif
+    }
+    EXPECT_TRUE(sink.waitFor(1, std::chrono::seconds(2))) << "no client was served after the table emptied";
 
+    if (served != client) {
+        ::close(served);
+    }
     ::close(client);
     tr.reset();
     std::filesystem::remove(path);

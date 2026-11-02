@@ -1428,8 +1428,9 @@ TEST(SocketFrontendRequester, IsTheSigningIdentifierAndNothingElse)
 }
 
 // End to end: the trust dialog of a request from this test binary names the
-// binary. It is signed after linking (agent/tests/CMakeLists.txt) with
-// codesign's default identifier, the file name.
+// binary. It is signed after linking (agent/tests/CMakeLists.txt) with its
+// target name as the identifier: left to itself, an ad hoc signature over the
+// linker's carries the name plus a hash.
 TEST(SocketFrontend, TrustDialogNamesTheRequesterBySigningIdentifier)
 {
     Rig rig;

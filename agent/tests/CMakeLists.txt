@@ -64,8 +64,8 @@ set_tests_properties(SignHwSmokeTest PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SK
 # The rest keep the linker's signature.
 foreach(card_test SignHwSmokeTest SocketFrontendTest)
     add_custom_command(TARGET ${card_test} POST_BUILD
-        COMMAND codesign --force --sign - --entitlements ${CMAKE_CURRENT_SOURCE_DIR}/smartcard-entitlement.plist
-                $<TARGET_FILE:${card_test}>
+        COMMAND codesign --force --sign - --identifier ${card_test}
+                --entitlements ${CMAKE_CURRENT_SOURCE_DIR}/smartcard-entitlement.plist $<TARGET_FILE:${card_test}>
         VERBATIM)
 endforeach()
 
