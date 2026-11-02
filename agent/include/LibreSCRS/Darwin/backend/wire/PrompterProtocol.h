@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
+#include <LibreSCRS/Agent/backend/PrompterWire.h>    // PromptReplyStatus, kMaxSecretBytes, the kind and status words
+#include <LibreSCRS/Agent/operations/PromptPolicy.h> // PromptKind
 #include <LibreSCRS/Agent/wire/Cbor.h>
 
 #include <cstddef>
@@ -41,22 +43,15 @@ using LibreSCRS::Agent::Wire::CborValue;
 //        helper speaks 2 without it.
 inline constexpr std::uint32_t kPrompterProtocolVersion = 2;
 
-enum class PromptKind : std::uint8_t { Pin, Can, Mrz };
-
-// Prompter1 status vocabulary. "unauthorized" is the fail-closed rejection of a
-// non-agent caller (a same-uid process trying to drive the prompter directly).
-// APPEND new values, never insert: the numeric values are compiled into every
-// consumer of this header.
-enum class PromptReplyStatus : std::uint8_t {
-    Ok,
-    Cancelled,
-    Error,
-    Unauthorized,
-    // The prompter closed the window because the holder's entry time ran out.
-    // Distinct from Cancelled deliberately: telling someone they cancelled what
-    // the clock took from them is the confusion this word removes.
-    Timeout,
-};
+// The secret kinds, the reply statuses and their words are the agent
+// library's prompter vocabulary, the one every host and prompter speaks; this
+// protocol carries them and adds none. A RequestSecret asks for one secret, so
+// its kind is Pin, Can or Mrz -- ChangePin travels only as RequestSecrets'
+// kind word, and a RequestSecret naming it is refused. "unauthorized" is the
+// fail-closed rejection of a non-agent caller; "ok_mrz" answers an MRZ
+// alternative this agent never offers, so it reads as an error here.
+using PromptKind = LibreSCRS::Agent::Operations::PromptKind;
+using LibreSCRS::PrompterWire::PromptReplyStatus;
 
 enum class PrompterParseError : std::uint8_t {
     NotDecodable,
@@ -72,34 +67,23 @@ enum class PrompterParseError : std::uint8_t {
     UnsupportedVersion,
 };
 
-// Upper bound for an inline prompter secret (PIN/CAN/MRZ are tens of bytes);
-// mirrors the Linux SecretMemfdReader::kMaxSecretBytes bound. parsePromptReply
-// rejects anything larger fail-closed.
-inline constexpr std::size_t kMaxSecretBytes = 8 * 1024;
+// Upper bound for an inline prompter secret (PIN/CAN/MRZ are tens of bytes),
+// the agent library's bound for every host. parsePromptReply rejects anything
+// larger fail-closed.
+using LibreSCRS::PrompterWire::kMaxSecretBytes;
 
-// The closed vocabulary of PromptRequest::readerInterface, mirroring
-// LibreLinux's PrompterWire kReaderInterface* tokens word for word so the two
-// hosts speak one vocabulary. A CLOSED set and never prose: LibreAgent has no
-// localisation, so any English wording it composed would arrive already
-// written and no prompter could say it in the holder's language. The agent
-// keeps the judgement (which slot is which); the prompter keeps the words.
+// Every member of the messages below carries an explicit default, the empty
+// value the wire spells as absence, so a designated initializer names only
+// what it sets without -Wmissing-designated-field-initializers.
 //
-// "unknown" never reaches the wire -- toCbor spells it as ABSENCE (below), and
-// an unrecognised token a future agent sends is read by the prompter as
-// unknown. The token exists so a host's switch over the core's ReaderInterface
-// enum can stay exhaustive with no `default:`.
-inline constexpr const char* kReaderInterfaceContact = "contact";
-inline constexpr const char* kReaderInterfaceContactless = "contactless";
-inline constexpr const char* kReaderInterfaceUnknown = "unknown";
-
 // RequestSecret (agent -> prompter): ask the user for one secret value.
 struct PromptRequest
 {
     PromptKind kind{PromptKind::Pin};
-    std::string title;
-    std::string description;
-    std::string requester; // human-readable client identity (the named requester)
-    std::string artifact;  // filename / hash being acted on
+    std::string title{};
+    std::string description{};
+    std::string requester{}; // human-readable client identity (the named requester)
+    std::string artifact{};  // filename / hash being acted on
     std::uint32_t minLength{0};
     std::uint32_t maxLength{0};
     // The UNTRUSTED per-document display names of a Card1.SignBatch consent
@@ -108,7 +92,7 @@ struct PromptRequest
     // request ("signature-batch" for a batch). Empty for every prompt that is
     // not a batch sign. Mirrors LibreLinux's Prompter1 `artifacts` (as)
     // RequestSecret option.
-    std::vector<std::string> artifacts;
+    std::vector<std::string> artifacts{};
     // Retry context for a re-prompt after the card rejected the CAN/MRZ
     // collected last time for the SAME card (CredentialCache::
     // markCredentialWrong / applyRetryContext on the agent core): `attempt`
@@ -118,10 +102,10 @@ struct PromptRequest
     // LibreLinux's Prompter1 `attempt`/`last_error` RequestSecret options;
     // out of scope for RequestSecrets (change_pin is never a CAN/MRZ retry).
     std::uint32_t attempt{0};
-    std::string lastError;
+    std::string lastError{};
     // The prompt this request raises, as the agent addresses it. The prompt
     // gate is keyed by card, so a later dismissal has to name one window.
-    std::string promptId;
+    std::string promptId{};
     // The window counts the first down and answers Timeout; the second is the
     // budget of the alternative entry (MRZ under a CAN prompt). Both are
     // DURATIONS in milliseconds from the moment the window is SHOWN -- not
@@ -144,8 +128,14 @@ struct PromptRequest
     // (PromptOptions::reader): flattening is the host's marshalling concern.
     //
     // `readerModel` is the shortened model, e.g. "OMNIKEY 5422", with no
-    // interface wording composed into it. `readerInterface` is one of the
-    // kReaderInterface* tokens above, or empty. `readerFull` is the literal
+    // interface wording composed into it. `readerInterface` is a token of the
+    // agent's closed reader-interface vocabulary
+    // (LibreSCRS::Agent::Wire::readerInterfaceToken), the same words the
+    // socket's reader-state carries, or empty. A CLOSED set and never prose:
+    // the agent has no localisation, so it keeps the judgement (which slot is
+    // which) and the prompter keeps the words. "unknown" never reaches this
+    // wire -- toCbor spells it as ABSENCE -- and a token a future agent sends
+    // that this prompter does not know reads as unknown. `readerFull` is the literal
     // PC/SC name -- long enough to push the entry field off a small screen, so
     // it belongs behind a details affordance rather than in the chrome.
     //
@@ -154,9 +144,9 @@ struct PromptRequest
     // NOT a protocol-version bump: nothing the agent DEPENDS ON changed shape
     // -- a helper that ignores these keys shows a dialog without a reader line,
     // which is exactly what every helper did before this.
-    std::string readerModel;
-    std::string readerInterface;
-    std::string readerFull;
+    std::string readerModel{};
+    std::string readerInterface{};
+    std::string readerFull{};
     bool operator==(const PromptRequest&) const = default;
 };
 
@@ -165,7 +155,7 @@ struct PromptRequest
 // knows no id can send, and what the server treats as "the current modal".
 struct PromptCancel
 {
-    std::string promptId;
+    std::string promptId{};
     bool operator==(const PromptCancel&) const = default;
 };
 
@@ -177,18 +167,18 @@ struct PromptCancel
 // confirm value never crosses the wire.
 struct RequestSecrets
 {
-    std::string kind; // "change_pin"
-    std::string title;
-    std::string description;
-    std::string requester; // human-readable client identity (the named requester)
-    std::string artifact;  // display label for what the change applies to
+    std::string kind{}; // PrompterWire::kKindChangePin
+    std::string title{};
+    std::string description{};
+    std::string requester{}; // human-readable client identity (the named requester)
+    std::string artifact{};  // display label for what the change applies to
     std::uint32_t primaryMinLength{0};
     std::uint32_t primaryMaxLength{0};
     std::uint32_t newMinLength{0};
     std::uint32_t newMaxLength{0};
     // Addressed like the single-secret prompt: a change modal is a window the
     // agent may have to dismiss by name.
-    std::string promptId;
+    std::string promptId{};
     // How long the holder has, exactly as PromptRequest::deadlineMs: a
     // DURATION in milliseconds from the moment the window is shown, answered
     // with Timeout when it runs out. 0 means "no deadline set" and is spelled
@@ -208,18 +198,18 @@ struct RequestSecrets
 // verified.
 struct ConfirmAction
 {
-    std::string kind; // "configure_trust"
-    std::string title;
-    std::string description;
+    std::string kind{}; // "configure_trust"
+    std::string title{};
+    std::string description{};
     // The catalogue id of `description`, travelling BESIDE the sentence rather
     // than instead of it: the agent has no catalogue of its own, so it writes
     // the English sentence it always wrote and names it, and the prompter --
     // which runs inside the host application's bundle -- looks the name up in
     // that bundle's catalogue and falls back to the sentence when it is not
     // there. Empty means "no key": render `description` as it arrived.
-    std::string descriptionKey;
-    std::string requester;
-    std::string artifact; // the change being asked for
+    std::string descriptionKey{};
+    std::string requester{};
+    std::string artifact{}; // the change being asked for
     bool operator==(const ConfirmAction&) const = default;
 };
 
@@ -239,8 +229,8 @@ using PrompterRequest = std::variant<PromptRequest, PromptCancel, RequestSecrets
 struct PromptReply
 {
     PromptReplyStatus status{PromptReplyStatus::Error};
-    std::vector<std::uint8_t> secret;
-    std::string userMessage;
+    std::vector<std::uint8_t> secret{};
+    std::string userMessage{};
     // The protocol the ANSWERING helper speaks, read off the "v" key. Empty
     // when the reply carried none, which names a helper older than that key
     // rather than guessing a version for it. The explicit default also keeps
@@ -256,9 +246,9 @@ struct PromptReply
 struct MultiPromptReply
 {
     PromptReplyStatus status{PromptReplyStatus::Error};
-    std::vector<std::uint8_t> primary;   // current credential; present iff Ok
-    std::vector<std::uint8_t> secondary; // new credential; present iff Ok
-    std::string userMessage;
+    std::vector<std::uint8_t> primary{};   // current credential; present iff Ok
+    std::vector<std::uint8_t> secondary{}; // new credential; present iff Ok
+    std::string userMessage{};
     // The protocol the answering helper speaks; read the same way, and for the
     // same reason, as PromptReply::protocolVersion above.
     std::optional<std::uint32_t> protocolVersion = std::nullopt;
@@ -271,7 +261,7 @@ struct MultiPromptReply
 struct ConfirmReply
 {
     PromptReplyStatus status{PromptReplyStatus::Error};
-    std::string userMessage;
+    std::string userMessage{};
     // The protocol the answering helper speaks; read the same way, and for the
     // same reason, as PromptReply::protocolVersion above.
     std::optional<std::uint32_t> protocolVersion = std::nullopt;

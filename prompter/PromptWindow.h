@@ -24,6 +24,10 @@ namespace LibreSCRS::Darwin {
 // device-owner confirmation in ConfirmAuthorizer.mm is the second dialog and
 // must resolve its sentence the same way.
 NSString* localized(const char* key, const std::string& fallback);
+// The requester as the dialogs show it: the identifier the agent sent, inside
+// the catalogue's wording when it is the Keychain bridge (RequesterText.h).
+// Both dialogs name the requester, so both go through here.
+NSString* requesterName(const std::string& requester);
 #endif
 
 // The AppKit secure-credential surface: ONE non-modal floating panel per

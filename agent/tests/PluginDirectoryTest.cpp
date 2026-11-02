@@ -11,7 +11,7 @@
 // source won AND why the earlier ones lost, and loading nothing is a warning.
 #include <LibreSCRS/Darwin/backend/PluginDirectory.h>
 
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 #include <LibreSCRS/Plugin/CardPluginService.h>
 
 #include <gtest/gtest.h>
@@ -35,7 +35,7 @@ using LibreSCRS::Darwin::resolvePluginDir;
 
 using Source = PluginDirCandidate::Source;
 using Verdict = PluginDirCandidate::Verdict;
-using Level = LibreSCRS::Agent::log::Level;
+using Level = LibreSCRS::log::Level;
 using LoadOutcome = LibreSCRS::Plugin::LoadOutcome;
 
 // A directory that removes itself, so a case can hand the cascade a real
@@ -203,8 +203,12 @@ TEST(PluginDirectoryReport, LoadedPluginsAreInformationalAndCounted)
     const auto resolution = resolvePluginDir(
         PluginDirInputs{.override = "/opt/plugins", .executable = std::nullopt, .compiledDefault = "/unused"});
     const std::vector<LoadOutcome> report{
-        LoadOutcome{.soPath = "/opt/plugins/a.dylib", .pluginId = "a", .status = LoadOutcome::Status::Loaded},
-        LoadOutcome{.soPath = "/opt/plugins/b.dylib", .pluginId = "b", .status = LoadOutcome::Status::Loaded}};
+        LoadOutcome{
+            .soPath = "/opt/plugins/a.dylib", .pluginId = "a", .status = LoadOutcome::Status::Loaded, .diagnostic = {}},
+        LoadOutcome{.soPath = "/opt/plugins/b.dylib",
+                    .pluginId = "b",
+                    .status = LoadOutcome::Status::Loaded,
+                    .diagnostic = {}}};
 
     const auto lines = pluginLoadReportLines(resolution, 2, report);
 
@@ -233,7 +237,7 @@ TEST(PluginDirectoryReport, AnEmptyDirectoryReachesTheLogAsAWarning)
 {
     TempDir empty("empty");
     std::vector<std::pair<Level, std::string>> captured;
-    LibreSCRS::Agent::log::init(
+    LibreSCRS::log::init(
         [&captured](Level level, std::string_view line) { captured.emplace_back(level, std::string(line)); });
 
     const auto resolution = resolvePluginDir(
@@ -241,7 +245,7 @@ TEST(PluginDirectoryReport, AnEmptyDirectoryReachesTheLogAsAWarning)
     const LibreSCRS::Plugin::CardPluginService service(resolution.dir);
     reportPluginLoad(resolution, service);
 
-    LibreSCRS::Agent::log::resetForTest();
+    LibreSCRS::log::resetForTest();
 
     ASSERT_FALSE(captured.empty()) << "resolving a plugin directory must not be silent";
     EXPECT_TRUE(hasLevel(captured, Level::Warn));
@@ -256,7 +260,7 @@ TEST(PluginDirectoryReport, AnUnloadableFileInTheDirectoryReachesTheLog)
         bogus << "this is not a mach-o";
     }
     std::vector<std::pair<Level, std::string>> captured;
-    LibreSCRS::Agent::log::init(
+    LibreSCRS::log::init(
         [&captured](Level level, std::string_view line) { captured.emplace_back(level, std::string(line)); });
 
     const auto resolution = resolvePluginDir(
@@ -264,7 +268,7 @@ TEST(PluginDirectoryReport, AnUnloadableFileInTheDirectoryReachesTheLog)
     const LibreSCRS::Plugin::CardPluginService service(resolution.dir);
     reportPluginLoad(resolution, service);
 
-    LibreSCRS::Agent::log::resetForTest();
+    LibreSCRS::log::resetForTest();
 
     EXPECT_NE(joined(captured).find("not-a-plugin.dylib"), std::string::npos)
         << "a file that failed to load has to be named:\n"

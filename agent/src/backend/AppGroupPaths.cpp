@@ -5,7 +5,8 @@
 // (sandbox-bypass) home directory and the group container derived from it.
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
 
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h> // appGroup
+#include <LibreSCRS/Agent/wire/SocketLocation.h>         // kAgentSocketName
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h> // appGroup
 
 #include <pwd.h>
 #include <unistd.h>
@@ -25,12 +26,12 @@ std::filesystem::path realHomeDir()
 
 std::filesystem::path appGroupContainerDir()
 {
-    return realHomeDir() / "Library" / "Group Containers" / appGroup();
+    return realHomeDir() / "Library" / "Group Containers" / Agent::Wire::Darwin::appGroup();
 }
 
 std::filesystem::path agentSocketPath()
 {
-    return appGroupContainerDir() / "agent.sock";
+    return appGroupContainerDir() / Agent::Wire::kAgentSocketName;
 }
 
 } // namespace LibreSCRS::Darwin

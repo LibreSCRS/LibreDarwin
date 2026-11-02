@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# Every action in the workflows is pinned by commit. Dependabot proposes the
-# moves -- including LibreSCRS/ci, whose commit must stay the same in every
-# `uses:` line (the shared check-workflows gate holds that).
+# Every third-party action in the workflows is pinned by commit. Dependabot
+# proposes the moves -- one grouped pull request a week -- so a pin is reviewed
+# rather than forgotten. LibreSCRS/ci is pinned the same way but moved
+# deliberately: every `uses:` line at one commit (the shared check-workflows
+# gate holds that), together with what its gates expect of this repository.
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -12,3 +14,5 @@ updates:
     groups:
       actions:
         patterns: ['*']
+    ignore:
+      - dependency-name: 'LibreSCRS/ci*'

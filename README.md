@@ -29,7 +29,7 @@ a thin client of this agent.
   | `Authorizer` | `SecCodeAuthorizer` — peer `audit_token` → `SecTask` signing identifier + App-Group entitlement allow-list, fail-closed on unidentifiable peers |
   | `Operations::PrompterClientBase` | `MacPrompterClient` — forwards to the agent-owned credential window |
   | `Operations::OperationChannel` | `SocketOperationChannel` — per-op progress/result over the socket (inline results, no memfd) |
-  | `log::LogSink` | `OsLogSink` — `os_log` sink injected via `log::init` |
+  | `LibreSCRS::log::LogSink` (LibreMiddleware's facade, which the agent core logs through too) | `OsLogSink` — `os_log` sink injected via `LibreSCRS::log::init` |
 - **`prompter/`** — the agent-owned secure credential window (PIN / CAN / MRZ),
   a separate helper the daemon drives.
 - **`pkcs11-module/`** — `librescrs-pkcs11-agent.dylib`, the card-less,
@@ -75,6 +75,8 @@ are applied at the `LibreMac` packaging stage, not in this repo.
 
 Requirements: macOS 15+, Xcode 16+, CMake ≥ 3.28, a C++23 AppleClang.
 LibreMiddleware 5.0 installed (`find_package(LibreMiddleware CONFIG)`).
+CI builds and tests with the Xcode named in `.xcode-version`, selected together
+with its SDK.
 
 ```bash
 cmake -B build -S . -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT=../LibreAgent

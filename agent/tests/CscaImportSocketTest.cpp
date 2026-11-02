@@ -31,7 +31,7 @@
 #include "SocketRig.h"
 #include "SyntheticMasterList.h" // LibreAgent::TestSupport
 
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 #include <LibreSCRS/Agent/config/ConfigStore.h>
 #include <LibreSCRS/Agent/operations/RateLimiter.h>
 #include <LibreSCRS/Agent/trust/CscaAnchorImport.h>
@@ -233,7 +233,7 @@ class CapturedLog
 public:
     CapturedLog()
     {
-        Agent::log::init([this](Agent::log::Level, std::string_view line) {
+        LibreSCRS::log::init([this](LibreSCRS::log::Level, std::string_view line) {
             const std::lock_guard lock(m_mutex);
             m_lines.emplace_back(line);
         });
@@ -241,7 +241,7 @@ public:
 
     ~CapturedLog()
     {
-        Agent::log::resetForTest();
+        LibreSCRS::log::resetForTest();
     }
 
     CapturedLog(const CapturedLog&) = delete;
@@ -711,6 +711,18 @@ TEST(CscaImportSocket, AValidListIsImportedAndSummarised)
     EXPECT_EQ(uintOf(state, "anchors"), 3u);
     EXPECT_EQ(uintOf(state, "issuers"), 2u);
     EXPECT_EQ(textOf(state, "signer"), Agent::Trust::toHex(list.signerSpkiSha256));
+    EXPECT_EQ(boolOf(state, "signerPinned"), std::optional{false}) << "an unpinned signer must be said, not omitted";
+
+    // Key for key the import's answer without the reply envelope around it:
+    // the same names, the same values, the same absent optionals.
+    ASSERT_NE(reply.asMap(), nullptr);
+    Agent::Wire::CborValue::Map expected;
+    for (const auto& [key, value] : *reply.asMap()) {
+        if (key != "t" && key != "req" && key != "kind") {
+            expected.emplace(key, value);
+        }
+    }
+    EXPECT_EQ(state, Agent::Wire::CborValue(std::move(expected)));
 }
 
 TEST(CscaImportSocket, AnAcceptedImportIsRememberedInTheConfiguration)

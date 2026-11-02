@@ -13,7 +13,10 @@
 
 #include <IOKit/IOMessage.h>
 
+#include <cstddef>
 #include <cstdint>
+#include <iterator>
+#include <optional>
 #include <vector>
 
 using LibreSCRS::Darwin::drivePowerCallbackForTest;
@@ -41,6 +44,37 @@ TEST(SystemLifecycle, InjectedEventReachesHandler)
     EXPECT_EQ(seen[4], Event::SessionResign);
     EXPECT_EQ(seen[5], Event::SessionActive);
     EXPECT_EQ(seen[6], Event::PowerOff);
+}
+
+// What the agent hands the core's quiesce policy for each event. A sleep and a
+// switch away must name the reasons that forget the secrets and the sessions;
+// a lock names the one that only re-asks for the PIN; the rest quiesce nothing
+// (PowerOff stops the agent through SIGTERM instead). Every event is listed, so
+// an event added without a decision here fails to be named rather than
+// quiescing silently.
+TEST(SystemLifecycle, EachEventQuiescesForItsOwnReason)
+{
+    using LibreSCRS::Agent::QuiesceReason;
+    using LibreSCRS::Darwin::quiesceReasonFor;
+    struct Row
+    {
+        Event event;
+        std::optional<QuiesceReason> reason;
+    };
+    const Row rows[] = {
+        {.event = Event::Suspend, .reason = QuiesceReason::SystemSleep},
+        {.event = Event::Resume, .reason = std::nullopt},
+        {.event = Event::ScreenLock, .reason = QuiesceReason::ScreenLocked},
+        {.event = Event::ScreenUnlock, .reason = std::nullopt},
+        {.event = Event::SessionResign, .reason = QuiesceReason::SessionInactive},
+        {.event = Event::SessionActive, .reason = std::nullopt},
+        {.event = Event::PowerOff, .reason = std::nullopt},
+    };
+    ASSERT_EQ(std::size(rows), static_cast<std::size_t>(Event::PowerOff) + 1);
+    for (std::size_t i = 0; i < std::size(rows); ++i) {
+        ASSERT_EQ(static_cast<std::size_t>(rows[i].event), i) << "one row per event, in declaration order";
+        EXPECT_EQ(quiesceReasonFor(rows[i].event), rows[i].reason) << "event " << i;
+    }
 }
 
 TEST(SystemLifecycle, StartStopAreIdempotentAndCrashFree)

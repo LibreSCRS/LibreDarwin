@@ -8,13 +8,14 @@
 // loop-affine calls are marshaled with dispatch_sync.
 #include <LibreSCRS/Darwin/backend/AgentCoreSeams.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
 
 #include <gtest/gtest.h>
 
 #include <poll.h>
+#include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/un.h>
@@ -109,6 +110,74 @@ TEST(SocketTransport, InboundRequestReachesSinkWithPeerToken)
     std::filesystem::remove(path);
 }
 
+// Out of descriptors, the agent stops trying to accept until one may be free
+// again instead of spinning: the listen source fires for as long as a
+// connection is queued, and accept() fails at once while the table is full.
+// Measured as the CPU this process burns while its table is full; the queued
+// client is then served once descriptors are free again.
+TEST(SocketTransport, AFullDescriptorTablePausesAcceptingInsteadOfSpinning)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+
+    // The client's socket is made while there is room; it connects once there is none.
+    const int client = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    ASSERT_GE(client, 0);
+    sockaddr_un addr{};
+    addr.sun_family = AF_UNIX;
+    std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+
+    struct FullTable
+    {
+        rlimit saved{};
+        std::vector<int> filler;
+        ~FullTable()
+        {
+            release();
+        }
+        void release()
+        {
+            for (const int fd : filler) {
+                ::close(fd);
+            }
+            filler.clear();
+            ::setrlimit(RLIMIT_NOFILE, &saved);
+        }
+    } table;
+    ASSERT_EQ(::getrlimit(RLIMIT_NOFILE, &table.saved), 0);
+    rlimit low = table.saved;
+    low.rlim_cur = std::min<rlim_t>(table.saved.rlim_cur, 1024);
+    ASSERT_EQ(::setrlimit(RLIMIT_NOFILE, &low), 0);
+    for (int fd = ::dup(client); fd >= 0; fd = ::dup(client)) {
+        table.filler.push_back(fd);
+    }
+    ASSERT_EQ(errno, EMFILE);
+    ASSERT_EQ(::connect(client, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)), 0);
+
+    const auto cpu = [] {
+        rusage u{};
+        ::getrusage(RUSAGE_SELF, &u);
+        return std::chrono::seconds(u.ru_utime.tv_sec + u.ru_stime.tv_sec) +
+               std::chrono::microseconds(u.ru_utime.tv_usec + u.ru_stime.tv_usec);
+    };
+    const auto before = cpu();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    const auto burned = cpu() - before;
+    table.release();
+    EXPECT_LT(burned, std::chrono::milliseconds(150)) << "the accept loop spun while the descriptor table was full";
+
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+    EXPECT_TRUE(sink.waitFor(1, std::chrono::seconds(2))) << "the queued client was never served";
+
+    ::close(client);
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
 TEST(SocketTransport, PublishBroadcastsEventToClient)
 {
     const std::string path = uniqueSocketPath();
@@ -142,6 +211,100 @@ TEST(SocketTransport, PublishBroadcastsEventToClient)
     const auto* reader = decoded->find("reader");
     ASSERT_NE(reader, nullptr);
     EXPECT_EQ(*reader->find("name")->asText(), "Test Reader");
+
+    ::close(client);
+    tr.reset();
+    std::filesystem::remove(path);
+}
+
+// A reader goes out with the label the agent library gave it (reader-state's
+// model/interface), and when the label changes later -- a twin arrived beside
+// it -- every client gets the new pair as one Reader1 PropertyChanged, which
+// the next State snapshot also carries. A relabel that changes nothing sends
+// nothing: the next frame is the second reader's ReaderAdded.
+TEST(SocketTransport, AReaderCarriesItsLabelAndARelabelReachesTheClient)
+{
+    const std::string path = uniqueSocketPath();
+    auto tr = std::move(*SocketTransport::create(path));
+
+    Latch<std::string> sink;
+    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
+
+    const int client = connectClient(path);
+    const auto helloBytes =
+        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
+    ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
+
+    const auto nextEvent = [client] {
+        const auto frame = Agent::Wire::recvFrame(client);
+        EXPECT_TRUE(frame.has_value());
+        if (!frame) {
+            return Agent::Wire::CborValue{};
+        }
+        auto decoded = Agent::Wire::decode(frame->body);
+        EXPECT_TRUE(decoded.has_value());
+        return decoded.value_or(Agent::Wire::CborValue{});
+    };
+    const auto text = [](const Agent::Wire::CborValue* v) -> std::string {
+        return v != nullptr && v->asText() != nullptr ? *v->asText() : std::string{"<absent>"};
+    };
+
+    Agent::ReaderState contactless;
+    contactless.id = Agent::ObjectId(7);
+    contactless.name = "HID Global OMNIKEY 5422 Smartcard Reader [OMNIKEY 5422CL Smartcard Reader] (ABC123) 01 00";
+    contactless.model = "OMNIKEY 5422";
+    contactless.iface = Agent::ReaderInterface::Contactless;
+    SocketTransport* trp = tr.get();
+    dispatch_sync(tr->loopQueue(), ^{
+      trp->publishReader(contactless);
+    });
+
+    const auto added = nextEvent();
+    ASSERT_EQ(text(added.find("t")), "ReaderAdded");
+    const auto* reader = added.find("reader");
+    ASSERT_NE(reader, nullptr);
+    EXPECT_EQ(text(reader->find("model")), "OMNIKEY 5422");
+    EXPECT_EQ(text(reader->find("interface")), "contactless");
+    const std::string handle = text(reader->find("handle"));
+
+    Agent::ReaderState relabelled = contactless;
+    relabelled.model = "OMNIKEY 5422 (C123)";
+    dispatch_sync(tr->loopQueue(), ^{
+      trp->relabelReader(relabelled);
+    });
+    const auto changed = nextEvent();
+    ASSERT_EQ(text(changed.find("t")), "PropertyChanged");
+    EXPECT_EQ(text(changed.find("handle")), handle);
+    EXPECT_EQ(text(changed.find("iface")), "org.librescrs.Agent.Reader1");
+    const auto* props = changed.find("props");
+    ASSERT_NE(props, nullptr);
+    EXPECT_EQ(text(props->find("Model")), "OMNIKEY 5422 (C123)");
+    EXPECT_EQ(text(props->find("Interface")), "contactless");
+
+    __block std::string snapshotModel;
+    dispatch_sync(tr->loopQueue(), ^{
+      for (const auto& r : trp->currentState().readers) {
+          if (r.handle == handle) {
+              snapshotModel = r.model;
+          }
+      }
+    });
+    EXPECT_EQ(snapshotModel, "OMNIKEY 5422 (C123)") << "the State snapshot carries the new label";
+
+    Agent::ReaderState other;
+    other.id = Agent::ObjectId(9);
+    other.name = "Gemalto PC Twin Reader";
+    other.model = "Gemalto PC Twin";
+    dispatch_sync(tr->loopQueue(), ^{
+      trp->relabelReader(relabelled); // unchanged: no frame
+      trp->publishReader(other);
+    });
+    const auto second = nextEvent();
+    ASSERT_EQ(text(second.find("t")), "ReaderAdded") << "an unchanged label must not be pushed again";
+    const auto* secondReader = second.find("reader");
+    ASSERT_NE(secondReader, nullptr);
+    EXPECT_EQ(text(secondReader->find("interface")), "unknown");
 
     ::close(client);
     tr.reset();
@@ -291,7 +454,7 @@ TEST(SocketTransport, PresenceRosterAlignsEveryReaderWithTheKeyOfItsCard)
     auto tr = std::move(*SocketTransport::create(path));
     SocketTransport* trp = tr.get();
 
-    __block SocketTransport::PresenceRoster roster;
+    __block Agent::PresenceRoster roster;
     dispatch_sync(tr->loopQueue(), ^{
       Agent::ReaderState a;
       a.id = Agent::ObjectId(7);
@@ -314,7 +477,7 @@ TEST(SocketTransport, PresenceRosterAlignsEveryReaderWithTheKeyOfItsCard)
     // roster it reads. A miss yields an empty optional rather than an index one
     // past the end, so a failing roster fails on the name, not on a read past
     // the vector.
-    const auto keyOf = [](const SocketTransport::PresenceRoster& r, const std::string& name) {
+    const auto keyOf = [](const Agent::PresenceRoster& r, const std::string& name) {
         const auto it = std::find(r.readerNames.begin(), r.readerNames.end(), name);
         return it == r.readerNames.end()
                    ? std::optional<std::string>{}
@@ -908,9 +1071,9 @@ struct WarnCapture
     std::vector<std::string> lines;
     WarnCapture()
     {
-        Agent::log::init(
-            [this](Agent::log::Level level, std::string_view line) {
-                if (level == Agent::log::Level::Warn) {
+        LibreSCRS::log::init(
+            [this](LibreSCRS::log::Level level, std::string_view line) {
+                if (level == LibreSCRS::log::Level::Warn) {
                     std::lock_guard<std::mutex> lk(m);
                     lines.emplace_back(line);
                 }
@@ -919,7 +1082,7 @@ struct WarnCapture
     }
     ~WarnCapture()
     {
-        Agent::log::resetForTest();
+        LibreSCRS::log::resetForTest();
     }
     std::size_t count(std::string_view needle)
     {
@@ -1017,50 +1180,6 @@ TEST(SocketTransport, ShutdownUnlinksOnlyItsOwnSocketFile)
         ::close(impostor);
         std::filesystem::remove(path);
     }
-}
-
-// A launchd-activated socket is launchd's file: the agent must not bind over
-// it (that would sever the activation) and must not unlink it on shutdown.
-TEST(SocketTransport, InheritedSocketPathIsNeverReclaimed)
-{
-    WarnCapture warnings;
-    const std::string path = tmpSocketPath("ih");
-    const int launchdFd = bindImpostor(path); // stands in for launchd's listener
-    auto adopted = SocketTransport::adoptInherited(Agent::Wire::UniqueFd(launchdFd), path);
-    ASSERT_TRUE(adopted.has_value()) << (adopted ? "" : adopted.error().message);
-    auto tr = std::move(*adopted);
-    tr->setPathGuardIntervalForTest(std::chrono::milliseconds(20));
-    Latch<std::string> sink;
-    tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
-    // A second name for launchd's socket, so a client can still reach the
-    // transport after the path is taken -- every accept is a guard check too.
-    const std::string alias = path + ".a";
-    ASSERT_EQ(::link(path.c_str(), alias.c_str()), 0) << std::strerror(errno);
-
-    const int other = bindImpostor(path);
-    const auto otherId = SocketPathIdentity::of(path);
-    ASSERT_TRUE(otherId.has_value());
-
-    // An accept on the transport, then fifteen would-be guard ticks: nothing
-    // may take the path back.
-    const int viaAlias = connectClient(alias);
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
-    ASSERT_TRUE(Agent::Wire::sendFrame(viaAlias, helloBytes).has_value());
-    ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2))) << "the inherited socket stopped serving";
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
-    EXPECT_TRUE(otherId->stillNames(path)) << "the transport bound over a path it does not own";
-    const int client = connectClient(path);
-    EXPECT_TRUE(hasPendingConnection(other, 2000)) << "a client on the path must reach whoever launchd gave it to";
-    EXPECT_EQ(warnings.count(kReplacedLine), 0u);
-
-    tr.reset();
-    EXPECT_TRUE(otherId->stillNames(path)) << "shutdown unlinked a socket file the transport does not own";
-    ::close(client);
-    ::close(viaAlias);
-    ::close(other);
-    std::filesystem::remove(path);
-    std::filesystem::remove(alias);
 }
 
 // --- Single instance per socket path ---------------------------------------

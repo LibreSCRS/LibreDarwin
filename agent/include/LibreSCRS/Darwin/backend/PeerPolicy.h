@@ -3,39 +3,33 @@
 #pragma once
 
 /// @file
-/// @brief The identities the two ends of the private prompter socket require of
-///        each other, and the agent's the PKCS#11 module requires, in one place.
+/// @brief The identity the agent requires of the process serving prompter.sock.
 ///
-/// Both are compiled in, and so is the team id their designated requirement
-/// names (@ref configuredTeamId). Neither end reads an override from the environment:
-/// `launchctl setenv` reaches every job the user's launchd starts, so a variable
-/// that renamed the expected peer or switched the check off would be a switch any
-/// process running as the user could flip.
+/// The other direction -- what the prompter and the PKCS#11 module require of
+/// the agent -- is LibreAgent's `expectedAgentIdentity()`, the same one every
+/// client of agent.sock holds the agent to. Both are compiled in, and so is the
+/// team id their designated requirement names (`configuredTeamId()`). Neither
+/// end reads an override from the environment: `launchctl setenv` reaches every
+/// job the user's launchd starts, so a variable that renamed the expected peer
+/// or switched the check off would be a switch any process running as the user
+/// could flip.
 
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h>
 
 #include <functional>
 #include <string>
 
 namespace LibreSCRS::Darwin {
 
-/// @brief What the prompter requires of the process connecting to prompter.sock,
-///        and the PKCS#11 module of the process serving agent.sock: the agent's
-///        signing identifier, the App-Group entitlement, and -- when a team id
-///        is configured -- the designated requirement.
-[[nodiscard]] inline ExpectedPeerIdentity expectedAgentIdentity()
-{
-    return ExpectedPeerIdentity{
-        .signingId = std::string(kAgentSigningId), .appGroup = appGroup(), .teamId = configuredTeamId()};
-}
-
 /// @brief What the agent requires of the process serving prompter.sock: the
 ///        prompter's signing identifier, the App-Group entitlement, and -- when
 ///        a team id is configured -- the designated requirement.
-[[nodiscard]] inline ExpectedPeerIdentity expectedPrompterIdentity()
+[[nodiscard]] inline Agent::Wire::Darwin::ExpectedPeerIdentity expectedPrompterIdentity()
 {
-    return ExpectedPeerIdentity{
-        .signingId = std::string(kPrompterSigningId), .appGroup = appGroup(), .teamId = configuredTeamId()};
+    namespace Peer = Agent::Wire::Darwin;
+    return Peer::ExpectedPeerIdentity{.signingId = std::string(Peer::kPrompterSigningId),
+                                      .appGroup = Peer::appGroup(),
+                                      .teamId = Peer::configuredTeamId()};
 }
 
 /// @brief The check the agent runs on a freshly connected prompter socket before

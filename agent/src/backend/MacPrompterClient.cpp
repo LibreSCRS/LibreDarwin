@@ -9,9 +9,11 @@
 #include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 
 #include <LibreSCRS/Agent/SecureZero.h>
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
+#include <LibreSCRS/Agent/backend/PromptTypes.h> // promptStatusFor
 #include <LibreSCRS/Agent/operations/PromptPolicy.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/ReaderInterface.h> // readerInterfaceToken
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 
 #include <LibreSCRS/Secure/String.h>
@@ -148,24 +150,6 @@ std::optional<std::chrono::microseconds> waitReadable(int fd, std::chrono::stead
     }
 }
 
-// The reader's interface qualifier as its wire token. EXHAUSTIVE switch with
-// no `default:`: an enumerator appended upstream must be a -Wswitch diagnostic
-// here, not a silent fall to "unknown" that would make a dual-interface
-// reader's two slots indistinguishable again. Same helper, same reason, as the
-// Linux host's readerInterfaceToken().
-const char* readerInterfaceToken(Agent::ReaderInterface iface)
-{
-    switch (iface) {
-    case Agent::ReaderInterface::Contact:
-        return wire::kReaderInterfaceContact;
-    case Agent::ReaderInterface::Contactless:
-        return wire::kReaderInterfaceContactless;
-    case Agent::ReaderInterface::Unknown:
-        return wire::kReaderInterfaceUnknown;
-    }
-    return wire::kReaderInterfaceUnknown;
-}
-
 wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptions& o)
 {
     wire::PromptRequest r;
@@ -204,7 +188,7 @@ wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptio
     // spelled as absence further down the wire, so a dialog names its reader or
     // says nothing, never the wrong one.
     r.readerModel = o.reader.model;
-    r.readerInterface = readerInterfaceToken(o.reader.iface);
+    r.readerInterface = std::string(Agent::Wire::readerInterfaceToken(o.reader.iface));
     r.readerFull = o.reader.full;
     return r;
 }
@@ -218,7 +202,7 @@ wire::PromptRequest buildRequest(wire::PromptKind kind, const Agent::PromptOptio
 wire::RequestSecrets buildChangeRequest(const Agent::PromptOptions& o)
 {
     wire::RequestSecrets r;
-    r.kind = "change_pin";
+    r.kind = LibreSCRS::PrompterWire::kKindChangePin;
     // Interim carry until the prompter wire gains card/pin label fields: the
     // shared change flow sends title="" with the context in cardLabel/pinLabel,
     // which this wire does not transport — surface the PIN label as the title
@@ -369,33 +353,21 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
         std::fill(reply->secret.begin(), reply->secret.end(), std::uint8_t{0});
         return result;
     }
-    switch (reply->status) {
-    case wire::PromptReplyStatus::Ok: {
-        result.status = Agent::PromptStatus::Ok;
+    // What the reply word means is the agent library's one reading of it.
+    // This agent never offers the MRZ alternative, so "ok_mrz" is an error
+    // here, like any word it did not ask for.
+    result.status = Agent::promptStatusFor(reply->status, /*mrzAlternativeOffered=*/false);
+    if (result.status == Agent::PromptStatus::Ok) {
         // Scrub the inline secret into a cleansing Secure::String, then zero the
         // transfer buffer so no plaintext lingers in the CBOR frame.
         result.secret = LibreSCRS::Secure::String(
             std::string_view(reinterpret_cast<const char*>(reply->secret.data()), reply->secret.size()));
-        std::fill(reply->secret.begin(), reply->secret.end(), std::uint8_t{0});
-        break;
     }
-    case wire::PromptReplyStatus::Cancelled:
-        result.status = Agent::PromptStatus::Cancelled;
-        break;
-    case wire::PromptReplyStatus::Unauthorized:
+    std::fill(reply->secret.begin(), reply->secret.end(), std::uint8_t{0});
+    if (reply->status == wire::PromptReplyStatus::Unauthorized) {
         // We ARE the agent; unauthorized means the prompter rejected our peer
-        // creds — a misconfiguration. Treat as an error (fail closed).
-        result.status = Agent::PromptStatus::Error;
+        // creds — a misconfiguration, so an error (fail closed).
         result.userMessage = "prompter rejected the agent (unauthorized)";
-        break;
-    case wire::PromptReplyStatus::Error:
-        result.status = Agent::PromptStatus::Error;
-        break;
-    case wire::PromptReplyStatus::Timeout:
-        // The window's own clock; never folded into Cancelled, which is the
-        // person's act.
-        result.status = Agent::PromptStatus::Timeout;
-        break;
     }
     if (!reply->userMessage.empty() && result.userMessage.empty()) {
         result.userMessage = reply->userMessage;
@@ -467,36 +439,22 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
         std::fill(reply->secondary.begin(), reply->secondary.end(), std::uint8_t{0});
         return result;
     }
-    switch (reply->status) {
-    case wire::PromptReplyStatus::Ok: {
-        result.status = Agent::PromptStatus::Ok;
+    // The same one reading of the reply word as the single-secret prompt.
+    result.status = Agent::promptStatusFor(reply->status, /*mrzAlternativeOffered=*/false);
+    if (result.status == Agent::PromptStatus::Ok) {
         // Scrub each inline secret into a cleansing Secure::String, then zero
         // its transfer buffer so no plaintext lingers in the CBOR frame.
         result.current = LibreSCRS::Secure::String(
             std::string_view(reinterpret_cast<const char*>(reply->primary.data()), reply->primary.size()));
-        std::fill(reply->primary.begin(), reply->primary.end(), std::uint8_t{0});
         result.newPin = LibreSCRS::Secure::String(
             std::string_view(reinterpret_cast<const char*>(reply->secondary.data()), reply->secondary.size()));
-        std::fill(reply->secondary.begin(), reply->secondary.end(), std::uint8_t{0});
-        break;
     }
-    case wire::PromptReplyStatus::Cancelled:
-        result.status = Agent::PromptStatus::Cancelled;
-        break;
-    case wire::PromptReplyStatus::Unauthorized:
+    std::fill(reply->primary.begin(), reply->primary.end(), std::uint8_t{0});
+    std::fill(reply->secondary.begin(), reply->secondary.end(), std::uint8_t{0});
+    if (reply->status == wire::PromptReplyStatus::Unauthorized) {
         // We ARE the agent; unauthorized means the prompter rejected our peer
-        // creds — a misconfiguration. Treat as an error (fail closed).
-        result.status = Agent::PromptStatus::Error;
+        // creds — a misconfiguration, so an error (fail closed).
         result.userMessage = "prompter rejected the agent (unauthorized)";
-        break;
-    case wire::PromptReplyStatus::Error:
-        result.status = Agent::PromptStatus::Error;
-        break;
-    case wire::PromptReplyStatus::Timeout:
-        // The window's own clock; never folded into Cancelled, which is the
-        // person's act.
-        result.status = Agent::PromptStatus::Timeout;
-        break;
     }
     if (!reply->userMessage.empty() && result.userMessage.empty()) {
         result.userMessage = reply->userMessage;
@@ -531,23 +489,23 @@ void MacPrompterClient::reset() noexcept
             // launched: nothing is standing, because nobody raised anything.
             // Said at the lowest level all the same -- a start-up that skips a
             // step silently reads the same as one that never had the step.
-            Agent::log::info("prompter not running at start-up; nothing to reset");
+            LibreSCRS::log::info("prompter not running at start-up; nothing to reset");
             return;
         }
         // Verified like every other path here: a process that unlinked and
         // re-bound prompter.sock gets no frame from us.
         if (!m_peerVerifier(fd.get())) {
-            Agent::log::warn("prompter reset skipped: the serving peer failed verification");
+            LibreSCRS::log::warn("prompter reset skipped: the serving peer failed verification");
             return;
         }
         if (!Agent::Wire::sendFrame(fd.get(), wire::toCbor(wire::PromptReset{}).encode()).has_value()) {
-            Agent::log::warn("prompter reset could not be sent");
+            LibreSCRS::log::warn("prompter reset could not be sent");
             return;
         }
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kResetReplyBudgetMs);
         const auto left = waitReadable(fd.get(), deadline);
         if (!left) {
-            Agent::log::warn("prompter did not answer the reset within the start-up budget");
+            LibreSCRS::log::warn("prompter did not answer the reset within the start-up budget");
             return;
         }
         // poll only says a byte arrived; recvFrame reads a WHOLE frame and
@@ -568,20 +526,20 @@ void MacPrompterClient::reset() noexcept
         if (::setsockopt(fd.get(), SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0) {
             // With no bound in place there is nothing to stop the read below
             // sitting on a half-sent frame, so it is not attempted at all.
-            Agent::log::warn("prompter reset: the reply wait could not be bounded, so it was not taken");
+            LibreSCRS::log::warn("prompter reset: the reply wait could not be bounded, so it was not taken");
             return;
         }
         auto frame = Agent::Wire::recvFrame(fd.get());
         if (!frame.has_value()) {
-            Agent::log::warn("prompter gave no readable answer to the reset");
+            LibreSCRS::log::warn("prompter gave no readable answer to the reset");
             return;
         }
         const auto done = wire::parseResetDone(frame->body);
         if (!done.has_value()) {
-            Agent::log::warn("prompter answered the reset with a message this build cannot read");
+            LibreSCRS::log::warn("prompter answered the reset with a message this build cannot read");
             return;
         }
-        Agent::log::infof("prompter reset: {} window(s) closed", done->closed);
+        LibreSCRS::log::infof("prompter reset: {} window(s) closed", done->closed);
     } catch (...) {
         // Nothing on this path is worth the agent's life, and after a throw out
         // of the log facade there is nothing left to say it with either.

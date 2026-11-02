@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
+#include <LibreSCRS/Agent/wire/QuiesceReason.h>
+
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace LibreSCRS::Darwin {
 
 // macOS power/session lifecycle subscriber. The neutral core has no concept of
 // system sleep or a screen lock; this backend piece subscribes to the platform
-// notifications and drives the injected reaction handler, which composes the
-// core's neutral scrub entry points (cancel in-flight ops + invalidate the
-// per-reader CardSession, scrub the CredentialCache, revoke PKCS#11 leases) and
-// broadcasts AgentQuiesced.
+// notifications and drives the injected reaction handler, which hands the
+// event's quiesce reason (quiesceReasonFor below) to the core's one quiesce
+// policy and broadcasts AgentQuiesced with the same reason.
 //
 // Sleep teardown is REQUIRED, not merely prudent: a USB reader loses power on
 // sleep, so the PC/SC + SM (PACE) session is invalid after wake and the next op
@@ -27,11 +29,11 @@ class SystemLifecycle
 {
 public:
     enum class Event : std::uint8_t {
-        Suspend,       // system will sleep -> full scrub (session invalid after wake)
-        Resume,        // system did wake -> next op re-acquires (no scrub)
-        ScreenLock,    // screen locked -> revoke PKCS#11 leases only (re-PIN next op)
+        Suspend,       // system will sleep -> SystemSleep (session invalid after wake)
+        Resume,        // system did wake -> next op re-acquires (no quiesce)
+        ScreenLock,    // screen locked -> ScreenLocked (re-PIN next op)
         ScreenUnlock,  // screen unlocked -> no-op
-        SessionResign, // fast-user-switch away -> full scrub (another user is active)
+        SessionResign, // fast-user-switch away -> SessionInactive (another user is active)
         SessionActive, // fast-user-switch back -> no-op
         PowerOff,      // logout / power off -> terminal quiesce (like SIGTERM)
     };
@@ -56,6 +58,30 @@ private:
     struct Impl;
     std::unique_ptr<Impl> m_impl;
 };
+
+// The reason @p event quiesces card access, which the agent hands to
+// AgentCore::quiesce() and then announces; nullopt for an event that leaves
+// the agent as it is (wake, unlock, switching back -- the next operation
+// re-acquires) and for PowerOff, which stops the agent instead. What each
+// reason forgets is the core's policy, not this host's.
+[[nodiscard]] constexpr std::optional<Agent::QuiesceReason> quiesceReasonFor(SystemLifecycle::Event event) noexcept
+{
+    using Event = SystemLifecycle::Event;
+    switch (event) {
+    case Event::Suspend:
+        return Agent::QuiesceReason::SystemSleep;
+    case Event::SessionResign:
+        return Agent::QuiesceReason::SessionInactive;
+    case Event::ScreenLock:
+        return Agent::QuiesceReason::ScreenLocked;
+    case Event::Resume:
+    case Event::ScreenUnlock:
+    case Event::SessionActive:
+    case Event::PowerOff:
+        break;
+    }
+    return std::nullopt;
+}
 
 // Test hook (keeps this header IOKit-free): drive the private IOKit power
 // callback with @p messageType / @p messageArgument against a fake ack sink.

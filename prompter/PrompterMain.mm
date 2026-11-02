@@ -11,9 +11,8 @@
 #include "PrompterComposition.h"
 #include "PrompterServer.h"
 
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h>
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
-#include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 
 #import <AppKit/AppKit.h>
@@ -25,6 +24,8 @@
 
 namespace {
 
+namespace Peer = LibreSCRS::Agent::Wire::Darwin;
+
 // The socket lives in the shared App-Group container, resolved by the SAME
 // helper the agent uses (AppGroupPaths — sandbox-bypass home + group id in one
 // place, so the two binaries cannot drift apart silently).
@@ -35,15 +36,14 @@ std::string prompterSocketPath()
 
 // The connecting peer must be the agent: its SecTask signing identifier must
 // match the agent's, it must carry our App-Group entitlement, and with a team id
-// configured it must satisfy the designated requirement — the shared
-// PeerCodeSigning gate (PeerPolicy.h). There is no opt-out and no override of
-// the expected identity: with one, any same-uid process could raise the PIN
-// window and receive the typed secret.
+// configured it must satisfy the designated requirement — the peer check every
+// client of the agent's socket runs (LibreAgent's wire/darwin/PeerCodeSigning.h).
+// There is no opt-out and no override of the expected identity: with one, any
+// same-uid process could raise the PIN window and receive the typed secret.
 LibreSCRS::Darwin::PrompterServer::PeerAuthorized makePeerAuth()
 {
-    return [expected = LibreSCRS::Darwin::expectedAgentIdentity()](const LibreSCRS::Darwin::PeerCredentials& creds) {
-        return LibreSCRS::Darwin::matchesExpectedPeer(LibreSCRS::Darwin::resolvePeerCodeSigning(creds, expected.teamId),
-                                                      expected);
+    return [expected = Peer::expectedAgentIdentity()](const Peer::PeerCredentials& creds) {
+        return Peer::matchesExpectedPeer(Peer::resolvePeerCodeSigning(creds, expected.teamId), expected);
     };
 }
 
@@ -59,7 +59,7 @@ LibreSCRS::Darwin::PrompterComposition::Hooks defaultHooks()
     auto state = std::make_shared<State>();
     return LibreSCRS::Darwin::PrompterComposition::Hooks{
         .harden = LibreSCRS::Darwin::hardenSecretProcess,
-        .selfCheck = [] { return LibreSCRS::Darwin::selfMatchesBuild(LibreSCRS::Darwin::kPrompterSigningId); },
+        .selfCheck = [] { return Peer::selfMatchesBuild(Peer::kPrompterSigningId); },
         .appInit =
             [] {
                 // LSUIElement (no Dock icon / menu bar); the windows are

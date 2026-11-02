@@ -2,9 +2,10 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 # SPDX-FileCopyrightText: 2026 hirashix0
 #
-# Dev harness for the macOS broker-host agent. There is no LibreMac host
-# yet, so this runs librescrs-agent STANDALONE against a dev App-Group container.
-# Two modes:
+# Dev harness for the macOS broker-host agent. LibreMac ships the agent inside
+# its app and registers it with SMAppService; this runs a build-tree
+# librescrs-agent STANDALONE against the same App-Group container, signed with
+# the entitlements the shipped one carries. Modes:
 #
 #   ./install-dev.sh run        # foreground: create the container, exec the agent
 #   ./install-dev.sh launchd    # bootstrap a dev LaunchAgent (libexec path)
@@ -14,7 +15,7 @@
 # The agent self-binds the container socket; no socket-activation. In
 # production the sandboxed LibreMac host creates the container (+ primes CTK) and
 # registers the bundled plist via SMAppService — this harness stands in for
-# that until the host exists.
+# the host when the agent is run from a build tree.
 #
 # The LibreMac Swift clients (and, on the agent<->prompter private socket, the
 # two binaries checking each other -- PeerPolicy.h) verify the peer's SecTask
@@ -38,15 +39,6 @@
 # for testing or for a binary this harness does not otherwise touch.
 set -euo pipefail
 
-# This harness signs ad hoc, for a build that names no team, so the agent's
-# App Group is the team-less one (appGroupFor in PeerCodeSigning.cpp is the
-# rule; a build configured with LIBRESCRS_TEAM_ID uses "<team>.org.librescrs.LibreMac"
-# and refuses to start under this signature).
-APP_GROUP="group.org.librescrs.LibreMac"
-# The agent resolves its container itself and takes no override, so this is
-# the one place it can be: the canonical App-Group container.
-CONTAINER="$HOME/Library/Group Containers/$APP_GROUP"
-SOCK="$CONTAINER/agent.sock"
 LABEL="org.librescrs.agent"
 PROMPTER_LABEL="org.librescrs.prompter"
 BUILD_DIR="${BUILD_DIR:-build}"
@@ -60,6 +52,16 @@ PROMPTER_BIN="${PROMPTER_BIN:-$BUILD_DIR/prompter/librescrs-prompter}"
 # someone meant to sign with a real identity.
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:--}"
 
+# The entitlements the shipped agent and prompter are signed with -- App
+# Sandbox, smart card, network client, the App Group -- live with the app that
+# ships them (LibreMac/Packaging/entitlements, the files LibreMac's
+# Scripts/sign-bundle.sh signs from). A development agent signed with anything
+# else is not the agent that ships: outside the sandbox it reaches files, the
+# network and the keychain differently, and a run that passes here would prove
+# nothing about the shipped one. LibreMac is expected next to this checkout.
+LIBREMAC_DIR="${LIBREMAC_DIR:-$(cd "$(dirname "$0")/../.." && pwd)/LibreMac}"
+ENTITLEMENTS_DIR="$LIBREMAC_DIR/Packaging/entitlements"
+
 # Card plugins the agent dlopens. Defaults to the workspace install prefix that
 # rebuild-all populates, because the agent's own compiled default points at a
 # system prefix a development machine does not have -- and an agent with no
@@ -72,15 +74,44 @@ LM_LIB="${LM_LIB:-$LM_PREFIX/lib}"
 
 die() { echo "error: $*" >&2; exit 1; }
 
+# Where the agent listens. The rule -- the App Group named after the team, the
+# socket's name inside it -- is the agent's wire contract (socket-location in
+# LibreAgent's wire/wire-vocabulary.json), the same file the Swift client and
+# LibreMac's signing script read; it is not restated here. This harness signs
+# ad hoc, for a build that names no team, so the group is the team-less one; a
+# build configured with LIBRESCRS_TEAM_ID refuses to start under this
+# signature. The agent resolves its container itself and takes no override, so
+# this is the one place it can be. LibreAgent's source is the one the build
+# directory was configured with (fetched, or a local checkout), or
+# LIBREAGENT_SRC for a build that consumes an installed LibreAgent.
+load_socket_location() {
+    local src="${LIBREAGENT_SRC:-}"
+    if [ -z "$src" ] && [ -f "$BUILD_DIR/CMakeCache.txt" ]; then
+        src="$(sed -n 's/^LibreAgent_SOURCE_DIR:STATIC=//p' "$BUILD_DIR/CMakeCache.txt")"
+    fi
+    [ -n "$src" ] || die "cannot find LibreAgent's source (configure $BUILD_DIR first, or set LIBREAGENT_SRC)"
+    local contract="$src/wire/wire-vocabulary.json"
+    local field value
+    for field in noTeamPrefix appGroupSuffix socketName; do
+        value="$(plutil -extract "socket-location.$field" raw -o - "$contract" 2>/dev/null)" \
+            || die "cannot read socket-location.$field from $contract"
+        printf -v "SOCKET_LOCATION_$field" '%s' "$value"
+    done
+    APP_GROUP="$SOCKET_LOCATION_noTeamPrefix$SOCKET_LOCATION_appGroupSuffix"
+    CONTAINER="$HOME/Library/Group Containers/$APP_GROUP"
+    SOCK="$CONTAINER/$SOCKET_LOCATION_socketName"
+}
+
 # sign_dev_binary <path> <identifier>
 #
-# Ad-hoc (re-)signs a dev-built binary with the signing identifier + the
-# com.apple.security.application-groups entitlement its peer checks
-# (PeerPolicy.h on the C++ side; the LibreMac Swift client on the other), and,
-# for the agent alone, com.apple.security.smartcard.
-# `codesign --force` replaces whatever signature is already there -- the
-# linker's ad-hoc one after a fresh build, or our own from a previous run --
-# so calling this again on the same binary is a no-op in effect: idempotent.
+# Ad-hoc (re-)signs a dev-built binary with the signing identifier its peers
+# check and the entitlements the shipped binary of that identifier carries
+# (the agent's or the prompter's file from $ENTITLEMENTS_DIR), with the App
+# Group replaced by the one this build names -- the same substitution
+# sign-bundle.sh makes. `codesign --force` replaces whatever signature is
+# already there -- the linker's ad-hoc one after a fresh build, or our own
+# from a previous run -- so calling this again on the same binary is a no-op
+# in effect: idempotent.
 #
 # Deliberately NO --options runtime. The hardened runtime strips DYLD_* out
 # of a process's environment unless the binary also carries
@@ -89,20 +120,27 @@ die() { echo "error: $*" >&2; exit 1; }
 # build that links LibreMiddleware with bare @rpath entries find it outside
 # an install prefix. A hardened dev binary would just fail to start instead
 # of failing the identity check it is being signed to pass. LibreMac's
-# Scripts/bundle-agent.sh DOES use --options runtime -- it signs a bundled,
-# installed agent that finds its libraries next to itself and needs no
-# DYLD_LIBRARY_PATH, which is a different binary than the one built here.
+# signing script DOES use --options runtime -- it signs a bundled agent that
+# finds its libraries next to itself and needs no DYLD_LIBRARY_PATH.
 #
-# The entitlements plist is written to a temp file made with `mktemp -t`
-# (honors $TMPDIR, never a literal /tmp path) and is removed before this
-# function returns, on every exit path, via a scoped EXIT trap.
+# The entitlements are signed from a copy made with `mktemp -t` (honors
+# $TMPDIR, never a literal /tmp path), removed before this function returns,
+# on every exit path, via a scoped EXIT trap.
 sign_dev_binary() {
     local bin="$1" identifier="$2"
     # Fail closed, not open: continuing past this with the binary unsigned
     # (or signed under some other identity) hands run/launchd/smoke a binary
     # the peer verifier refuses, which fails minutes later and far from here.
-    [ "$CODESIGN_IDENTITY" = "-" ] || die "CODESIGN_IDENTITY='$CODESIGN_IDENTITY' is not ad-hoc; this dev harness only signs ad-hoc (unset it, or run bundle-agent.sh's staged/team-signed path instead)"
+    [ "$CODESIGN_IDENTITY" = "-" ] || die "CODESIGN_IDENTITY='$CODESIGN_IDENTITY' is not ad-hoc; this dev harness only signs ad-hoc (unset it, or run LibreMac's team-signed bundle path instead)"
     [ -x "$bin" ] || die "cannot sign, binary not found/executable: $bin"
+    local part
+    case "$identifier" in
+        "$LABEL") part=agent ;;
+        "$PROMPTER_LABEL") part=prompter ;;
+        *) die "no shipped entitlements for identifier '$identifier' (expected $LABEL or $PROMPTER_LABEL)" ;;
+    esac
+    local source="$ENTITLEMENTS_DIR/$part.plist"
+    [ -f "$source" ] || die "shipped entitlements not found: $source (check out LibreMac next to this repository, or set LIBREMAC_DIR)"
 
     # `mktemp -t` itself falls back to a literal /tmp when $TMPDIR is unset;
     # state that rule instead of silently taking the fallback.
@@ -114,31 +152,12 @@ sign_dev_binary() {
     # calls) -- safe to claim EXIT here and hand it back below. If that ever
     # changes, save/restore the incoming trap instead of clearing it.
     trap 'rm -f "$ents"' EXIT
-    # Only the agent opens cards: without com.apple.security.smartcard
-    # CryptoTokenKit shows it no reader, and it refuses to start (exit 5). The
-    # prompter never touches a card, so it does not get the key.
-    local smartcard=""
-    if [ "$identifier" = "$LABEL" ]; then
-        smartcard="
-    <key>com.apple.security.smartcard</key>
-    <true/>"
-    fi
-    cat > "$ents" <<PLIST
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>com.apple.security.application-groups</key>
-    <array>
-        <string>$APP_GROUP</string>
-    </array>$smartcard
-</dict>
-</plist>
-PLIST
+    cat "$source" > "$ents"
+    /usr/libexec/PlistBuddy -c "Set :com.apple.security.application-groups:0 $APP_GROUP" "$ents" >/dev/null
     codesign --force -s - --identifier "$identifier" --entitlements "$ents" "$bin"
     rm -f "$ents"
     trap - EXIT
-    echo "signed (ad-hoc): $bin identifier=$identifier group=$APP_GROUP${smartcard:+ smartcard}"
+    echo "signed (ad-hoc): $bin identifier=$identifier entitlements=$source group=$APP_GROUP"
 }
 
 ensure_container() {
@@ -151,6 +170,7 @@ ensure_container() {
 
 case "${1:-run}" in
     run)
+        load_socket_location
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
         sign_dev_binary "$AGENT_BIN" "$LABEL"
         if [ -x "$PROMPTER_BIN" ]; then
@@ -163,6 +183,7 @@ case "${1:-run}" in
         exec "$AGENT_BIN" --plugin-dir "$PLUGIN_DIR"
         ;;
     launchd)
+        load_socket_location
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
         sign_dev_binary "$AGENT_BIN" "$LABEL"
         if [ -x "$PROMPTER_BIN" ]; then
@@ -206,6 +227,7 @@ case "${1:-run}" in
         echo "booted out + removed the dev $LABEL plist."
         ;;
     smoke)
+        load_socket_location
         [ -x "$AGENT_BIN" ] || die "agent binary not found/executable: $AGENT_BIN (build first)"
         sign_dev_binary "$AGENT_BIN" "$LABEL"
         if [ -x "$PROMPTER_BIN" ]; then
@@ -234,6 +256,7 @@ case "${1:-run}" in
         # guess in a signing path is the wrong kind of convenient.
         SIGN_BIN="${2:?usage: $0 --sign-only <path> <identifier>  (identifier: $LABEL or $PROMPTER_LABEL)}"
         SIGN_ID="${3:?usage: $0 --sign-only <path> <identifier>  (identifier: $LABEL or $PROMPTER_LABEL)}"
+        load_socket_location
         sign_dev_binary "$SIGN_BIN" "$SIGN_ID"
         ;;
     *)

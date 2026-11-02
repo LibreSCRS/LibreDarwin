@@ -31,6 +31,8 @@
 #include <LibreSCRS/Plugin/CardPlugin.h>
 #include <LibreSCRS/SmartCard/CardSession.h>
 
+#include "AllowAllAuthorizer.h" // LibreAgent::TestSupport
+
 #include <gtest/gtest.h>
 
 #include <dispatch/dispatch.h>
@@ -65,7 +67,7 @@ class ServingPlugin final : public LibreSCRS::Plugin::CardPlugin
 public:
     ServingPlugin()
     {
-        setIdentity("serving-stub", "stub", 0);
+        setIdentity("serving-stub", 0);
     }
     LibreSCRS::Plugin::CardCapabilities capabilities() const override
     {
@@ -279,7 +281,7 @@ inline std::string errName(const Agent::Wire::CborValue& reply)
 }
 
 // A regular, seekable temp file holding @p bytes for an input descriptor — the
-// socket frontend's readDocument only requires a regular file (rejecting
+// socket frontend's fd reader (readBoundedRegularFd) only requires a regular file (rejecting
 // pipes/sockets), so a plain unlinked temp file suffices; unlike
 // SignHwSmokeTest.cpp's on-disk fixture this one never needs a name once
 // opened. Portable (no memfd_create, which does not exist on Darwin).

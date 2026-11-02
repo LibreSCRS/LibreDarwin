@@ -2,8 +2,10 @@
 # 3.28 tracks LibreAgent's own floor — FetchContent add_subdirectory()s it.
 cmake_minimum_required(VERSION 3.28)
 
-# Derives PROJECT_VERSION + GIT_VERSION_* from git tags (committed VERSION file /
-# 0.0.1 fallback). Must run before project() — see the module's own note.
+# GIT_VERSION_* from this repository's own git tags (the VERSION file as the
+# floor). The byte-identical copy every LibreSCRS repository carries; the
+# check-version gate compares it with the canonical one. Must run before
+# project() -- see the module's own note.
 include(cmake/GitVersion.cmake)
 
 # Universal (x86_64;arm64) build toggle for the release/packaging gate. CMAKE_OSX_
@@ -79,28 +81,35 @@ endif()
 # lease/broker policy, LM-backed seams, the 5 backend interfaces). The macOS
 # backend under agent/ implements those interfaces and builds the
 # librescrs-agent daemon on top of LibreAgent::Core — exactly as LibreLinux does
-# with its D-Bus backend.
+# with its D-Bus backend. Built from the deps.lock revision by default
+# (LIBRESCRS_AGENT_FROM_SOURCE=OFF takes an installed one); the module is the
+# byte-identical copy every consumer of the agent carries.
+#
+# Five components: the neutral core and the wire vocabulary the daemon links,
+# the Cryptoki facade and its socket transport the PKCS#11 module is built
+# from, and the agent's signed master-list fixture the anchor-import test
+# links. An installed agent package must have been built with all five.
+set(LIBRESCRS_AGENT_FROM_SOURCE_DEFAULT ON)
 include(cmake/FindOrUseLibreAgent.cmake)
+librescrs_use_libreagent(COMPONENTS Core Wire Pkcs11Facade Pkcs11SocketClient TestSupport)
 
 # Diagnostics for THIS project's own targets. Until now no translation unit
 # under agent/, prompter/ or pkcs11-module/ was compiled with any -W flag at
 # all, so an unused constant or a sign mismatch in the daemon or its tests
-# was seen by nobody; the fetched agent had been building its own sources with
-# these three flags the whole time. Placed AFTER the LibreAgent include on
-# purpose: add_compile_options reaches only targets defined after it, so the
-# fetched subproject keeps the flags it sets for itself and its own -Werror
-# switch, and nothing here can turn a foreign diagnostic into this build's
-# failure. Not -Werror, for the reason LibreMiddleware gives next to the same
-# line: a compiler upgrade must not break this build through a diagnostic
-# nobody has seen yet.
+# was seen by nobody. Placed AFTER the LibreAgent include on purpose:
+# add_compile_options reaches only targets defined after it, so the fetched
+# subproject keeps the warning set it gives its own libraries. Not -Werror by
+# default, for the reason LibreMiddleware gives next to the same line: a
+# compiler upgrade must not break this build through a diagnostic nobody has
+# seen yet.
 add_compile_options(-Wall -Wextra -Wpedantic)
-# CI turns this on, as the Linux host and the agent do for theirs, so a new
-# diagnostic in this project's own sources fails the job instead of scrolling
-# past in a log nobody reads. It sits below the same include for the same
-# reason as the line above: the fetched agent is never compiled with this
-# project's -Werror.
-option(LIBREDARWIN_WERROR "Treat compiler warnings in this project's own targets as errors" OFF)
-if(LIBREDARWIN_WERROR)
+# CI turns this on, so a new diagnostic in this project's own sources fails
+# the job instead of scrolling past in a log nobody reads. The name every
+# LibreSCRS repository uses: a fetched agent declares the same option, so one
+# -DLIBRESCRS_WERROR=ON also makes the agent's own libraries -Werror, as its
+# CI builds them.
+option(LIBRESCRS_WERROR "Treat compiler warnings as errors" OFF)
+if(LIBRESCRS_WERROR)
     add_compile_options(-Werror)
 endif()
 

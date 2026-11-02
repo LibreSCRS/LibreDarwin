@@ -428,6 +428,64 @@ TEST(PrompterProtocol, RejectsGarbageAndUnknown)
     EXPECT_EQ(parsePromptReply(CborValue(std::move(noSecret)).encode()).error(), PrompterParseError::MissingField);
 }
 
+// The status words on this wire are the agent library's prompter vocabulary,
+// the same words every host and prompter speak: each status travels as its
+// word and parses back as itself, on the secret and on the confirmation
+// reply. The words are spelled out rather than read from the library, because
+// they are the contract a prompter built from another tree has to meet.
+TEST(PrompterProtocol, ReplyStatusesTravelAsTheSharedWords)
+{
+    struct Row
+    {
+        PromptReplyStatus status;
+        const char* word;
+    };
+    const Row rows[] = {
+        {.status = PromptReplyStatus::Ok, .word = "ok"},
+        {.status = PromptReplyStatus::Cancelled, .word = "cancelled"},
+        {.status = PromptReplyStatus::Error, .word = "error"},
+        {.status = PromptReplyStatus::Unauthorized, .word = "unauthorized"},
+        {.status = PromptReplyStatus::Timeout, .word = "timeout"},
+        {.status = PromptReplyStatus::OkMrz, .word = "ok_mrz"},
+    };
+    for (const auto& row : rows) {
+        PromptReply reply;
+        reply.status = row.status;
+        if (row.status == PromptReplyStatus::Ok) {
+            reply.secret = {'1', '2', '3', '4'};
+        }
+        const auto tree = decode(toCbor(reply).encode());
+        ASSERT_TRUE(tree.has_value());
+        ASSERT_NE(tree->find("status"), nullptr);
+        ASSERT_NE(tree->find("status")->asText(), nullptr);
+        EXPECT_EQ(*tree->find("status")->asText(), row.word);
+        EXPECT_EQ(roundTripReply(reply).status, row.status) << row.word;
+
+        const auto confirm = parseConfirmReply(toCbor(ConfirmReply{.status = row.status, .userMessage = {}}).encode());
+        ASSERT_TRUE(confirm.has_value()) << row.word;
+        EXPECT_EQ(confirm->status, row.status) << row.word;
+    }
+}
+
+// A RequestSecret asks for ONE secret. The kind vocabulary also names the PIN
+// pair, which only RequestSecrets carries, so a RequestSecret naming it is
+// refused rather than shown as a single PIN entry.
+TEST(PrompterProtocol, ARequestSecretNeverNamesThePinPair)
+{
+    for (const char* kind : {"pin", "can", "mrz"}) {
+        CborValue::Map m;
+        m.emplace("t", CborValue("RequestSecret"));
+        m.emplace("kind", CborValue(kind));
+        EXPECT_TRUE(parsePrompterRequest(CborValue(std::move(m)).encode()).has_value()) << kind;
+    }
+    CborValue::Map pair;
+    pair.emplace("t", CborValue("RequestSecret"));
+    pair.emplace("kind", CborValue("change_pin"));
+    const auto parsed = parsePrompterRequest(CborValue(std::move(pair)).encode());
+    ASSERT_FALSE(parsed.has_value());
+    EXPECT_EQ(parsed.error(), PrompterParseError::BadEnum);
+}
+
 TEST(PrompterProtocol, RejectsOversizedSecretFailClosed)
 {
     PromptReply oversized;
@@ -792,20 +850,20 @@ TEST(PrompterProtocol, ReaderIdentityRoundTripsAndSaysNothingWhenItKnowsNothing)
                               .minLength = 6,
                               .maxLength = 6,
                               .readerModel = "OMNIKEY 5422",
-                              .readerInterface = kReaderInterfaceContactless,
+                              .readerInterface = "contactless",
                               .readerFull = "HID Global OMNIKEY 5422 Smartcard Reader "
                                             "[OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00"};
     EXPECT_EQ(roundTripRequest(named), named);
     const auto namedTree = LibreSCRS::Agent::Wire::decode(toCbor(named).encode());
     ASSERT_TRUE(namedTree.has_value());
     ASSERT_NE(namedTree->find("readerInterface"), nullptr);
-    EXPECT_EQ(*namedTree->find("readerInterface")->asText(), std::string{kReaderInterfaceContactless});
+    EXPECT_EQ(*namedTree->find("readerInterface")->asText(), std::string{"contactless"});
 
     // "unknown" is not a word on this wire: it is the absence of the key. The
     // token exists so the client's switch over the core enum can stay
     // exhaustive, and the codec is where it becomes silence.
     const PromptRequest undetermined{
-        .kind = PromptKind::Pin, .readerModel = "Gemalto PC Twin Reader", .readerInterface = kReaderInterfaceUnknown};
+        .kind = PromptKind::Pin, .readerModel = "Gemalto PC Twin Reader", .readerInterface = "unknown"};
     const auto undeterminedTree = LibreSCRS::Agent::Wire::decode(toCbor(undetermined).encode());
     ASSERT_TRUE(undeterminedTree.has_value());
     EXPECT_NE(undeterminedTree->find("readerModel"), nullptr) << "the model still names the reader";

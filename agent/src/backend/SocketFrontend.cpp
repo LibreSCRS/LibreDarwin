@@ -6,56 +6,38 @@
 // loop. Mirrors LibreLinux's Card1/Manager1/Config1/Pkcs11_1 semantics against
 // the neutral LibreAgent::Core.
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
-#include <LibreSCRS/Darwin/backend/AgentCoreSeams.h> // isContactSlotOfDualInterfaceUnit (the hold gate)
 
 #include <LibreSCRS/Darwin/backend/SocketOperationChannel.h>
 #include <LibreSCRS/Darwin/backend/wire/AnonFd.h>
 
-#include <LibreSCRS/Agent/operations/ActivateSigningKeyOperation.h>
-#include <LibreSCRS/Agent/operations/GetPhotoOperation.h>
-#include <LibreSCRS/Agent/operations/ListCredentialsOperation.h>
-#include <LibreSCRS/Agent/operations/ManagePinOperation.h>
-#include <LibreSCRS/Agent/operations/ReadCertificatesOperation.h>
-#include <LibreSCRS/Agent/operations/ReadTokenInfoOperation.h>
-#include <LibreSCRS/Agent/operations/ReadIdentityOperation.h>
-#include <LibreSCRS/Agent/operations/SignOperation.h>
-#include <LibreSCRS/Agent/operations/SignBatchOperation.h>
-
 #include <LibreSCRS/Agent/AgentCore.h>
-#include <LibreSCRS/Agent/CryptoWorkerContext.h>
 #include <LibreSCRS/Agent/FeatureTokens.h>
 #include <LibreSCRS/Agent/Reply.h>
 #include <LibreSCRS/Agent/SecureZero.h>
 #include <LibreSCRS/Secure/Buffer.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 
 #include <algorithm>
 #include <LibreSCRS/Agent/config/ConfigStore.h>
 #include <LibreSCRS/Agent/trust/CscaAnchorImport.h>
 #include <LibreSCRS/Agent/crypto/Mechanism.h>
 #include <LibreSCRS/Agent/operations/BatchSignFlow.h> // isValidBatchDocumentCount, kMin/kMaxBatchDocuments, BatchDocumentInput
-#include <LibreSCRS/Agent/operations/CardSessionHolder.h>
-#include <LibreSCRS/Agent/operations/LmSeams.h>
-#include <LibreSCRS/Agent/operations/Seams.h> // NullCredentialDepositor
+#include <LibreSCRS/Agent/operations/LmSeams.h> // layoutVisualSignature, appearanceFontBytes
 #include <LibreSCRS/Plugin/CardPluginService.h>
 #include <LibreSCRS/Agent/operations/OperationManager.h>
 #include <LibreSCRS/Agent/operations/PinChangeFlow.h> // PinManageRequest, validatePinManageRequest
 #include <LibreSCRS/Agent/operations/SignatureParams.h>
 #include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>
 #include <LibreSCRS/Agent/util/CallerLabel.h>
-#include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialSnapshot, EntryError
-#include <LibreSCRS/Agent/wire/Framing.h>           // kMaxFrameFds (socket per-frame fd budget)
+#include <LibreSCRS/Agent/value/CredentialRecord.h>      // CredentialSnapshot, EntryError
+#include <LibreSCRS/Agent/value/SyncErrorTaxonomy.h>     // toSyncError: the one table both hosts send
+#include <LibreSCRS/Agent/wire/BoundedFdRead.h>          // readBoundedRegularFd, kMaxInputBytes
+#include <LibreSCRS/Agent/wire/Framing.h>                // kMaxFrameFds (socket per-frame fd budget)
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h> // the requester's signing identifier
 
-#include <LibreSCRS/Plugin/CardPlugin.h>  // CardPlugin::pluginId() (the single-candidate cardType)
 #include <LibreSCRS/Plugin/PluginTypes.h> // CardCapabilities
 
-#include <fcntl.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
-#include <array>
-#include <cerrno>
 #include <chrono>
 #include <cstdint>
 #include <expected>
@@ -71,7 +53,7 @@ namespace LibreSCRS::Darwin {
 namespace {
 
 namespace A = LibreSCRS::Agent;
-namespace log = LibreSCRS::Agent::log;
+namespace log = LibreSCRS::log;
 namespace Ops = LibreSCRS::Agent::Operations;
 namespace sp = LibreSCRS::Agent::Operations::SignatureParams;
 
@@ -87,100 +69,41 @@ constexpr std::uint32_t kPkiCapBit = static_cast<std::uint32_t>(LibreSCRS::Plugi
 constexpr std::uint32_t kPinManagementCapBit =
     static_cast<std::uint32_t>(LibreSCRS::Plugin::CardCapabilities::PinManagement);
 
-constexpr const char* kArtifactIdentity = "identity";
-constexpr const char* kArtifactPhoto = "photo";
-constexpr const char* kArtifactCertificates = "certificates";
-constexpr const char* kArtifactTokenInfo = "token";
-constexpr const char* kArtifactCredentials = "credentials";
-
 // The credentials verb that may carry the activateKey wire key (the wire's
 // closed cred-verb vocabulary; validatePinManageRequest owns the full check).
 constexpr const char* kVerbActivatePin = "activate_pin";
 
-constexpr std::size_t kMaxInputBytes = 256ull * 1024 * 1024;
-constexpr std::chrono::milliseconds kResolveRetryDelay{50};
-
-enum class ReadStatus { Ok, TooLarge, Error, NotRegular };
-struct ReadDoc
+// The stored anchor record as the wire's reply type. One conversion for the
+// import's reply and for GetConfig's CscaAnchorState entry, so LibreAgent's one
+// encoder decides both: the field names, and which fields an absent value
+// leaves out.
+A::Wire::CscaAnchorStateReply toAnchorStateReply(const A::Config::CscaAnchorState& recorded)
 {
-    ReadStatus status{ReadStatus::Error};
-    std::vector<std::uint8_t> bytes;
-};
-
-// Read the whole document off @p fd, capping at @p cap. The fd MUST be a regular
-// file / anonymous file: a pipe/socket/char fd would let a client stall the
-// blocking read on the loop thread (whole-agent DoS), so non-regular fds are
-// rejected up front via fstat. (Mirror of LibreLinux CardObject::readDocument.)
-ReadDoc readDocument(int fd, std::size_t cap)
-{
-    if (fd < 0) {
-        return {ReadStatus::Error, {}};
-    }
-    struct stat st{};
-    if (::fstat(fd, &st) != 0) {
-        return {ReadStatus::Error, {}};
-    }
-    if (!S_ISREG(st.st_mode)) {
-        return {ReadStatus::NotRegular, {}};
-    }
-    std::vector<std::uint8_t> out;
-    std::array<std::uint8_t, 64 * 1024> buf{};
-    for (;;) {
-        const ssize_t n = ::read(fd, buf.data(), buf.size());
-        if (n < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return {ReadStatus::Error, {}};
-        }
-        if (n == 0) {
-            return {ReadStatus::Ok, std::move(out)};
-        }
-        if (out.size() + static_cast<std::size_t>(n) > cap) {
-            return {ReadStatus::TooLarge, {}};
-        }
-        out.insert(out.end(), buf.data(), buf.data() + static_cast<std::size_t>(n));
-    }
+    A::Wire::CscaAnchorStateReply reply;
+    reply.anchors = recorded.anchors;
+    reply.issuers = recorded.issuers;
+    reply.replayRefusalActive = recorded.replayRefusalActive;
+    // Absent when the import took in several publishers: there is then no
+    // publisher to name, and an empty string would read as one whose
+    // fingerprint happens to be blank.
+    reply.signer = recorded.signer.empty() ? std::nullopt : std::optional<std::string>{recorded.signer};
+    reply.signerPinned = recorded.signerPinned;
+    reply.acceptedAt = recorded.acceptedAt;
+    reply.signedAt = recorded.signedAt;
+    reply.origin = recorded.origin;
+    return reply;
 }
 
-A::Wire::SyncError mapLoginOutcome(A::Pkcs11Broker::LoginOutcome oc) noexcept
+// GetConfig's CscaAnchorState entry: the state as a value in a map, encoded by
+// the same LibreAgent encoder the import's reply is built from, so the two
+// cannot name or omit a field differently. Absent until an import has been
+// accepted, and absent is not zero: a zeroed report and an accepted list that
+// vouched for nothing mean opposite things. An empty map is this wire's
+// "nothing installed".
+A::Wire::CborValue anchorStateEntry(const std::optional<A::Config::CscaAnchorState>& held)
 {
-    using LO = A::Pkcs11Broker::LoginOutcome;
-    switch (oc) {
-    case LO::NotAuthorizedByCard:
-        return A::Wire::SyncError::AuthFailed;
-    case LO::UnknownCard:
-        return A::Wire::SyncError::UnknownCard;
-    case LO::NotAuthorized:
-        return A::Wire::SyncError::NotAuthorized;
-    // The one a person produces on purpose. It used to arrive at the loader as
-    // a device error, so dismissing the PIN prompt looked like a broken reader.
-    case LO::Cancelled:
-        return A::Wire::SyncError::Cancelled;
-    case LO::Ok:
-    case LO::CardError:
-        break;
-    }
-    return A::Wire::SyncError::CommunicationError;
-}
-
-// Map a validatePinManageRequest EntryError onto its typed wire error. UnknownVerb
-// / UnknownOption / InvalidCombination are the client's fault (InvalidRequest);
-// UnknownCredential (bad or unlisted pinId, incl. the never-listed case) is its own
-// name so a client can distinguish "re-list and retry" from "fix your request".
-// (Mirror of LibreLinux CardObject's throwEntryError.)
-A::Wire::SyncError mapEntryError(A::EntryError err) noexcept
-{
-    switch (err) {
-    case A::EntryError::UnknownCredential:
-        return A::Wire::SyncError::UnknownCredential;
-    case A::EntryError::UnknownVerb:
-    case A::EntryError::UnknownOption:
-    case A::EntryError::InvalidCombination:
-    case A::EntryError::AmbiguousCredential: // non-unique label: the seam must never guess
-        break;
-    }
-    return A::Wire::SyncError::InvalidRequest;
+    return held ? A::Wire::encodeCscaAnchorState(toAnchorStateReply(*held))
+                : A::Wire::CborValue(A::Wire::CborValue::Map{});
 }
 
 // Extract a std::string from a CBOR text value; nullopt on a type mismatch.
@@ -229,9 +152,16 @@ void postSecretReply(SocketTransport* tr, std::uint64_t connId, std::uint64_t re
     });
 }
 
+// The one shape of a bare sync-error reply: the code and nothing else. Every
+// path that answers with only a code builds it here.
+A::Wire::CborValue syncErrorReply(std::uint64_t req, A::Wire::SyncError code)
+{
+    return A::Wire::makeErrorReply(req, A::Wire::ErrInfo{code, std::nullopt, std::nullopt});
+}
+
 void postErr(SocketTransport* tr, std::uint64_t connId, std::uint64_t req, A::Wire::SyncError code)
 {
-    postReply(tr, connId, A::Wire::makeErrorReply(req, A::Wire::ErrInfo{code, std::nullopt, std::nullopt}));
+    postReply(tr, connId, syncErrorReply(req, code));
 }
 
 // The sign-opts vocabulary resolved to concrete values, shared by Sign and
@@ -343,40 +273,15 @@ std::expected<ResolvedSignOptions, A::Wire::SyncError> resolveSignOptions(const 
 
 } // namespace
 
-// Pkcs11Broker::CryptoOutcome -> wire sync error. A dismissed prompt has its
-// own name now; CardError still fails closed to CommunicationError, which is
-// what it means. Ok is not an outcome this function is called for.
-A::Wire::SyncError detail::mapCryptoOutcome(A::Pkcs11Broker::CryptoOutcome oc) noexcept
-{
-    using CO = A::Pkcs11Broker::CryptoOutcome;
-    switch (oc) {
-    case CO::KeyNotFound:
-        return A::Wire::SyncError::KeyNotFound;
-    case CO::AuthFailed:
-        return A::Wire::SyncError::AuthFailed;
-    case CO::NotSupported:
-        return A::Wire::SyncError::NotSupported;
-    case CO::UnknownCard:
-        return A::Wire::SyncError::UnknownCard;
-    case CO::UserNotLoggedIn:
-        return A::Wire::SyncError::UserNotLoggedIn;
-    case CO::RateLimited:
-        return A::Wire::SyncError::RateLimited;
-    case CO::Cancelled:
-        return A::Wire::SyncError::Cancelled;
-    case CO::InvalidInput:
-        // Refused before any prompt: the request does not fit the key.
-        return A::Wire::SyncError::InvalidRequest;
-    case CO::Ok:
-    case CO::CardError:
-        break;
-    }
-    return A::Wire::SyncError::CommunicationError;
-}
-
 SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, std::string version,
                                std::shared_ptr<LibreSCRS::Plugin::CardPluginService> plugins)
-    : m_transport(transport), m_core(core), m_version(std::move(version)), m_plugins(std::move(plugins))
+    : m_transport(transport), m_core(core), m_version(std::move(version)), m_plugins(std::move(plugins)),
+      // The deposit seam is the one read-path seam that needs the registry: a
+      // renegotiated read hands the chosen passport MRZ to the candidate
+      // plugins, and only the registry holds mutable handles to them. Bound
+      // once, here, for every operation the launcher builds.
+      m_launcher(core, Ops::OperationSeams::production(core, m_plugins.get())),
+      m_resolution(detail::kResolveRetryBudget, detail::isRefusedSession)
 {
     // Reconcile before this object can answer anything. The store has just been
     // loaded from its file and the loop is entered after construction, so no
@@ -392,18 +297,6 @@ SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, s
     // Without it this host served a remembered "903 anchors" over a directory
     // someone had emptied, and nothing anywhere would have said otherwise.
     A::Trust::discardStaleAnchorReport(m_core.configStore());
-    // The deposit seam is the one read-path seam that needs the registry: a
-    // renegotiated read hands the chosen passport MRZ to the candidate plugins,
-    // and only the registry holds mutable handles to them. Bound once, here, so
-    // no request site can quietly fall back to the no-op on a host that has a
-    // registry -- which is what this host did for two months, every identity
-    // and photo read carrying a no-op of its own regardless of the registry
-    // main.cpp had built.
-    if (m_plugins != nullptr) {
-        m_depositor = std::make_unique<A::Operations::LmCredentialDepositor>(*m_plugins);
-    } else {
-        m_depositor = std::make_unique<A::Operations::NullCredentialDepositor>();
-    }
     m_confirmQueue = dispatch_queue_create("rs.librescrs.agent.confirm", DISPATCH_QUEUE_CONCURRENT);
     // Refuse by default. Nothing here knows how to ask a human until main.cpp
     // injects the prompter client, and a build that forgot to inject one must
@@ -411,11 +304,6 @@ SocketFrontend::SocketFrontend(SocketTransport& transport, A::AgentCore& core, s
     m_confirm = [](const wire::ConfirmAction&) {
         return wire::ConfirmReply{wire::PromptReplyStatus::Error, "no confirmation mechanism"};
     };
-}
-
-A::Operations::CredentialDepositor& SocketFrontend::credentialDepositor() noexcept
-{
-    return *m_depositor;
 }
 
 SocketFrontend::~SocketFrontend()
@@ -446,10 +334,14 @@ void SocketFrontend::start()
 
 std::string SocketFrontend::requesterLabel(const A::CallerToken& caller) const
 {
-    if (const auto creds = m_transport.credentialsFor(caller)) {
-        return A::sanitizeLabel(creds->label());
+    const auto creds = m_transport.credentialsFor(caller);
+    if (!creds) {
+        return {};
     }
-    return {};
+    // No team: only the identifier is wanted here, not a verdict on who signed
+    // it. The process label stays in the log, on the connect line.
+    const auto signing = A::Wire::Darwin::resolvePeerCodeSigning(*creds, std::nullopt);
+    return detail::requesterLabelFor(signing.signingId, creds->label());
 }
 
 void SocketFrontend::sendReplyOnLoop(std::uint64_t connId, A::Wire::CborValue message)
@@ -459,7 +351,7 @@ void SocketFrontend::sendReplyOnLoop(std::uint64_t connId, A::Wire::CborValue me
 
 void SocketFrontend::replyError(std::uint64_t connId, std::uint64_t req, A::Wire::SyncError code)
 {
-    sendReplyOnLoop(connId, A::Wire::makeErrorReply(req, A::Wire::ErrInfo{code, std::nullopt, std::nullopt}));
+    sendReplyOnLoop(connId, syncErrorReply(req, code));
 }
 
 void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
@@ -547,8 +439,18 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
     }
 }
 
-void SocketFrontend::handleHello(std::uint64_t connId, std::uint64_t req, const A::Wire::Hello& /*msg*/)
+void SocketFrontend::handleHello(std::uint64_t connId, std::uint64_t req, const A::Wire::Hello& msg)
 {
+    // A client of another wire version would otherwise meet a decode failure
+    // somewhere in the middle of an operation; it is told here, once, and the
+    // connection ends there. Left open, it could go on sending requests and
+    // receiving presence events in a protocol it has just been told it does
+    // not speak.
+    if (msg.proto != A::Wire::kProtocolVersion) {
+        m_transport.sendThenClose(connId, syncErrorReply(req, A::Wire::SyncError::UnsupportedProtocol));
+        return;
+    }
+    m_transport.setWantsPresenceEvents(connId, msg.wantsEvents);
     A::Wire::HelloAck ack;
     ack.agentVer = m_version;
     // Served verbatim from the single source of truth in LibreAgent core
@@ -602,6 +504,55 @@ void SocketFrontend::handleGetAppearanceFont(std::uint64_t connId, std::uint64_t
 }
 
 // --- card operations ---------------------------------------------------------
+//
+// Each handler checks what only this host can check -- the card handle, the
+// capability bit, authorization, its own argument decoding -- and hands the
+// rest to the shared launcher, which assembles and queues the operation the
+// same way for every host.
+
+Ops::OperationTarget SocketFrontend::operationTarget(const SocketTransport::CardRouting& routing,
+                                                     const A::CallerToken& caller) const
+{
+    return Ops::OperationTarget{
+        .card =
+            A::ReaderCard{.readerId = routing.readerId, .readerName = routing.readerName, .cardKey = routing.cardKey},
+        .caller = caller,
+        .requester = requesterLabel(caller),
+    };
+}
+
+Ops::OperationLauncher::ChannelFactory
+SocketFrontend::channelFor(std::uint64_t connId, SocketOperationChannel::SignArtifactSink onSignArtifact)
+{
+    // Called by the launcher on this (loop) thread, once, for an accepted
+    // launch; the channel it builds lives with the operation on the worker.
+    return [this, connId, onSignArtifact = std::move(onSignArtifact)](
+               A::OperationId id, const std::shared_ptr<Ops::OperationState>& state) {
+        return std::make_unique<SocketOperationChannel>(m_transport, connId, id.value(), state, onSignArtifact,
+                                                        makeOpFinishedSink());
+    };
+}
+
+void SocketFrontend::replyLaunched(std::uint64_t connId, std::uint64_t req, const A::CallerToken& caller,
+                                   const Ops::OperationLauncher::Launched& launched)
+{
+    if (!launched) {
+        replyError(connId, req, launched.error());
+        return;
+    }
+    m_opOwners[launched->value()] = caller;
+    sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{launched->value()}));
+}
+
+Ops::OperationLauncher::CardTypeSink SocketFrontend::cardTypeSink(const std::string& cardHandle)
+{
+    // Fires on the worker: capture the long-lived transport, never `this`, and
+    // let the loop publish the type the read resolved.
+    auto* tr = &m_transport;
+    return [tr, cardHandle](const std::string& cardType) {
+        tr->post([tr, cardHandle, cardType] { tr->updateCardType(cardHandle, cardType); });
+    };
+}
 
 void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const A::Wire::ReadIdentity& msg)
 {
@@ -616,54 +567,9 @@ void SocketFrontend::handleReadIdentity(SocketTransport::Inbound& in, const A::W
         replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
-    const std::string requester = requesterLabel(in.caller);
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    auto& core = m_core;
-    // Value-captured (never `this`): safe to invoke from the worker thread at
-    // any later time, mirroring scheduleCardResolve's worker->loop marshal.
-    auto* tr = &m_transport;
-    const std::string cardHandle = msg.card;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName, requester, tr,
-             cardHandle](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
-                auto reader = std::make_shared<Ops::LmCardReader>();
-                auto state = std::make_shared<Ops::OperationState>();
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::ReadIdentityOperation::Deps deps{
-                    .holder = holder,
-                    .reader = *reader,
-                    .depositor = credentialDepositor(),
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credentials = core.credentialCache(),
-                    .readCache = core.cardReadCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .artifact = kArtifactIdentity,
-                    .onCardType =
-                        [tr, cardHandle](const std::string& cardType) {
-                            tr->post([tr, cardHandle, cardType] { tr->updateCardType(cardHandle, cardType); });
-                        },
-                };
-                auto op = std::make_unique<Ops::ReadIdentityOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(reader);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(operationTarget(*routing, in.caller), channelFor(connId),
+                                    Ops::OperationLauncher::ReadIdentity{.onCardType = cardTypeSink(msg.card)}));
 }
 
 void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const A::Wire::GetPhoto& msg)
@@ -679,54 +585,9 @@ void SocketFrontend::handleGetPhoto(SocketTransport::Inbound& in, const A::Wire:
         replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
-    const std::string requester = requesterLabel(in.caller);
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    auto& core = m_core;
-    // Value-captured (never `this`): safe to invoke from the worker thread at
-    // any later time, mirroring scheduleCardResolve's worker->loop marshal.
-    auto* tr = &m_transport;
-    const std::string cardHandle = msg.card;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName, requester, tr,
-             cardHandle](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
-                auto reader = std::make_shared<Ops::LmCardReader>();
-                auto state = std::make_shared<Ops::OperationState>();
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::GetPhotoOperation::Deps deps{
-                    .holder = holder,
-                    .reader = *reader,
-                    .depositor = credentialDepositor(),
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credentials = core.credentialCache(),
-                    .readCache = core.cardReadCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .artifact = kArtifactPhoto,
-                    .onCardType =
-                        [tr, cardHandle](const std::string& cardType) {
-                            tr->post([tr, cardHandle, cardType] { tr->updateCardType(cardHandle, cardType); });
-                        },
-                };
-                auto op = std::make_unique<Ops::GetPhotoOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(reader);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(operationTarget(*routing, in.caller), channelFor(connId),
+                                    Ops::OperationLauncher::GetPhoto{.onCardType = cardTypeSink(msg.card)}));
 }
 
 void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const A::Wire::ReadCertificates& msg)
@@ -742,52 +603,9 @@ void SocketFrontend::handleReadCertificates(SocketTransport::Inbound& in, const 
         replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
-    const std::string requester = requesterLabel(in.caller);
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    auto& core = m_core;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName,
-             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
-                auto certReader = std::make_shared<Ops::LmCertificateReader>();
-                // Reuses core.signingEngineProvider()'s already-built
-                // TrustStoreService (see SigningEngineProvider::trustSnapshot())
-                // -- no separate trust store, no new LM API, mirroring the
-                // Sign path's own core.signingEngineProvider() reuse below.
-                auto trustVerifier = std::make_shared<Ops::LmTrustVerifier>(core.signingEngineProvider());
-                auto state = std::make_shared<Ops::OperationState>();
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::ReadCertificatesOperation::Deps deps{
-                    .holder = holder,
-                    .certReader = *certReader,
-                    .trustVerifier = *trustVerifier,
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credentials = core.credentialCache(),
-                    .readCache = core.cardReadCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .artifact = kArtifactCertificates,
-                };
-                auto op = std::make_unique<Ops::ReadCertificatesOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(certReader);
-                op->keepAlive(trustVerifier);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(operationTarget(*routing, in.caller), channelFor(connId),
+                                    Ops::OperationLauncher::ReadCertificates{}));
 }
 
 void SocketFrontend::handleReadTokenInfo(SocketTransport::Inbound& in, const A::Wire::ReadTokenInfo& msg)
@@ -806,44 +624,9 @@ void SocketFrontend::handleReadTokenInfo(SocketTransport::Inbound& in, const A::
         replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
-    const std::string requester = requesterLabel(in.caller);
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    auto& core = m_core;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName,
-             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
-                auto reader = std::make_shared<Ops::LmCardReader>();
-                auto state = std::make_shared<Ops::OperationState>();
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::ReadTokenInfoOperation::Deps deps{
-                    .holder = holder,
-                    .reader = *reader,
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credentials = core.credentialCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .artifact = kArtifactTokenInfo,
-                };
-                auto op = std::make_unique<Ops::ReadTokenInfoOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(reader);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(operationTarget(*routing, in.caller), channelFor(connId),
+                                    Ops::OperationLauncher::ReadTokenInfo{}));
 }
 
 void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sign& msg)
@@ -888,16 +671,16 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sig
         replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
-    auto doc = readDocument(in.fds[msg.inFd].get(), kMaxInputBytes);
-    if (doc.status == ReadStatus::NotRegular) {
+    auto doc = A::Wire::readBoundedRegularFd(in.fds[msg.inFd].get(), A::Wire::kMaxInputBytes);
+    if (doc.status == A::Wire::ReadStatus::NotRegular) {
         replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
         return;
     }
-    if (doc.status == ReadStatus::TooLarge) {
+    if (doc.status == A::Wire::ReadStatus::TooLarge) {
         replyError(connId, req, A::Wire::SyncError::InputTooLarge);
         return;
     }
-    if (doc.status == ReadStatus::Error) {
+    if (doc.status == A::Wire::ReadStatus::Error) {
         replyError(connId, req, A::Wire::SyncError::CommunicationError); // internal read failure
         return;
     }
@@ -917,7 +700,6 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sig
         return;
     }
 
-    const std::string requester = requesterLabel(in.caller);
     Ops::SignParams params{
         .certId = msg.cert,
         .inputDocument = std::move(doc.bytes),
@@ -932,52 +714,18 @@ void SocketFrontend::handleSign(SocketTransport::Inbound& in, const A::Wire::Sig
         .visual = std::move(resolved->visual),
     };
 
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    const A::CallerToken owner = in.caller;
+    // The sign sink fires on the WORKER thread: touch only the long-lived
+    // transport there, and marshal the frontend-state store (m_signResults)
+    // onto the loop where the loop-quiesce drop guards it against a
+    // post-teardown frontend.
     auto* tr = &m_transport;
-    auto& core = m_core;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, tr, connId, owner, &core, cardKey, readerName, requester, params = std::move(params)](
-                Ops::CardSessionHolder* holder, A::OperationId opId) mutable -> std::unique_ptr<Ops::OperationBase> {
-                auto signer = std::make_shared<Ops::LmSigner>(core.signingEngineProvider());
-                auto state = std::make_shared<Ops::OperationState>();
-                // The sign sink fires on the WORKER thread: touch only the
-                // long-lived transport there, and marshal the frontend-state store
-                // (m_signResults) onto the loop where the loop-quiesce drop guards
-                // it against a post-teardown frontend.
-                auto channel = std::make_unique<SocketOperationChannel>(
-                    m_transport, connId, opId.value(), state,
-                    [this, tr, owner](std::uint64_t sid, const Ops::SignedArtifact& artifact) {
-                        tr->post([this, sid, owner, artifact] { stashSignArtifact(sid, owner, artifact); });
-                    },
-                    makeOpFinishedSink());
-                Ops::SignOperation::Deps deps{
-                    .holder = holder,
-                    .signer = *signer,
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credentials = core.credentialCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .params = std::move(params),
-                };
-                auto op = std::make_unique<Ops::SignOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(signer);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = owner;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    const A::CallerToken owner = in.caller;
+    auto stash = [this, tr, owner](std::uint64_t sid, const Ops::SignedArtifact& artifact) {
+        tr->post([this, sid, owner, artifact] { stashSignArtifact(sid, owner, artifact); });
+    };
+    replyLaunched(connId, req, owner,
+                  m_launcher.launch(operationTarget(*routing, owner), channelFor(connId, std::move(stash)),
+                                    Ops::OperationLauncher::Sign{.params = std::move(params)}));
 }
 
 void SocketFrontend::handleSignBatch(SocketTransport::Inbound& in, const A::Wire::SignBatch& msg)
@@ -1030,8 +778,8 @@ void SocketFrontend::handleSignBatch(SocketTransport::Inbound& in, const A::Wire
     }
 
     // Read every document off its own fd-index, in request order — the SAME
-    // 256 MiB cap + regular-file-only + non-empty rule Sign's own
-    // readDocument enforces for its single document, applied per document
+    // 256 MiB cap + regular-file-only + non-empty rule Sign enforces for
+    // its single document (readBoundedRegularFd), applied per document
     // here. A single bad document rejects the WHOLE call (no Operation
     // minted): method entry has no per-row partial semantics, only the flow
     // does (auth/crypto failures).
@@ -1042,16 +790,16 @@ void SocketFrontend::handleSignBatch(SocketTransport::Inbound& in, const A::Wire
             replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
             return;
         }
-        auto doc = readDocument(in.fds[entry.fdIndex].get(), kMaxInputBytes);
-        if (doc.status == ReadStatus::NotRegular) {
+        auto doc = A::Wire::readBoundedRegularFd(in.fds[entry.fdIndex].get(), A::Wire::kMaxInputBytes);
+        if (doc.status == A::Wire::ReadStatus::NotRegular) {
             replyError(connId, req, A::Wire::SyncError::UnsupportedSignatureParameter);
             return;
         }
-        if (doc.status == ReadStatus::TooLarge) {
+        if (doc.status == A::Wire::ReadStatus::TooLarge) {
             replyError(connId, req, A::Wire::SyncError::InputTooLarge);
             return;
         }
-        if (doc.status == ReadStatus::Error) {
+        if (doc.status == A::Wire::ReadStatus::Error) {
             replyError(connId, req, A::Wire::SyncError::CommunicationError); // internal read failure
             return;
         }
@@ -1075,7 +823,6 @@ void SocketFrontend::handleSignBatch(SocketTransport::Inbound& in, const A::Wire
         return;
     }
 
-    const std::string requester = requesterLabel(in.caller);
     Ops::SignParams params{
         .certId = msg.cert,
         // Ignored by BatchSignFlow — each entry in `inputs` above supplies
@@ -1092,49 +839,13 @@ void SocketFrontend::handleSignBatch(SocketTransport::Inbound& in, const A::Wire
         .visual = std::move(resolved->visual),
     };
 
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    const A::CallerToken owner = in.caller;
-    auto& core = m_core;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, owner, &core, cardKey, readerName, requester, params = std::move(params),
-             documents = std::move(inputs)](Ops::CardSessionHolder* holder,
-                                            A::OperationId opId) mutable -> std::unique_ptr<Ops::OperationBase> {
-                auto signer = std::make_shared<Ops::LmSigner>(core.signingEngineProvider());
-                auto state = std::make_shared<Ops::OperationState>();
-                // No SignArtifactSink: unlike a single Sign, SignBatch has no
-                // GetSignResult-style pull recovery on this wire (the CDDL
-                // pins recovery Sign-only), so nothing needs stashing.
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::SignBatchOperation::Deps deps{
-                    .holder = holder,
-                    .signer = *signer,
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credentials = core.credentialCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .params = std::move(params),
-                    .documents = std::move(documents),
-                };
-                auto op = std::make_unique<Ops::SignBatchOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(signer);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = owner;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    // No sign sink: unlike a single Sign, SignBatch has no GetSignResult-style
+    // pull recovery on this wire (the CDDL pins recovery Sign-only), so
+    // nothing needs stashing.
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(
+                      operationTarget(*routing, in.caller), channelFor(connId),
+                      Ops::OperationLauncher::SignBatch{.params = std::move(params), .documents = std::move(inputs)}));
 }
 
 // --- credentials (PIN/PUK management) ----------------------------------------
@@ -1154,45 +865,9 @@ void SocketFrontend::handleListCredentials(SocketTransport::Inbound& in, const A
         replyError(connId, req, A::Wire::SyncError::UnsupportedOnThisCard);
         return;
     }
-    const std::string requester = requesterLabel(in.caller);
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    auto& core = m_core;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName,
-             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
-                auto credentials = std::make_shared<Ops::LmCredentialManager>();
-                auto state = std::make_shared<Ops::OperationState>();
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::ListCredentialsOperation::Deps deps{
-                    .holder = holder,
-                    .credentials = *credentials,
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credCache = core.credentialCache(),
-                    .snapshotCache = core.credentialSnapshotCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .artifact = kArtifactCredentials,
-                };
-                auto op = std::make_unique<Ops::ListCredentialsOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(credentials);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(operationTarget(*routing, in.caller), channelFor(connId),
+                                    Ops::OperationLauncher::ListCredentials{}));
 }
 
 void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const A::Wire::ManagePin& msg)
@@ -1251,53 +926,14 @@ void SocketFrontend::handleManagePin(SocketTransport::Inbound& in, const A::Wire
     // the CAN inside a call the user never framed as a read.
     std::optional<A::CredentialSnapshot> snapshot = m_core.credentialSnapshotCache().get(routing->cardKey);
     if (const auto valid = Ops::validatePinManageRequest(request, snapshot ? &*snapshot : nullptr); !valid) {
-        replyError(connId, req, mapEntryError(valid.error()));
+        replyError(connId, req, A::toSyncError(valid.error()));
         return;
     }
 
-    const std::string requester = requesterLabel(in.caller);
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    auto& core = m_core;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName, requester, request = std::move(request),
-             snapshot = std::move(*snapshot)](Ops::CardSessionHolder* holder,
-                                              A::OperationId opId) mutable -> std::unique_ptr<Ops::OperationBase> {
-                auto credentials = std::make_shared<Ops::LmCredentialManager>();
-                auto state = std::make_shared<Ops::OperationState>();
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::ManagePinOperation::Deps deps{
-                    .holder = holder,
-                    .credentials = *credentials,
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credCache = core.credentialCache(),
-                    .snapshotCache = core.credentialSnapshotCache(),
-                    .readCache = core.cardReadCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .artifact = kArtifactCredentials,
-                    .request = std::move(request),
-                    .snapshot = std::move(snapshot),
-                };
-                auto op = std::make_unique<Ops::ManagePinOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(credentials);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(operationTarget(*routing, in.caller), channelFor(connId),
+                                    Ops::OperationLauncher::ManagePin{.request = std::move(request),
+                                                                      .snapshot = std::move(*snapshot)}));
 }
 
 void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, const A::Wire::ActivateSigningKey& msg)
@@ -1333,47 +969,9 @@ void SocketFrontend::handleActivateSigningKey(SocketTransport::Inbound& in, cons
         return;
     }
 
-    const std::string requester = requesterLabel(in.caller);
-    const std::string cardKey = routing->cardKey;
-    const std::string readerName = routing->readerName;
-    const A::ObjectId readerId = routing->readerId;
-    auto& core = m_core;
-
-    try {
-        const auto id = core.operationManager().publish(
-            readerId, readerName, in.caller,
-            [this, connId, &core, cardKey, readerName,
-             requester](Ops::CardSessionHolder* holder, A::OperationId opId) -> std::unique_ptr<Ops::OperationBase> {
-                auto credentials = std::make_shared<Ops::LmCredentialManager>();
-                auto state = std::make_shared<Ops::OperationState>();
-                auto channel = std::make_unique<SocketOperationChannel>(m_transport, connId, opId.value(), state,
-                                                                        SocketOperationChannel::SignArtifactSink{},
-                                                                        makeOpFinishedSink());
-                Ops::ActivateSigningKeyOperation::Deps deps{
-                    .holder = holder,
-                    .credentials = *credentials,
-                    .prompter = *core.sharedCryptoContext()->prompter,
-                    .serializer = *core.sharedCryptoContext()->serializer,
-                    .credCache = core.credentialCache(),
-                    .snapshotCache = core.credentialSnapshotCache(),
-                    .readCache = core.cardReadCache(),
-                    .cardKey = cardKey,
-                    .readerName = readerName,
-                    .requester = requester,
-                    .artifact = kArtifactCredentials,
-                };
-                auto op =
-                    std::make_unique<Ops::ActivateSigningKeyOperation>(std::move(channel), std::move(deps), state);
-                op->keepAlive(core.sharedCryptoContext());
-                op->keepAlive(credentials);
-                op->bindShutdownToken(core.shutdownToken());
-                return op;
-            });
-        m_opOwners[id.value()] = in.caller;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::OpStarted{id.value()}));
-    } catch (const Ops::QueueFull&) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-    }
+    replyLaunched(connId, req, in.caller,
+                  m_launcher.launch(operationTarget(*routing, in.caller), channelFor(connId),
+                                    Ops::OperationLauncher::ActivateSigningKey{}));
 }
 
 void SocketFrontend::handleCancel(std::uint64_t connId, std::uint64_t req, const A::Wire::CancelOp& msg,
@@ -1486,32 +1084,7 @@ void SocketFrontend::handleGetConfig(std::uint64_t connId, std::uint64_t req)
         }
         reply.entries.emplace("CscaSources", A::Wire::CborValue(std::move(sources)));
     }
-    // Absent until an import has been accepted, and absent is not zero: a
-    // zeroed report and an accepted list that vouched for nothing mean
-    // opposite things. An empty map is this wire's "nothing installed".
-    {
-        A::Wire::CborValue::Map state;
-        if (const auto held = cfg.cscaAnchorState()) {
-            state.emplace("anchors", A::Wire::CborValue(static_cast<std::uint64_t>(held->anchors)));
-            state.emplace("issuers", A::Wire::CborValue(static_cast<std::uint64_t>(held->issuers)));
-            state.emplace("replayRefusalActive", A::Wire::CborValue(held->replayRefusalActive));
-            // Absent when the import took in several publishers: there is then
-            // no publisher for this key to name, and an empty string would read
-            // as one whose fingerprint happens to be blank.
-            if (!held->signer.empty()) {
-                state.emplace("signer", A::Wire::CborValue(held->signer));
-            }
-            state.emplace("signerPinned", A::Wire::CborValue(held->signerPinned));
-            state.emplace("origin", A::Wire::CborValue(held->origin));
-            if (held->acceptedAt) {
-                state.emplace("acceptedAt", A::Wire::CborValue(*held->acceptedAt));
-            }
-            if (held->signedAt) {
-                state.emplace("signedAt", A::Wire::CborValue(*held->signedAt));
-            }
-        }
-        reply.entries.emplace("CscaAnchorState", A::Wire::CborValue(std::move(state)));
-    }
+    reply.entries.emplace("CscaAnchorState", anchorStateEntry(cfg.cscaAnchorState()));
     sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
 }
 
@@ -1543,6 +1116,12 @@ void SocketFrontend::handleSetConfig(std::uint64_t connId, std::uint64_t req, co
     }
 
     if (*mut == A::Config::Mutability::DbusMutableTrust) {
+        // Each one raises a dialog, so the same budget as every other verb
+        // that asks a person something.
+        if (!m_core.rateLimiter().allow(caller)) {
+            replyError(connId, req, A::Wire::SyncError::RateLimited);
+            return;
+        }
         confirmThenApply(connId, req, msg.key, caller, TrustChange::SetValue,
                          [this, connId, req, msg] { applyConfigWrite(connId, req, msg); });
         return;
@@ -1685,6 +1264,19 @@ A::Wire::SyncError syncErrorFor(A::Trust::ImportRefusal reason) noexcept
 
 namespace detail {
 
+bool isRefusedSession(const LibreSCRS::SmartCard::OpenError& failure) noexcept
+{
+    return failure.kind == LibreSCRS::SmartCard::OpenError::Kind::SessionRefused;
+}
+
+std::string requesterLabelFor(const std::optional<std::string>& signingId, std::string fallback)
+{
+    if (!signingId || signingId->empty()) {
+        return A::sanitizeLabel(std::move(fallback));
+    }
+    return A::sanitizeLabel(*signingId);
+}
+
 A::Config::CscaAnchorState recordedStateFor(const A::Trust::AnchorState& imported)
 {
     // One import can now take in a COLLECTION of separately signed lists, so
@@ -1764,16 +1356,16 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
         // A PLAIN descriptor, deliberately: a master list is public data, and the
         // sealed anonymous file this agent uses elsewhere is its vocabulary for
         // secrets.
-        auto input = readDocument(held->get(), A::Trust::kMaxMasterListBytes);
-        if (input.status == ReadStatus::NotRegular) {
+        auto input = A::Wire::readBoundedRegularFd(held->get(), A::Trust::kMaxMasterListBytes);
+        if (input.status == A::Wire::ReadStatus::NotRegular) {
             replyError(connId, req, A::Wire::SyncError::InvalidRequest);
             return;
         }
-        if (input.status == ReadStatus::TooLarge) {
+        if (input.status == A::Wire::ReadStatus::TooLarge) {
             replyError(connId, req, A::Wire::SyncError::InputTooLarge);
             return;
         }
-        if (input.status == ReadStatus::Error) {
+        if (input.status == A::Wire::ReadStatus::Error) {
             replyError(connId, req, A::Wire::SyncError::CommunicationError);
             return;
         }
@@ -1806,16 +1398,7 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
         const A::Config::CscaAnchorState recorded = detail::recordedStateFor(*imported);
         cfg.recordCscaAnchorState(recorded);
 
-        A::Wire::CscaAnchorStateReply reply;
-        reply.anchors = recorded.anchors;
-        reply.issuers = recorded.issuers;
-        reply.replayRefusalActive = recorded.replayRefusalActive;
-        reply.signer = recorded.signer.empty() ? std::nullopt : std::optional<std::string>{recorded.signer};
-        reply.signerPinned = recorded.signerPinned;
-        reply.acceptedAt = recorded.acceptedAt;
-        reply.signedAt = recorded.signedAt;
-        reply.origin = recorded.origin;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
+        sendReplyOnLoop(connId, A::Wire::makeReply(req, toAnchorStateReply(recorded)));
     });
 }
 
@@ -1836,6 +1419,10 @@ void SocketFrontend::handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t
         replyError(connId, req, A::Wire::SyncError::CommunicationError);
         return;
     }
+    if (!m_core.rateLimiter().allow(caller)) {
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
+        return;
+    }
     // Human confirmation, same as a trust-tier config write. This one destroys
     // rather than replaces, and there is nothing to read it back from
     // afterwards, so the reply below is the only account of what went.
@@ -1850,8 +1437,8 @@ void SocketFrontend::handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t
             replyError(connId, req, A::Wire::SyncError::CommunicationError);
             return;
         }
-        A::log::infof("country signing anchors forgotten: anchors={} hadPinnedSigner={}", forgotten->anchors,
-                      forgotten->hadPinnedSigner);
+        log::infof("country signing anchors forgotten: anchors={} hadPinnedSigner={}", forgotten->anchors,
+                   forgotten->hadPinnedSigner);
         A::Wire::ForgetCscaAnchorsReply reply;
         reply.anchorsForgotten = forgotten->anchors;
         reply.hadPinnedSigner = forgotten->hadPinnedSigner;
@@ -1886,6 +1473,10 @@ void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, 
         return;
     }
     if (*mut == A::Config::Mutability::DbusMutableTrust) {
+        if (!m_core.rateLimiter().allow(caller)) {
+            replyError(connId, req, A::Wire::SyncError::RateLimited);
+            return;
+        }
         confirmThenApply(connId, req, msg.key, caller, TrustChange::Reset,
                          [this, connId, req, msg] { applyConfigReset(connId, req, msg); });
         return;
@@ -1913,6 +1504,10 @@ void SocketFrontend::applyConfigReset(std::uint64_t connId, std::uint64_t req, c
 void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
                                       const A::CallerToken& caller, TrustChange what, std::function<void()> apply)
 {
+    if (!m_confirmsInFlight.insert(caller).second) {
+        replyError(connId, req, A::Wire::SyncError::RateLimited);
+        return;
+    }
     wire::ConfirmAction ask;
     ask.kind = "configure_trust";
     ask.title = "Confirm trust change";
@@ -1942,6 +1537,9 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
     // is released. Narrowing the lock to the check alone, or reordering a host
     // to drop the transport first, reopens the crash this guards against.
     const auto guard = m_confirmGuard;
+    // A copy: a block captures a C++ reference as a reference, and `caller`
+    // does not outlive this call.
+    const A::CallerToken waiting = caller;
     dispatch_async(m_confirmQueue, ^{
       const wire::ConfirmReply verdict = confirm(ask);
       const std::lock_guard lock(guard->mutex);
@@ -1950,13 +1548,13 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
           // and calls a std::function sink, so it can throw, and a throw out of
           // a dispatch block terminates the process on the teardown path.
           try {
-              A::log::warn("trust confirmation answered after the frontend was gone; discarded");
+              log::warn("trust confirmation answered after the frontend was gone; discarded");
           } catch (...) {
               // Nothing left to say it with.
           }
           return;
       }
-      transport->post([this, guard, connId, req, verdict, apply] {
+      transport->post([this, guard, connId, req, waiting, verdict, apply] {
           const std::lock_guard continuationLock(guard->mutex);
           if (!guard->alive) {
               // The same fact reached the other way round: the answer was in
@@ -1965,12 +1563,13 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
               // close this window by waiting -- it opens after the last moment
               // a host could wait for. Swallowed for the same reason as above.
               try {
-                  A::log::warn("trust confirmation answered after the frontend was gone; discarded on the loop");
+                  log::warn("trust confirmation answered after the frontend was gone; discarded on the loop");
               } catch (...) {
                   // Nothing left to say it with.
               }
               return;
           }
+          m_confirmsInFlight.erase(waiting);
           if (verdict.status != wire::PromptReplyStatus::Ok) {
               // Anything that is not an explicit approval leaves the stored
               // value exactly where it was.
@@ -2023,9 +1622,7 @@ void SocketFrontend::handleCertDer(std::uint64_t connId, std::uint64_t req, cons
         [tr, connId, req](const std::vector<std::uint8_t>& der) {
             postReply(tr, connId, A::Wire::makeReply(req, A::Wire::CertDerReply{der}));
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
-            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
-        },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, A::toSyncError(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().certDer(msg.reader, msg.cert, c, reply);
 }
@@ -2049,9 +1646,7 @@ void SocketFrontend::handlePkPublicKey(std::uint64_t connId, std::uint64_t req, 
                 key);
             postReply(tr, connId, A::Wire::makeReply(req, pk));
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
-            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
-        },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, A::toSyncError(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().publicKey(msg.reader, msg.cert, c, reply);
 }
@@ -2065,7 +1660,7 @@ void SocketFrontend::handlePkLogin(std::uint64_t connId, std::uint64_t req, cons
         [tr, connId, req](std::uint32_t /*flags*/) {
             postReply(tr, connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
         },
-        [tr, connId, req](A::Pkcs11Broker::LoginOutcome oc) { postErr(tr, connId, req, mapLoginOutcome(oc)); },
+        [tr, connId, req](A::Pkcs11Broker::LoginOutcome oc) { postErr(tr, connId, req, A::toSyncError(oc)); },
         A::Pkcs11Broker::LoginOutcome::CardError};
     m_core.pkcs11().login(msg.reader, c, reply);
 }
@@ -2102,9 +1697,7 @@ void SocketFrontend::handlePkSignRaw(std::uint64_t connId, std::uint64_t req, co
         [tr, connId, req](const std::vector<std::uint8_t>& sig) {
             postReply(tr, connId, A::Wire::makeReply(req, A::Wire::RawSignatureReply{sig}));
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
-            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
-        },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, A::toSyncError(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().signRaw(msg.reader, msg.cert, *mechanism, A::MechParamsEmpty{}, msg.data, c, reply);
 }
@@ -2125,9 +1718,7 @@ void SocketFrontend::handlePkDecrypt(std::uint64_t connId, std::uint64_t req, co
         [tr, connId, req](const std::vector<std::uint8_t>& plain) {
             postSecretReply(tr, connId, req, plain, &A::Wire::RawSignatureReply::sig);
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
-            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
-        },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, A::toSyncError(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     m_core.pkcs11().decrypt(msg.reader, msg.cert, *mechanism, A::MechParamsEmpty{}, msg.data, c, reply);
 }
@@ -2141,9 +1732,7 @@ void SocketFrontend::handlePkDerive(std::uint64_t connId, std::uint64_t req, con
         [tr, connId, req](const std::vector<std::uint8_t>& z) {
             postSecretReply(tr, connId, req, z, &A::Wire::DerivedSecretReply::z);
         },
-        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) {
-            postErr(tr, connId, req, detail::mapCryptoOutcome(oc));
-        },
+        [tr, connId, req](A::Pkcs11Broker::CryptoOutcome oc) { postErr(tr, connId, req, A::toSyncError(oc)); },
         A::Pkcs11Broker::CryptoOutcome::CardError};
     // ECDH with CKD_NULL and no shared data: the raw secret, the only
     // derivation this surface runs.
@@ -2195,11 +1784,16 @@ void SocketFrontend::onReaderPropertiesChanged(A::ObjectId reader, const A::Prop
     m_transport.post([this, reader, delta] { m_transport.updateProperties(reader, delta); });
 }
 
+void SocketFrontend::onReaderRelabelled(const A::ReaderState& reader)
+{
+    m_transport.post([this, reader] { m_transport.relabelReader(reader); });
+}
+
 void SocketFrontend::scheduleCardResolve(const A::CardState& card)
 {
-    // Loop thread. Record the pending card and enqueue the held-session resolve
-    // on the reader's worker; the worker computes the capability union + pre-read
-    // auth on the OPEN session and marshals the result back to applyCardResolution.
+    // Loop thread. Record the pending card and queue the insertion probe on the
+    // reader's worker, which opens the card and marshals what it learned back
+    // to applyCardResolution.
     auto& pending = m_pendingCards[card.id.value()];
     pending.card = card;
 
@@ -2208,61 +1802,41 @@ void SocketFrontend::scheduleCardResolve(const A::CardState& card)
         readerName = it->second;
     }
 
-    // The worker hop runs on the reader WORKER thread and may block in
-    // fullResolution() well past shutdown; it must touch ONLY the long-lived
-    // transport (never `this`->m_transport). The applyCardResolution continuation
-    // captures `this` for the frontend state but is dropped by the loop-quiesce if
-    // the frontend is already gone (mirrors AgentFrontend::makeCardResolver).
+    // The probe's continuation runs on the reader WORKER thread and may run
+    // well past shutdown; it must touch ONLY the long-lived transport (never
+    // `this`->m_transport). The applyCardResolution continuation captures `this`
+    // for the frontend state but is dropped by the loop-quiesce if the frontend
+    // is already gone.
     auto* tr = &m_transport;
-    const bool queued = m_core.operationManager().enqueueOnReaderWorker(
-        card.reader, readerName, [this, tr, card](Ops::CardSessionHolder& holder) {
-            const auto resolution = holder.fullResolution();
-            // An open that failed says nothing about the card, so the loop may
-            // ask again; a resolution, even an empty one, is the answer.
-            const bool opened = resolution.has_value();
-            std::uint32_t caps = 0;
-            auto preAuth = LibreSCRS::Auth::PreReadAuthMethod::None;
-            // Card1.CardType (single-candidate case): the SAME held-session
-            // candidate list caps/preAuth were just resolved from. Ambiguous
-            // (more than one match) or empty (no match) both mean "not yet
-            // known" -- stays empty; a real read resolves it authoritatively
-            // via the property-update path (SocketTransport::updateCardType).
-            std::string cardType;
-            if (opened) {
-                caps = resolution->capabilities;
-                preAuth = resolution->preReadAuth;
-                if (resolution->candidates.size() == 1 && resolution->candidates.front()) {
-                    cardType = resolution->candidates.front()->pluginId();
-                }
-            }
-            tr->post([this, card, opened, caps, preAuth, cardType] {
-                applyCardResolution(card, opened, caps, preAuth, cardType);
-            });
+    const bool queued = A::CardResolutionPolicy::probeOnWorker(
+        m_core.operationManager(), card.reader, readerName, [this, tr, card](A::CardProbe probe) {
+            tr->post([this, card, probe = std::move(probe)] { applyCardResolution(card, probe); });
         });
     if (!queued) {
-        // Backpressure: retry on the loop after a short delay (the card stays
-        // pending, so a withdraw meanwhile drops it).
-        m_transport.postAfter(std::chrono::duration_cast<std::chrono::microseconds>(kResolveRetryDelay), [this, card] {
-            if (m_pendingCards.contains(card.id.value())) {
-                scheduleCardResolve(card);
-            }
-        });
+        // Backpressure: ask again on the loop after a short delay (the card
+        // stays pending, so a withdraw meanwhile drops it).
+        m_transport.postAfter(std::chrono::duration_cast<std::chrono::microseconds>(m_resolution.budget().firstDelay),
+                              [this, card] {
+                                  if (m_pendingCards.contains(card.id.value())) {
+                                      scheduleCardResolve(card);
+                                  }
+                              });
     }
 }
 
-void SocketFrontend::applyCardResolution(A::CardState card, bool opened, std::uint32_t caps,
-                                         LibreSCRS::Auth::PreReadAuthMethod preAuth, const std::string& cardType)
+void SocketFrontend::applyCardResolution(const A::CardState& card, const A::CardProbe& probe)
 {
     const auto it = m_pendingCards.find(card.id.value());
     if (it == m_pendingCards.end()) {
         return; // withdrawn while resolving
     }
-    // Only a card the probe could not open is asked about again. A card no
-    // plugin serves has been answered, and every repeat would connect to a
-    // card that belongs to someone else, probe it and let it go.
-    if (!opened && it->second.attempts < kMaxResolveAttempts) {
-        ++it->second.attempts;
-        m_transport.postAfter(std::chrono::duration_cast<std::chrono::microseconds>(kResolveRetryDelay), [this, card] {
+    // Only a session refused while someone else holds the card is asked about
+    // again (detail::isRefusedSession), with waits that together outlast the
+    // other prober's hold: under CryptoTokenKit a session is exclusive, and a
+    // card the system is probing at insertion may be refused rather than waited
+    // for. Every other outcome is the answer, including a card no plugin serves.
+    if (const auto delay = m_resolution.retryAfter(probe, it->second.attempts)) {
+        m_transport.postAfter(std::chrono::duration_cast<std::chrono::microseconds>(*delay), [this, card] {
             if (m_pendingCards.contains(card.id.value())) {
                 scheduleCardResolve(card);
             }
@@ -2271,20 +1845,21 @@ void SocketFrontend::applyCardResolution(A::CardState card, bool opened, std::ui
     }
     m_pendingCards.erase(it);
     // card.atrHex carries through unchanged from PresenceModel's insertion --
-    // known synchronously, well before this held-session resolve.
-    A::CardState refined{card.id, card.reader, caps, preAuth, cardType, card.atrHex};
+    // known synchronously, well before this probe.
+    A::CardState refined{card.id, card.reader, probe.capabilities, probe.preReadAuth, probe.cardType, card.atrHex};
     m_transport.publishCard(refined);
 
-    // Power hold: a card a plugin serves on the CONTACT slot of a
-    // dual-interface unit keeps its reader powered -- the reader's one session,
-    // parked with no secrets while no operation uses it -- so the same
-    // single-chip card's contactless twin stops flapping in and out of the CL
-    // slot. A card no plugin serves is not held: the probe has just let it go,
-    // and a hold would take the reader back for a card the agent cannot use.
-    // Classified from the transport's presence roster, the same lookup the
-    // prompt dialog uses; a single-interface reader is never held. Released by
-    // main.cpp's card-removed hook. Mirror of AgentFrontend::applyCardResolution.
-    if (caps != 0 && isContactSlotOfDualInterfaceUnit(m_transport.presenceRoster(), std::to_string(card.id.value()))) {
+    // Power hold: the policy's rule, classified from the transport's presence
+    // roster, the same lookup the prompt dialog uses. Released by main.cpp's
+    // card-removed hook.
+    //
+    // On macOS today this never fires. The classification reads the interface
+    // from pcsc-lite's reader-name tail (" (serial) <ifd> <slot>"), and the
+    // CryptoTokenKit slot names this host sees carry no such tail, so every
+    // reader classifies as Unknown and no card is held. A dual-interface unit's
+    // contactless twin therefore still flaps here; the branch is kept so a
+    // classification that works on these names turns it on unchanged.
+    if (A::CardResolutionPolicy::holdsReader(probe, m_transport.presenceRoster(), std::to_string(card.id.value()))) {
         m_core.operationManager().setReaderHold(card.reader, true);
         std::string readerName;
         if (const auto rn = m_readerNames.find(card.reader.value()); rn != m_readerNames.end()) {
@@ -2317,6 +1892,7 @@ void SocketFrontend::onClientDisconnected(const A::CallerToken& caller)
     m_transport.post([this, caller] {
         std::erase_if(m_opOwners, [&caller](const auto& kv) { return kv.second == caller; });
         std::erase_if(m_signResults, [&caller](const auto& kv) { return kv.second.owner == caller; });
+        m_confirmsInFlight.erase(caller);
     });
 }
 

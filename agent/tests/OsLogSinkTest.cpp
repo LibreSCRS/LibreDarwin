@@ -19,9 +19,10 @@ TEST(OsLogSink, ProducesANonEmptySink)
 TEST(OsLogSink, EmitsEverySeverityWithoutThrowing)
 {
     auto sink = LibreSCRS::Darwin::makeOsLogSink();
-    EXPECT_NO_THROW(sink(LibreSCRS::Agent::log::Level::Info, "os_log sink smoke: info"));
-    EXPECT_NO_THROW(sink(LibreSCRS::Agent::log::Level::Warn, "os_log sink smoke: warn"));
-    EXPECT_NO_THROW(sink(LibreSCRS::Agent::log::Level::Error, "os_log sink smoke: error"));
+    EXPECT_NO_THROW(sink(LibreSCRS::log::Level::Trace, "os_log sink smoke: trace"));
+    EXPECT_NO_THROW(sink(LibreSCRS::log::Level::Info, "os_log sink smoke: info"));
+    EXPECT_NO_THROW(sink(LibreSCRS::log::Level::Warn, "os_log sink smoke: warn"));
+    EXPECT_NO_THROW(sink(LibreSCRS::log::Level::Error, "os_log sink smoke: error"));
 }
 
 } // namespace

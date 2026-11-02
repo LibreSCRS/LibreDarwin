@@ -31,8 +31,8 @@
 #include <LibreSCRS/Plugin/PinStatusEntry.h>
 #include <LibreSCRS/Plugin/PluginTypes.h>
 #include <LibreSCRS/Secure/String.h>
-#include <LibreSCRS/SmartCard/CardMap.h>
 #include <LibreSCRS/SmartCard/CardSession.h>
+#include <LibreSCRS/SmartCard/testing/CardSessionTesting.h>
 #include <gtest/gtest.h>
 #include <cstdint>
 #include <expected>
@@ -119,7 +119,8 @@ public:
 class FakeCredentialManager final : public CredentialManager
 {
 public:
-    LibreSCRS::Plugin::PINResult changePinResult{.outcome = LibreSCRS::Plugin::PINResultOutcome::Unsupported};
+    LibreSCRS::Plugin::PINResult changePinResult{.retriesLeft = std::nullopt,
+                                                 .outcome = LibreSCRS::Plugin::PINResultOutcome::Unsupported};
 
     CredentialListing list(LibreSCRS::SmartCard::CardSession&, const CandidateList&) override
     {
@@ -134,12 +135,12 @@ public:
                                                       std::string_view, const LibreSCRS::Secure::String&,
                                                       const LibreSCRS::Secure::String&) override
     {
-        return {.outcome = LibreSCRS::Plugin::PINResultOutcome::Unsupported};
+        return {.retriesLeft = std::nullopt, .outcome = LibreSCRS::Plugin::PINResultOutcome::Unsupported};
     }
     LibreSCRS::Plugin::PINResult activateSigningKey(LibreSCRS::SmartCard::CardSession&, const CandidateList&,
                                                     const LibreSCRS::Secure::String&) override
     {
-        return {.outcome = LibreSCRS::Plugin::PINResultOutcome::Unsupported};
+        return {.retriesLeft = std::nullopt, .outcome = LibreSCRS::Plugin::PINResultOutcome::Unsupported};
     }
 };
 
@@ -152,11 +153,10 @@ inline std::unique_ptr<CardSessionHolder> makeHolder(std::optional<LibreSCRS::Sm
         if (failWith) {
             return std::unexpected{*failWith};
         }
-        return LibreSCRS::SmartCard::detail::makeDetachedCardSession(r);
+        return LibreSCRS::SmartCard::Testing::makeDetachedCardSession(r);
     };
     auto resolver = [](std::span<const std::uint8_t>, LibreSCRS::SmartCard::CardSession&) { return CandidateList{}; };
-    return std::make_unique<CardSessionHolder>("FakeReader", std::move(factory), std::move(resolver),
-                                               std::make_shared<LibreSCRS::SmartCard::CardMap>());
+    return std::make_unique<CardSessionHolder>("FakeReader", std::move(factory), std::move(resolver));
 }
 
 // A single-record snapshot: a changeable UserPIN addressed by id "user:0x01", so

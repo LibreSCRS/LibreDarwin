@@ -10,7 +10,7 @@
 /// what was tried rather than a bare path: a directory that yielded no plugins
 /// is indistinguishable, from the user's seat, from a card nothing supports.
 
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 
 #include <cstdint>
 #include <filesystem>
@@ -97,7 +97,7 @@ struct PluginDirInputs
 ///
 /// @param loaded Number of plugins the registry actually loaded.
 /// @param report The registry's per-file load report.
-[[nodiscard]] std::vector<std::pair<LibreSCRS::Agent::log::Level, std::string>>
+[[nodiscard]] std::vector<std::pair<LibreSCRS::log::Level, std::string>>
 pluginLoadReportLines(const PluginDirResolution& resolution, std::size_t loaded,
                       std::span<const LibreSCRS::Plugin::LoadOutcome> report);
 

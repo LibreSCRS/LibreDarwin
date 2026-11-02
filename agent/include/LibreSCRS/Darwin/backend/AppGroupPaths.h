@@ -14,7 +14,8 @@ namespace LibreSCRS::Darwin {
 // $HOME (then the temp dir) if the passwd lookup fails.
 [[nodiscard]] std::filesystem::path realHomeDir();
 
-// The shared App-Group container (appGroup()) BOTH agent-owned binaries must
+// The shared App-Group container (LibreAgent's appGroup(), named by the rule in
+// its wire/SocketLocation.h that every end of the socket uses) BOTH agent-owned binaries must
 // resolve identically: the agent binds agent.sock + connects prompter.sock
 // here, and the prompter serves prompter.sock from the same place — any drift
 // in the group id or the sandbox-bypass rationale would silently split the two
@@ -23,8 +24,8 @@ namespace LibreSCRS::Darwin {
 // the agent's sockets for anyone able to set the user's environment.
 [[nodiscard]] std::filesystem::path appGroupContainerDir();
 
-// Where the agent listens and every client connects. One definition, so the
-// two cannot drift.
+// Where the agent listens and every client connects: the container plus
+// LibreAgent's kAgentSocketName, the name every client looks for.
 [[nodiscard]] std::filesystem::path agentSocketPath();
 
 } // namespace LibreSCRS::Darwin

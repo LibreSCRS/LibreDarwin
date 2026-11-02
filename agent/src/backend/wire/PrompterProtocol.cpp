@@ -8,6 +8,7 @@
 
 #include <LibreSCRS/Agent/SecureZero.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
+#include <LibreSCRS/Agent/wire/ReaderInterface.h> // readerInterfaceToken
 
 #include <algorithm>
 #include <cstddef>
@@ -20,67 +21,22 @@
 
 namespace LibreSCRS::Darwin::wire {
 
-// Pulled in unqualified for this TU: the codec/framing primitives now live in
-// the shared LibreAgent::Wire library; PromptKind/PromptRequest/etc. above stay
-// Darwin-local (the private agent<->prompter protocol never left this repo).
+// Pulled in unqualified for this TU: the codec/framing primitives live in the
+// shared LibreAgent::Wire library and the kind/status words in the agent
+// library's prompter vocabulary; the message shapes stay Darwin-local (the
+// private agent<->prompter protocol never left this repo).
 using LibreSCRS::Agent::secureZero;
 using LibreSCRS::Agent::Wire::decode;
 using LibreSCRS::Agent::Wire::sendFrame;
+using LibreSCRS::PrompterWire::kindFromToken;
+using LibreSCRS::PrompterWire::kindToken;
+using LibreSCRS::PrompterWire::replyStatusFromToken;
+using LibreSCRS::PrompterWire::replyStatusToken;
 
 namespace {
 
 using Map = CborValue::Map;
 using Array = CborValue::Array;
-
-std::string_view kindName(PromptKind k)
-{
-    switch (k) {
-    case PromptKind::Pin:
-        return "pin";
-    case PromptKind::Can:
-        return "can";
-    case PromptKind::Mrz:
-        return "mrz";
-    }
-    return "pin";
-}
-
-std::string_view statusName(PromptReplyStatus s)
-{
-    switch (s) {
-    case PromptReplyStatus::Ok:
-        return "ok";
-    case PromptReplyStatus::Cancelled:
-        return "cancelled";
-    case PromptReplyStatus::Error:
-        return "error";
-    case PromptReplyStatus::Unauthorized:
-        return "unauthorized";
-    case PromptReplyStatus::Timeout:
-        return "timeout";
-    }
-    return "error";
-}
-
-std::optional<PromptReplyStatus> statusFromName(std::string_view s)
-{
-    if (s == "ok") {
-        return PromptReplyStatus::Ok;
-    }
-    if (s == "cancelled") {
-        return PromptReplyStatus::Cancelled;
-    }
-    if (s == "error") {
-        return PromptReplyStatus::Error;
-    }
-    if (s == "unauthorized") {
-        return PromptReplyStatus::Unauthorized;
-    }
-    if (s == "timeout") {
-        return PromptReplyStatus::Timeout;
-    }
-    return std::nullopt;
-}
 
 std::expected<const Map*, PrompterParseError> topMap(const std::span<const std::uint8_t> body,
                                                      std::optional<CborValue>& hold)
@@ -271,7 +227,7 @@ CborValue toCbor(const PromptRequest& r)
     Map m;
     m.emplace("t", CborValue("RequestSecret"));
     emplaceVersion(m);
-    m.emplace("kind", CborValue(std::string(kindName(r.kind))));
+    m.emplace("kind", CborValue(std::string(kindToken(r.kind))));
     if (!r.title.empty()) {
         m.emplace("title", CborValue(r.title));
     }
@@ -324,7 +280,8 @@ CborValue toCbor(const PromptRequest& r)
     if (!r.readerModel.empty()) {
         m.emplace("readerModel", CborValue(r.readerModel));
     }
-    if (!r.readerInterface.empty() && r.readerInterface != kReaderInterfaceUnknown) {
+    if (!r.readerInterface.empty() &&
+        r.readerInterface != Agent::Wire::readerInterfaceToken(Agent::Wire::ReaderInterface::Unknown)) {
         m.emplace("readerInterface", CborValue(r.readerInterface));
     }
     if (!r.readerFull.empty()) {
@@ -416,7 +373,7 @@ CborValue toCbor(const ConfirmReply& r)
     Map m;
     m.emplace("t", CborValue("Confirm"));
     emplaceVersion(m);
-    m.emplace("status", CborValue(std::string(statusName(r.status))));
+    m.emplace("status", CborValue(std::string(replyStatusToken(r.status))));
     if (!r.userMessage.empty()) {
         m.emplace("userMessage", CborValue(r.userMessage));
     }
@@ -428,7 +385,7 @@ CborValue toCbor(const PromptReply& r)
     Map m;
     m.emplace("t", CborValue("Secret"));
     emplaceVersion(m);
-    m.emplace("status", CborValue(std::string(statusName(r.status))));
+    m.emplace("status", CborValue(std::string(replyStatusToken(r.status))));
     if (r.status == PromptReplyStatus::Ok) {
         m.emplace("secret", CborValue(r.secret));
     }
@@ -462,7 +419,7 @@ CborValue toCbor(const MultiPromptReply& r)
     Map m;
     m.emplace("t", CborValue("Secrets"));
     emplaceVersion(m);
-    m.emplace("status", CborValue(std::string(statusName(r.status))));
+    m.emplace("status", CborValue(std::string(replyStatusToken(r.status))));
     if (r.status == PromptReplyStatus::Ok) {
         m.emplace("primary", CborValue(r.primary));
         m.emplace("secondary", CborValue(r.secondary));
@@ -573,16 +530,13 @@ std::expected<PrompterRequest, PrompterParseError> parsePrompterRequest(std::spa
         return std::unexpected(PrompterParseError::MissingField);
     }
     const std::string& kindStr = *kindIt->second.asText();
-    PromptRequest r;
-    if (kindStr == "pin") {
-        r.kind = PromptKind::Pin;
-    } else if (kindStr == "can") {
-        r.kind = PromptKind::Can;
-    } else if (kindStr == "mrz") {
-        r.kind = PromptKind::Mrz;
-    } else {
+    // One secret per RequestSecret: the PIN pair is RequestSecrets' to ask.
+    const auto kind = kindFromToken(kindStr);
+    if (!kind || *kind == PromptKind::ChangePin) {
         return std::unexpected(PrompterParseError::BadEnum);
     }
+    PromptRequest r;
+    r.kind = *kind;
 
     auto display = optDisplayFields(m);
     const auto minLen = optUint(m, "minLength");
@@ -649,7 +603,7 @@ std::expected<PromptReply, PrompterParseError> parsePromptReply(std::span<const 
     if (statusIt == m.end() || statusIt->second.asText() == nullptr) {
         return std::unexpected(PrompterParseError::MissingField);
     }
-    const auto status = statusFromName(*statusIt->second.asText());
+    const auto status = replyStatusFromToken(*statusIt->second.asText());
     if (!status) {
         return std::unexpected(PrompterParseError::BadEnum);
     }
@@ -705,7 +659,7 @@ std::expected<ConfirmReply, PrompterParseError> parseConfirmReply(std::span<cons
     if (statusIt == m.end() || statusIt->second.asText() == nullptr) {
         return std::unexpected(PrompterParseError::MissingField);
     }
-    const auto status = statusFromName(*statusIt->second.asText());
+    const auto status = replyStatusFromToken(*statusIt->second.asText());
     if (!status) {
         return std::unexpected(PrompterParseError::BadEnum);
     }
@@ -769,7 +723,7 @@ std::expected<MultiPromptReply, PrompterParseError> parseMultiPromptReply(std::s
     if (statusIt == m.end() || statusIt->second.asText() == nullptr) {
         return std::unexpected(PrompterParseError::MissingField);
     }
-    const auto status = statusFromName(*statusIt->second.asText());
+    const auto status = replyStatusFromToken(*statusIt->second.asText());
     if (!status) {
         return std::unexpected(PrompterParseError::BadEnum);
     }

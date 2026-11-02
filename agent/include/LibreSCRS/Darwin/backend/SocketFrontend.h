@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
+#include <LibreSCRS/Darwin/backend/SocketOperationChannel.h> // SignArtifactSink
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h> // ConfirmAction / ConfirmReply
 #include <LibreSCRS/Agent/wire/Messages.h>
@@ -10,24 +11,25 @@
 #include <LibreSCRS/Agent/PresenceTypes.h>
 #include <LibreSCRS/Agent/backend/OperationChannel.h> // Operations::SignedArtifact
 #include <LibreSCRS/Agent/config/ConfigStore.h>       // Config::CscaAnchorState (detail::recordedStateFor)
-#include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>      // Pkcs11Broker::CryptoOutcome (detail::mapCryptoOutcome)
-#include <LibreSCRS/Agent/trust/CscaAnchorImport.h>   // Trust::AnchorState (detail::recordedStateFor)
-#include <LibreSCRS/Auth/AuthRequirement.h>           // LibreSCRS::Auth::PreReadAuthMethod (applyCardResolution)
+#include <LibreSCRS/Agent/operations/OperationLauncher.h>
+#include <LibreSCRS/Agent/presence/CardResolutionPolicy.h>
+#include <LibreSCRS/Agent/trust/CscaAnchorImport.h> // Trust::AnchorState (detail::recordedStateFor)
+#include <LibreSCRS/SmartCard/CardSession.h>        // OpenError (detail::isRefusedSession)
 
 #include <cstdint>
 #include <chrono>
 #include <functional>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
+#include <set>
 #include <string>
 #include <string_view>
 
 namespace LibreSCRS::Agent {
 class AgentCore;
-namespace Operations {
-class CredentialDepositor;
-}
 } // namespace LibreSCRS::Agent
 
 namespace LibreSCRS::Plugin {
@@ -42,9 +44,10 @@ namespace LibreSCRS::Darwin {
 // transport's presence snapshot replaces them). Registered as the transport's
 // request sink; every request is dispatched ON THE LOOP THREAD to the neutral
 // LibreAgent::Core:
-//   - ReadIdentity/GetPhoto/ReadCertificates/Sign -> mint a SocketOperationChannel
-//     + OperationManager::publish, reply OpStarted;
-//   - ListCredentials/ManagePin/ActivateSigningKey -> the same publish path
+//   - ReadIdentity/GetPhoto/ReadCertificates/ReadTokenInfo/Sign/SignBatch ->
+//     the shared OperationLauncher over a SocketOperationChannel, reply
+//     OpStarted (or the launcher's refusal);
+//   - ListCredentials/ManagePin/ActivateSigningKey -> the same launch path
 //     behind the PinManagement capability + the credentials entry gates
 //     (validate -> authorize -> rate-limit; the read is capability-gated only);
 //   - GetCertDer / Pkcs11.{PublicKey,Login,Logout,SignRaw,Decrypt} -> Pkcs11Broker
@@ -67,9 +70,10 @@ public:
     // @p plugins is the card-plugin registry, when this host has one. The
     // identity and photo flows hand a renegotiated passport MRZ to the candidate
     // plugins through a CredentialDepositor, and only the registry can resolve
-    // those targets: with a registry the LM-backed depositor is bound, without
-    // one (a test rig) the shared core's no-op, so a renegotiated read deposits
-    // nothing and fails auth truthfully -- the Linux host's rule, applied here.
+    // those targets: with a registry the launcher's operations get the LM-backed
+    // depositor, without one (a test rig) the shared core's no-op, so a
+    // renegotiated read deposits nothing and fails auth truthfully -- the Linux
+    // host's rule, applied here.
     SocketFrontend(SocketTransport& transport, Agent::AgentCore& core, std::string version,
                    std::shared_ptr<LibreSCRS::Plugin::CardPluginService> plugins = nullptr);
     ~SocketFrontend();
@@ -77,8 +81,12 @@ public:
     SocketFrontend(const SocketFrontend&) = delete;
     SocketFrontend& operator=(const SocketFrontend&) = delete;
 
-    // The depositor every identity and photo read is handed; see the constructor.
-    [[nodiscard]] Agent::Operations::CredentialDepositor& credentialDepositor() noexcept;
+    // The launcher every card operation goes through, so a test can see what
+    // an operation is handed (the depositor; see the constructor).
+    [[nodiscard]] const Agent::Operations::OperationLauncher& operationLauncher() const noexcept
+    {
+        return m_launcher;
+    }
 
     // Register with the transport as the inbound-request sink. Call once at
     // startup (after the transport is created, before the loop starts serving).
@@ -90,6 +98,7 @@ public:
     void onCardPublished(const Agent::CardState& card);
     void onWithdrawn(Agent::ObjectId object);
     void onReaderPropertiesChanged(Agent::ObjectId reader, const Agent::PropertyDelta& delta);
+    void onReaderRelabelled(const Agent::ReaderState& reader);
 
     // ConfigStore::setOnChanged -> Config1.Changed event. Loop-safe.
     void emitConfigChanged(const std::string& key);
@@ -100,9 +109,16 @@ public:
 
     // A client dropped off the socket: evict its owned op/sign-recovery state so
     // the recovery store cannot grow for the process lifetime and a reused caller
-    // token cannot inherit a prior client's artifacts. Wired as a third
+    // token cannot inherit a prior client's artifacts, and its place among the
+    // connections waiting on a trust confirmation. Wired as a third
     // onClientDisconnect handler in main.cpp.
     void onClientDisconnected(const Agent::CallerToken& caller);
+
+    // How many connections have a trust confirmation waiting. Loop-thread only.
+    [[nodiscard]] std::size_t confirmsInFlightForTest() const noexcept
+    {
+        return m_confirmsInFlight.size();
+    }
 
     // Ask the human to confirm a trust-tier change. Blocks for as long as the
     // person takes, so it is called on a worker queue and NEVER on the loop.
@@ -184,21 +200,29 @@ private:
     void replyError(std::uint64_t connId, std::uint64_t req, Agent::Wire::SyncError code);
     void sendReplyOnLoop(std::uint64_t connId, Agent::Wire::CborValue message);
 
-    // Best-effort human label for the requesting client (consent-prompt chrome).
+    // The shared shape of every card operation's entry: where it runs and who
+    // asked, its result channel over this connection (with the Sign recovery
+    // sink when there is one), the identity reads' card-type sink, and the
+    // reply -- OpStarted with the new id, or the launcher's refusal.
+    [[nodiscard]] Agent::Operations::OperationTarget operationTarget(const SocketTransport::CardRouting& routing,
+                                                                     const Agent::CallerToken& caller) const;
+    [[nodiscard]] Agent::Operations::OperationLauncher::ChannelFactory
+    channelFor(std::uint64_t connId, SocketOperationChannel::SignArtifactSink onSignArtifact = {});
+    [[nodiscard]] Agent::Operations::OperationLauncher::CardTypeSink cardTypeSink(const std::string& cardHandle);
+    void replyLaunched(std::uint64_t connId, std::uint64_t req, const Agent::CallerToken& caller,
+                       const Agent::Operations::OperationLauncher::Launched& launched);
+
+    // Best-effort human label for the requesting client (consent-prompt chrome):
+    // detail::requesterLabelFor over the connection's peer.
     [[nodiscard]] std::string requesterLabel(const Agent::CallerToken& caller) const;
 
-    // Presence: the deferred held-session capability resolve (loop thread).
+    // Presence: the deferred insertion probe on the reader's worker (loop thread).
     void scheduleCardResolve(const Agent::CardState& card);
-    // @p opened is false when the probe could not open the card: the only
-    // case asked about again, a bounded number of times, before the card is
-    // published with no capabilities. The core's OWN vocabulary, not the wire
-    // mirror: @p preAuth feeds A::CardState::preReadAuth (never crosses the
-    // CBOR wire from here — SocketTransport::publishCard does that
-    // conversion). @p cardType is the single held-session candidate's pluginId
-    // (empty if ambiguous/no match), resolved alongside caps/preAuth at the
-    // same deferred point.
-    void applyCardResolution(Agent::CardState card, bool opened, std::uint32_t caps,
-                             LibreSCRS::Auth::PreReadAuthMethod preAuth, const std::string& cardType);
+    // Loop side of the probe: ask again after the wait m_resolution names, or
+    // publish the card with what @p probe learned and take the reader's power
+    // hold when the policy says so. The probe carries the core's OWN
+    // vocabulary, not the wire mirror; SocketTransport::publishCard converts.
+    void applyCardResolution(const Agent::CardState& card, const Agent::CardProbe& probe);
 
     // A Sign artifact stashed for the grace-window GetSignResult recovery.
     void stashSignArtifact(std::uint64_t opId, const Agent::CallerToken& owner,
@@ -213,21 +237,25 @@ private:
     Agent::AgentCore& m_core;
     std::string m_version;
     // The plugin registry this host was composed with (nullptr in a rig with no
-    // plugins) and the depositor bound over it -- see the constructor.
+    // plugins), and the launcher whose seams are bound over it -- see the
+    // constructor. Declared in this order: the launcher's seams borrow the
+    // registry.
     std::shared_ptr<LibreSCRS::Plugin::CardPluginService> m_plugins;
-    std::unique_ptr<Agent::Operations::CredentialDepositor> m_depositor;
+    Agent::Operations::OperationLauncher m_launcher;
 
     // reader ObjectId -> human reader name, for the card-resolve worker hop.
     std::map<std::uint64_t, std::string> m_readerNames;
 
-    // Cards awaiting their held-session resolve, keyed by card ObjectId value.
+    // The insertion-probe rule, with this host's budget and predicate
+    // (detail::kResolveRetryBudget, detail::isRefusedSession).
+    const Agent::CardResolutionPolicy m_resolution;
+    // Cards awaiting their insertion probe, keyed by card ObjectId value.
     struct PendingCard
     {
         Agent::CardState card;
-        int attempts{0};
+        Agent::ResolveAttempts attempts;
     };
     std::map<std::uint64_t, PendingCard> m_pendingCards;
-    static constexpr int kMaxResolveAttempts{3};
     // Grace window after which an unclaimed Sign recovery entry is evicted. The
     // recovery path only covers a client that raced the inline OpResultReady fd, so
     // a short window suffices; keeping it short bounds the in-memory retention of
@@ -267,6 +295,13 @@ private:
         bool alive{true};
     };
     std::shared_ptr<ConfirmGuard> m_confirmGuard{std::make_shared<ConfirmGuard>()};
+
+    // Connections with a trust confirmation waiting for a person. One each:
+    // every confirmation holds a worker here and in the prompter until it is
+    // answered, and a dialog per request is how a flood turns into a click
+    // that makes it stop. Keyed by the connection's caller token, so the entry
+    // leaves with the connection as well as with the answer. Loop-thread only.
+    std::set<Agent::CallerToken> m_confirmsInFlight;
 
     // What a trust-tier verb is about to do, for the sentence the person reads.
     // The config key alone cannot say it: import and forget share a key.
@@ -311,8 +346,33 @@ namespace detail {
 /// was established.
 [[nodiscard]] Agent::Config::CscaAnchorState recordedStateFor(const Agent::Trust::AnchorState& imported);
 
-/// Pkcs11Broker outcome -> the socket's named error. Exposed for its table test.
-[[nodiscard]] Agent::Wire::SyncError mapCryptoOutcome(Agent::Pkcs11Broker::CryptoOutcome oc) noexcept;
+/// What the consent dialogs name as the requester: the signing identifier the
+/// peer's own signature claims (claimed, never verified -- the same standing as
+/// the program name the Linux host shows), and nothing else. The agent has no
+/// catalogue, so any word around it -- the token extension's, which acts for
+/// the Keychain -- is the prompter's to add. @p fallback (the process label)
+/// when the peer carries no identifier. Always sanitised to one inert line.
+[[nodiscard]] std::string requesterLabelFor(const std::optional<std::string>& signingId, std::string fallback);
+
+/// How long a card whose insertion probe was refused a session is asked about
+/// again: waits doubling from 50 ms up to 1 s, until together they reach 10 s,
+/// the time the middleware gives CryptoTokenKit to grant a session it is
+/// holding for someone else. That is what the probe usually lost to: the
+/// system or another vendor's token driver probing the same card, which on
+/// macOS may be refused outright rather than waited for.
+inline constexpr Agent::ResolveRetryBudget kResolveRetryBudget{
+    .maxRetries = std::numeric_limits<int>::max(),
+    .firstDelay = std::chrono::milliseconds{50},
+    .growth = 2,
+    .maxDelay = std::chrono::milliseconds{1000},
+    .totalBudget = std::chrono::milliseconds{10000},
+};
+
+/// The one failed open worth asking about again: a session refused while
+/// someone else holds the card. Any other failure (no card, a protocol fault,
+/// an unavailable reader) will not pass by waiting, so the card is published
+/// at once with nothing known about it.
+[[nodiscard]] bool isRefusedSession(const LibreSCRS::SmartCard::OpenError& failure) noexcept;
 
 } // namespace detail
 

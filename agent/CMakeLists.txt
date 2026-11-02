@@ -8,48 +8,38 @@ find_library(CORE_FOUNDATION_FRAMEWORK CoreFoundation REQUIRED)
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
 find_library(APPKIT_FRAMEWORK AppKit REQUIRED)   # NSWorkspace / DistributedNotificationCenter (SystemLifecycle)
 find_library(IOKIT_FRAMEWORK IOKit REQUIRED)     # IORegisterForSystemPower (SystemLifecycle)
-find_library(BSM_LIB bsm REQUIRED) # audit_token_to_pid / _pidversion (PeerIdentity)
 
 # Darwin-only wire-adjacent pieces that sit alongside, but are NOT themselves,
 # the shared LibreAgent::Wire codec/framing/message model: anonymous-fd
 # creation (the memfd_create analog), the private agent<->prompter CBOR
-# protocol, BSM peer identity, and the process hardening both secret-holding
-# binaries call first. Links NO LibreMiddleware/LibreAgent::Core,
-# so the agent-owned prompter and the PKCS#11 module can reuse it
-# without pulling the card stack. The libc++ std::expected/std::format this
-# layer uses on AppleClang need -fexperimental-library, which the root
-# CMakeLists sets for the whole build.
+# protocol, the App-Group paths, and the process hardening both secret-holding
+# binaries call first. The peer check (BSM peer identity, SecTask/SecCode) is
+# LibreAgent::Wire's, the same one every client of the socket runs. Links NO
+# LibreMiddleware/LibreAgent::Core, so the agent-owned prompter and the PKCS#11
+# module can reuse it without pulling the card stack. Its headers do include
+# two std-only headers from the agent's Core tree (the prompter vocabulary);
+# tests/WireCoreHeaderPurity.cpp keeps them, and every header here, free of the
+# middleware. The libc++ std::expected/std::format this layer uses on
+# AppleClang need -fexperimental-library, which the root CMakeLists sets for
+# the whole build.
 add_library(LibreDarwinWireCore STATIC
     src/backend/wire/AnonFd.cpp
     src/backend/wire/PrompterProtocol.cpp
-    src/backend/PeerIdentity.cpp
-    src/backend/PeerCodeSigning.cpp
     src/backend/AppGroupPaths.cpp
     src/backend/ProcessHardening.cpp
     src/backend/SingleInstanceLock.cpp)
 target_include_directories(LibreDarwinWireCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 # The team id the agent and the prompter hold each other (and themselves, at
-# start-up) to through the designated requirement, and the App Group they meet
-# in is named after it (appGroupFor). A compiled constant, never read from the
-# environment. Empty = no designated-requirement check and the group.-prefixed
-# group, which is what an ad-hoc signed build needs; a Developer ID build sets it.
-set(LIBRESCRS_TEAM_ID "" CACHE STRING
-    "Apple Team ID the agent and prompter require of each other and name their App Group after (empty: none)")
-if(NOT LIBRESCRS_TEAM_ID STREQUAL "" AND NOT LIBRESCRS_TEAM_ID MATCHES "^[A-Z0-9]+$")
-    message(FATAL_ERROR "LIBRESCRS_TEAM_ID must be upper-case letters and digits, got '${LIBRESCRS_TEAM_ID}'")
-endif()
-# PRIVATE to the one translation unit's library that reads it, so no header
-# carries the macro and every consumer sees the same value.
-target_compile_definitions(LibreDarwinWireCore PRIVATE LIBRESCRS_TEAM_ID="${LIBRESCRS_TEAM_ID}")
+# start-up) to, and the App Group they meet in, are LibreAgent::Wire's: its
+# LIBRESCRS_TEAM_ID cache variable is the one setting, compiled into the peer
+# check every end of the socket shares. Never read from the environment.
 target_compile_features(LibreDarwinWireCore PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinWireCore PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(LibreDarwinWireCore
     PUBLIC
-        LibreAgent::Wire # AnonFd.h/PrompterProtocol.h expose UniqueFd/CborValue in their public API
-    PRIVATE
-        ${BSM_LIB}                     # PeerIdentity audit_token_to_pid
-        ${SECURITY_FRAMEWORK}          # PeerCodeSigning SecTask + SecCode designated requirement
-        ${CORE_FOUNDATION_FRAMEWORK})
+        # AnonFd.h/PrompterProtocol.h expose UniqueFd/CborValue in their public
+        # API, and every user of this library checks its peer through Wire.
+        LibreAgent::Wire)
 
 add_library(LibreDarwinAgentBackend STATIC
     src/backend/SocketTransport.cpp
@@ -61,10 +51,7 @@ add_library(LibreDarwinAgentBackend STATIC
     src/backend/OsLogSink.cpp
     src/backend/PluginDirectory.cpp
     src/backend/PeerPolicy.cpp)
-target_include_directories(LibreDarwinAgentBackend PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src) # CardRemovalCaches.h / FullScrubCaches.h, private to the backend and main.cpp
+target_include_directories(LibreDarwinAgentBackend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include)
 target_compile_features(LibreDarwinAgentBackend PUBLIC cxx_std_23)
 set_target_properties(LibreDarwinAgentBackend PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(LibreDarwinAgentBackend

@@ -19,24 +19,27 @@
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Darwin/backend/SystemLifecycle.h>
 
-#include "CardRemovalCaches.h" // invalidateCardRemovalCaches (shared with the removal test)
-#include "FullScrubCaches.h"   // clearFullScrubCaches (shared with the scrub test)
-
 #include <LibreSCRS/Agent/AgentCore.h>
+#include <LibreSCRS/Agent/cache/CardRemovalCaches.h> // invalidateCardRemovalCaches (shared with the removal test)
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h>
 #include <LibreSCRS/Agent/trust/CscaAnchorImport.h>
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 #include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>
+#include <LibreSCRS/Agent/presence/CardResolutionPolicy.h> // releaseReaderOnCardRemoved (shared with the removal test)
 #include <LibreSCRS/Agent/presence/MonitorBridge.h>
 #include <LibreSCRS/Agent/presence/PluginCapabilityResolver.h>
 #include <LibreSCRS/Plugin/CardPluginService.h>
 #include <LibreSCRS/Trust/TrustStoreService.h>
 
-#include <LibreSCRS/Agent/wire/Messages.h> // wire::QuiesceReason
-
 #include <CoreFoundation/CoreFoundation.h>
 #include <dispatch/dispatch.h>
+#include <sys/resource.h>
 
+#include <algorithm>
+#include <cerrno>
+#include <climits> // OPEN_MAX
 #include <csignal>
+#include <cstring>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -57,7 +60,7 @@ namespace {
 namespace fs = std::filesystem;
 namespace Agent = LibreSCRS::Agent;
 namespace Darwin = LibreSCRS::Darwin;
-namespace wire = LibreSCRS::Agent::Wire;
+namespace Peer = LibreSCRS::Agent::Wire::Darwin;
 
 // The command line the agent accepts: `--plugin-dir <path>` and nothing else.
 // An argument rather than an environment variable, because `launchctl setenv`
@@ -75,15 +78,15 @@ std::optional<Arguments> parseArguments(std::span<char* const> args)
     for (std::size_t i = 1; i < args.size(); ++i) {
         const std::string_view arg(args[i]);
         if (arg != "--plugin-dir") {
-            Agent::log::errorf("unrecognised argument '{}' (usage: librescrs-agent [--plugin-dir <path>])", arg);
+            LibreSCRS::log::errorf("unrecognised argument '{}' (usage: librescrs-agent [--plugin-dir <path>])", arg);
             return std::nullopt;
         }
         if (i + 1 >= args.size() || *args[i + 1] == '\0') {
-            Agent::log::error("--plugin-dir needs a path (usage: librescrs-agent [--plugin-dir <path>])");
+            LibreSCRS::log::error("--plugin-dir needs a path (usage: librescrs-agent [--plugin-dir <path>])");
             return std::nullopt;
         }
         if (!parsed.pluginDir.empty()) {
-            Agent::log::error("--plugin-dir given twice (usage: librescrs-agent [--plugin-dir <path>])");
+            LibreSCRS::log::error("--plugin-dir given twice (usage: librescrs-agent [--plugin-dir <path>])");
             return std::nullopt;
         }
         parsed.pluginDir = args[++i];
@@ -111,9 +114,26 @@ int main(int argc, char** argv)
     // per-fd SO_NOSIGPIPE the transport sets (covers the prompter socket too).
     ::signal(SIGPIPE, SIG_IGN);
 
-    Agent::log::init(LibreSCRS::Darwin::makeOsLogSink(), "rs.librescrs.agent");
+    // One facade for the whole process: the agent core logs through
+    // LibreMiddleware's, so the middleware's own lines (reader monitor,
+    // plugins, signing) reach os_log too instead of a stderr launchd discards.
+    LibreSCRS::log::init(LibreSCRS::Darwin::makeOsLogSink(), "rs.librescrs.agent");
     if (!hardened) {
-        Agent::log::warn("process hardening incomplete (PT_DENY_ATTACH / RLIMIT_CORE=0 failed)");
+        LibreSCRS::log::warn("process hardening incomplete (PT_DENY_ATTACH / RLIMIT_CORE=0 failed)");
+    }
+    // The agent serves up to 32 clients, each allowed dozens of descriptors in
+    // flight in unfinished frames, besides its cards, the prompter and the
+    // files it reads; the soft limit launchd starts a job with can be far
+    // below that. Raised to the hard limit, but no higher than OPEN_MAX, past
+    // which macOS refuses the call.
+    if (rlimit files{}; ::getrlimit(RLIMIT_NOFILE, &files) == 0) {
+        const rlim_t want = std::min<rlim_t>(files.rlim_max, OPEN_MAX);
+        if (files.rlim_cur < want) {
+            files.rlim_cur = want;
+            if (::setrlimit(RLIMIT_NOFILE, &files) != 0) {
+                LibreSCRS::log::warnf("could not raise the open-file limit to {}: {}", want, std::strerror(errno));
+            }
+        }
     }
     // The build holds its peers to its App Group and, when it names a team id,
     // to that team's designated requirement, so its own signature must meet
@@ -121,16 +141,16 @@ int main(int argc, char** argv)
     // socket or touches the container -- rather than being refused by its
     // prompter with nothing said, or serving a container its clients never
     // look in. Exit 4 is this refusal and nothing else.
-    if (!Darwin::selfMatchesBuild(Darwin::kAgentSigningId)) {
-        Agent::log::error("signature does not match this build (team or App Group); refusing to start");
+    if (!Peer::selfMatchesBuild(Peer::kAgentSigningId)) {
+        LibreSCRS::log::error("signature does not match this build (team or App Group); refusing to start");
         return 4;
     }
     // CryptoTokenKit shows a process without this entitlement no reader and
     // opens it no card, so the agent would start and never see one. Exit 5 is
     // this refusal and nothing else.
-    if (!Darwin::selfHasSmartcardEntitlement()) {
-        Agent::log::error("not signed with com.apple.security.smartcard: cards and reader events are unavailable; "
-                          "refusing to start");
+    if (!Peer::selfHasSmartcardEntitlement()) {
+        LibreSCRS::log::error("not signed with com.apple.security.smartcard: cards and reader events are unavailable; "
+                              "refusing to start");
         return 5;
     }
 
@@ -145,7 +165,7 @@ int main(int argc, char** argv)
     std::error_code ec;
     fs::create_directories(container, ec);
     if (ec) {
-        Agent::log::errorf("failed to create the App-Group container {}: {}", container.string(), ec.message());
+        LibreSCRS::log::errorf("failed to create the App-Group container {}: {}", container.string(), ec.message());
         return 1;
     }
     const std::string socketPath = Darwin::agentSocketPath().string();
@@ -167,11 +187,11 @@ int main(int argc, char** argv)
             // line each time, and the launchd agent takes over as soon as the
             // other instance (a development run started by hand) exits. Exit 0
             // would leave the job stopped for good once that instance is gone.
-            Agent::log::errorf("another agent is already serving {}; refusing to start a second one ({})", socketPath,
-                               created.error().message);
+            LibreSCRS::log::errorf("another agent is already serving {}; refusing to start a second one ({})",
+                                   socketPath, created.error().message);
             return 3;
         }
-        Agent::log::errorf("failed to bind the agent socket {}: {}", socketPath, created.error().message);
+        LibreSCRS::log::errorf("failed to bind the agent socket {}: {}", socketPath, created.error().message);
         return 1;
     }
     auto transport = std::move(*created);
@@ -184,7 +204,7 @@ int main(int argc, char** argv)
     if (auto trustResult = LibreSCRS::Trust::TrustStoreService::create({}); trustResult) {
         cardTrust = std::move(*trustResult);
     } else {
-        Agent::log::warnf("card verification anchors unavailable: {}", trustResult.error().userMessage.defaultText);
+        LibreSCRS::log::warnf("card verification anchors unavailable: {}", trustResult.error().userMessage.defaultText);
     }
     auto pluginService = std::make_shared<LibreSCRS::Plugin::CardPluginService>(
         pluginDir.dir, cardTrust ? cardTrust->trustStore() : nullptr);
@@ -211,8 +231,8 @@ int main(int argc, char** argv)
         LibreSCRS::Darwin::SecCodeAuthorizer::Policy{
             .trustTierSigningIds = {},
             .allowedSigningIds = {},
-            .requiredAppGroup = Darwin::appGroup(),
-            .teamId = Darwin::configuredTeamId(),
+            .requiredAppGroup = Peer::appGroup(),
+            .teamId = Peer::configuredTeamId(),
         });
     // The prompter client verifies the SERVING peer's code-signing identity (a
     // re-bound prompter.sock must not be able to inject a secret the agent
@@ -245,7 +265,7 @@ int main(int argc, char** argv)
     // against another with nothing on screen to say so.
     if (pluginService != nullptr) {
         const auto anchorDir = Agent::Trust::publishAnchorDirectory(*pluginService, core.configStore().cscaCacheDir());
-        Agent::log::infof("country-signing anchors for card plugins: {}", anchorDir.string());
+        LibreSCRS::log::infof("country-signing anchors for card plugins: {}", anchorDir.string());
     }
 
     // [4] The inbound frontend (borrows the core; built after it). std::optional so
@@ -287,6 +307,11 @@ int main(int argc, char** argv)
         [&frontend](Agent::ObjectId r, const Agent::PropertyDelta& d) {
             if (frontend) {
                 frontend->onReaderPropertiesChanged(r, d);
+            }
+        },
+        [&frontend](const Agent::ReaderState& r) {
+            if (frontend) {
+                frontend->onReaderRelabelled(r);
             }
         });
 
@@ -335,71 +360,14 @@ int main(int argc, char** argv)
     Agent::MonitorBridge bridge(core.presenceModel(), core.cardKeyTracker(), stateMutex);
     bridge.start();
 
-    Agent::log::infof("librescrs-agent ready on {} (version {})", socketPath, LIBREDARWIN_VERSION_STR);
+    LibreSCRS::log::infof("librescrs-agent ready on {} (version {})", socketPath, LIBREDARWIN_VERSION_STR);
 
-    // System lifecycle: sleep / fast-user-switch away -> full scrub (the USB
-    // reader loses power on sleep, so the PC/SC + PACE/SM session is invalid after
-    // wake and MUST be re-opened); screen lock -> revoke PKCS#11 leases only
-    // (re-PIN next op); wake / session active -> no-op (the next op re-acquires).
-    // The registry read is serialised under stateMutex (the monitor mutates it on
-    // its own thread); the neutral core scrubs have their own locks. The
-    // AgentQuiesced broadcast is marshaled onto the loop.
-    auto fullScrub = [&](wire::QuiesceReason reason) {
-        {
-            std::lock_guard<std::mutex> lk(stateMutex);
-            // The exact cache set lives in clearFullScrubCaches(), one source
-            // of truth shared with the scrub regression test.
-            Agent::clearFullScrubCaches(core.credentialCache(), core.credentialSnapshotCache());
-            // The power-hold FLAG is deliberately left where it is, unlike in
-            // the card-removed hook: the worker drops the hold handle on this
-            // invalidate (the reader loses power on sleep anyway) and renews
-            // it on its next idle sweep if the card is still seated after
-            // wake. A card gone by then clears the flag through the
-            // card-removed hook; a reader re-enumerated by then is withdrawn
-            // first, and the frontend stops its worker, flag and all.
-            for (const auto& reader : core.objectRegistry().readers()) {
-                core.operationManager().invalidateReaderSession(reader.id);
-            }
-            for (const auto& card : core.objectRegistry().cards()) {
-                core.pkcs11().onCardRemoved(card.id);
-            }
-        }
-        Darwin::SocketTransport* trp = transport.get();
-        trp->post([trp, reason] { trp->broadcastQuiesced(reason); });
-    };
-    auto revokeLeasesOnly = [&](wire::QuiesceReason reason) {
-        {
-            std::lock_guard<std::mutex> lk(stateMutex);
-            for (const auto& card : core.objectRegistry().cards()) {
-                core.pkcs11().onCardRemoved(card.id);
-            }
-        }
-        Darwin::SocketTransport* trp = transport.get();
-        trp->post([trp, reason] { trp->broadcastQuiesced(reason); });
-    };
-
-    LibreSCRS::Darwin::SystemLifecycle lifecycle([&](LibreSCRS::Darwin::SystemLifecycle::Event event) {
-        using Ev = LibreSCRS::Darwin::SystemLifecycle::Event;
-        switch (event) {
-        case Ev::Suspend:
-            fullScrub(wire::QuiesceReason::SystemSleep);
-            break;
-        case Ev::SessionResign:
-            fullScrub(wire::QuiesceReason::SessionInactive);
-            break;
-        case Ev::ScreenLock:
-            revokeLeasesOnly(wire::QuiesceReason::ScreenLocked);
-            break;
-        case Ev::Resume:
-        case Ev::ScreenUnlock:
-        case Ev::SessionActive:
-            // The next op re-acquires presence + re-PACEs from the cached CAN.
-            break;
-        case Ev::PowerOff:
-            std::raise(SIGTERM); // route through the terminal quiesce below
-            break;
-        }
-    });
+    // System lifecycle: a sleep or a switch away scrubs, a screen lock drops the
+    // PKCS#11 leases, and every client hears why (makeLifecycleHandler, the
+    // step the tests drive too). Power-off routes through the terminal quiesce
+    // below.
+    LibreSCRS::Darwin::SystemLifecycle lifecycle(
+        LibreSCRS::Darwin::makeLifecycleHandler(core, stateMutex, *transport, [] { std::raise(SIGTERM); }));
     lifecycle.start();
 
     // Shutdown: a SIGTERM/SIGINT dispatch source on the main queue (drained by the
@@ -457,6 +425,6 @@ int main(int argc, char** argv)
     dispatch_release(sigterm);
     dispatch_release(sigint);
 
-    Agent::log::info("librescrs-agent shutting down");
+    LibreSCRS::log::info("librescrs-agent shutting down");
     return 0;
 }

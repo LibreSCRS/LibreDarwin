@@ -91,11 +91,15 @@ jobs:
           gates: check-workflows check-skip-reasons check-version deps-lock selftests
 
   build-macos:
-    # macOS 15 runner: the deployment target + SDK (Xcode 16) needed by the
-    # LibreMiddleware SHARED build and the -fexperimental-library C++23 the
-    # backend uses on AppleClang.
+    # The image LibreMac's release builds the shipped agent on (images are
+    # keyed by Xcode major, not by macOS), so -Werror below sees the warnings
+    # of the compiler that ships, and the tests run against its output. The
+    # Xcode .xcode-version names, and its SDK, are then selected explicitly by
+    # the shared LibreSCRS/ci action rather than taken as the image's default,
+    # which changes on the image's schedule. The deployment target stays
+    # macOS 15 (CMakeLists.txt).
     timeout-minutes: 60
-    runs-on: macos-15
+    runs-on: xcode-27
     permissions:
       contents: read
     env:
@@ -118,6 +122,13 @@ jobs:
         with:
           path: LibreDarwin
           persist-credentials: false
+
+      - name: Select Xcode
+        # Before anything compiles: LibreMiddleware below is built with the
+        # same Xcode as LibreDarwin.
+        uses: LibreSCRS/ci/actions/select-xcode@d68f5d781a665759eaba63c67ef0e6eb1f738063
+        with:
+          root: LibreDarwin
 
       - name: Checkout LibreMiddleware and LibreAgent at the lock
         # Both at the commits deps.lock names, and proved to be those commits
@@ -149,21 +160,18 @@ jobs:
         # The agent core links OpenSSL itself (find_package). Left alone it finds
         # Homebrew's, which is not what ships and moves with the runner image:
         # openssl@4 there failed the build on an ASN1_STRING made opaque. The
-        # release links LibreMiddleware's static thirdparty OpenSSL; so does this.
+        # release links LibreMiddleware's static thirdparty OpenSSL; so does
+        # this, chosen by the one script LibreMac's release calls too.
         working-directory: LibreDarwin
         env:
           LIBREAGENT_SRC: ${{ steps.deps.outputs.libreagent-path }}
         run: |
-          shopt -s nullglob
-          ossl=("$GITHUB_WORKSPACE"/LibreMiddleware/thirdparty/openssl-*/macosx)
-          [ "${#ossl[@]}" -eq 1 ] || { echo "::error::want one thirdparty/openssl-*/macosx in LibreMiddleware, found ${#ossl[@]}"; exit 1; }
-          cmake -B build -G Ninja \
+          packaging/select-openssl.sh "$GITHUB_WORKSPACE/LibreMiddleware" "$RUNNER_TEMP/openssl.cmake"
+          cmake -C "$RUNNER_TEMP/openssl.cmake" -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
             -DCMAKE_PREFIX_PATH="$LM_PREFIX" \
-            -DOPENSSL_ROOT_DIR="${ossl[0]}" \
-            -DOPENSSL_USE_STATIC_LIBS=TRUE \
-            -DLIBREDARWIN_WERROR=ON \
+            -DLIBRESCRS_WERROR=ON \
             -DFETCHCONTENT_SOURCE_DIR_LIBREAGENT="$LIBREAGENT_SRC"
           grep -E '^OPENSSL_CRYPTO_LIBRARY' build/CMakeCache.txt
 

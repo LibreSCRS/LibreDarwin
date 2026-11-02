@@ -988,7 +988,7 @@ TEST(MacPrompterClient, RequestPinForwardsTheReaderIdentityToTheWireRequest)
     const auto& req = server.capturedRequest();
     ASSERT_TRUE(req.has_value());
     EXPECT_EQ(req->readerModel, "OMNIKEY 5422");
-    EXPECT_EQ(req->readerInterface, std::string{wire::kReaderInterfaceContactless});
+    EXPECT_EQ(req->readerInterface, std::string{"contactless"});
     EXPECT_EQ(req->readerFull, "HID Global OMNIKEY 5422 Smartcard Reader "
                                "[OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00");
 }
@@ -1012,6 +1012,22 @@ TEST(MacPrompterClient, RequestPinWithNoReaderIdentityForwardsNoReaderFields)
     EXPECT_TRUE(req->readerModel.empty());
     EXPECT_TRUE(req->readerInterface.empty()) << "Unknown travels as absence, so it parses back as empty";
     EXPECT_TRUE(req->readerFull.empty());
+}
+
+// "ok_mrz" answers a CAN request that offered the MRZ form. This agent never
+// makes that offer, so the word is an error here -- never a success that
+// would hand a CAN slot whatever the prompter sent.
+TEST(MacPrompterClient, AnOkMrzReplyIsAnErrorWithoutAnOffer)
+{
+    const std::string path = uniquePath();
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::OkMrz;
+    FakePrompter server(path, reply);
+
+    MacPrompterClient client(path, trustAnyPeerForTest());
+    const auto r = client.requestCan(Agent::PromptOptions{});
+    EXPECT_EQ(r.status, Agent::PromptStatus::Error);
+    EXPECT_FALSE(r.secret.has_value());
 }
 
 // What the clock took is not what the person did. Folding the two together is

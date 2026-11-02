@@ -6,21 +6,23 @@
 // transport's self-consistent presence snapshot: the twin of LibreLinux's
 // AgentCoreSeams.h. The transport MUST outlive the AgentCore that stores
 // these. Header-only, so main.cpp composes them and the tests drive the same
-// functions production does.
+// functions production does -- and the same goes for the one step that answers
+// a system lifecycle event with the core's quiesce.
 
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
+#include <LibreSCRS/Darwin/backend/SystemLifecycle.h>
 
 #include <LibreSCRS/Agent/AgentCore.h>                   // ResolveReaderCard, ReaderCard
 #include <LibreSCRS/Agent/operations/PromptSerializer.h> // Operations::ReaderIdentityForCard
 #include <LibreSCRS/Agent/pkcs11/Pkcs11Broker.h>         // Pkcs11Broker::ResolveCardKeySeam
-#include <LibreSCRS/Agent/value/ReaderLabels.h>          // ReaderIdentity, readerIdentities
+#include <LibreSCRS/Agent/value/ReaderLabels.h>          // identityForCardIn
 
-#include <algorithm>
-#include <cstddef>
 #include <cstdlib>
-#include <iterator>
+#include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace LibreSCRS::Darwin {
 
@@ -52,47 +54,15 @@ namespace LibreSCRS::Darwin {
     };
 }
 
-// Card key -> the identity of the reader holding it, or an empty identity when
-// no reader in @p roster holds that card. The LABELLING is the neutral core's
-// (readerIdentities, roster-aware because a dual-interface unit is only
-// distinguishable across the whole set); all this adds is the inverse only the
-// host can compute, since the host mints the card key.
-[[nodiscard]] inline Agent::ReaderIdentity identityForCardIn(const SocketTransport::PresenceRoster& roster,
-                                                             const std::string& cardKey)
-{
-    // An empty key must not match a reader that holds no card, or every
-    // unresolvable prompt would borrow the first empty reader's name.
-    if (cardKey.empty()) {
-        return {};
-    }
-    const auto it = std::ranges::find(roster.cardKeys, cardKey);
-    if (it == roster.cardKeys.end()) {
-        return {};
-    }
-    const auto index = static_cast<std::size_t>(std::distance(roster.cardKeys.begin(), it));
-    const auto identities = Agent::readerIdentities(roster.readerNames);
-    return index < identities.size() ? identities[index] : Agent::ReaderIdentity{};
-}
-
-// The hold gate: whether the reader holding @p cardKey is the CONTACT slot of a
-// dual-interface unit. That is the one slot the agent keeps powered (a bare
-// power hold on the reader) so the same single-chip card's contactless twin
-// stops flapping. A single-interface reader classifies as Unknown and a CL
-// slot as Contactless, so neither is ever held. Same snapshot semantics as
-// identityForCardIn: one roster read, no per-entry locking.
-[[nodiscard]] inline bool isContactSlotOfDualInterfaceUnit(const SocketTransport::PresenceRoster& roster,
-                                                           const std::string& cardKey)
-{
-    return identityForCardIn(roster, cardKey).iface == Agent::ReaderInterface::Contact;
-}
-
 // The seam the prompt gate stamps every dialog from. Takes a fresh snapshot per
 // call, from whichever reader worker thread asks: a reader unplugged
 // mid-operation must not leave a stale name on the next prompt.
 [[nodiscard]] inline Agent::Operations::ReaderIdentityForCard
 makeResolveReaderIdentity(const SocketTransport& transport)
 {
-    return [&transport](const std::string& cardKey) { return identityForCardIn(transport.presenceRoster(), cardKey); };
+    return [&transport](const std::string& cardKey) {
+        return Agent::identityForCardIn(transport.presenceRoster(), cardKey);
+    };
 }
 
 // The composition step: hand the core's prompt gate the identity lookup above.
@@ -104,6 +74,37 @@ makeResolveReaderIdentity(const SocketTransport& transport)
 inline void installReaderIdentityResolver(Agent::AgentCore& core, const SocketTransport& transport)
 {
     core.promptSerializer().setReaderIdentityResolver(makeResolveReaderIdentity(transport));
+}
+
+// The composition step for a system lifecycle event. The event names its
+// reason (quiesceReasonFor) and the core forgets what that reason says
+// (AgentCore::quiesce), under @p stateMutex because the monitor mutates the
+// registry the quiesce reads on its own thread; then every client hears the
+// same reason, marshaled onto the transport loop. Wake, unlock and switching
+// back name no reason and change nothing -- the next operation re-acquires.
+// PowerOff stops the agent through @p stop instead. One function, so main.cpp
+// and the tests run the same step rather than a test re-stating it. The core,
+// the mutex and the transport MUST outlive the handler.
+[[nodiscard]] inline SystemLifecycle::Handler makeLifecycleHandler(Agent::AgentCore& core, std::mutex& stateMutex,
+                                                                   SocketTransport& transport,
+                                                                   std::function<void()> stop)
+{
+    return [&core, &stateMutex, &transport, stop = std::move(stop)](SystemLifecycle::Event event) {
+        if (event == SystemLifecycle::Event::PowerOff) {
+            stop();
+            return;
+        }
+        const auto reason = quiesceReasonFor(event);
+        if (!reason) {
+            return;
+        }
+        {
+            const std::lock_guard<std::mutex> lk(stateMutex);
+            core.quiesce(*reason);
+        }
+        SocketTransport* trp = &transport;
+        trp->post([trp, quiesced = *reason] { trp->broadcastQuiesced(quiesced); });
+    };
 }
 
 } // namespace LibreSCRS::Darwin

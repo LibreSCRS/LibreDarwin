@@ -18,6 +18,9 @@
 #include "PromptWindow.h"
 
 #include "ArtifactText.h"
+#include "RequesterText.h"
+
+#include <LibreSCRS/Agent/wire/ReaderInterface.h>
 
 #import <AppKit/AppKit.h>
 #include <dispatch/dispatch.h>
@@ -110,13 +113,22 @@ NSString* retryErrorLine(std::uint32_t attempt, const std::string& lastError)
 // it composed would arrive already written and no prompter could fix it. An
 // unrecognised or absent token renders nothing, exactly as the Linux dialog
 // treats the same vocabulary.
+LibreSCRS::Agent::Wire::ReaderInterface readerInterfaceOf(const std::string& token)
+{
+    return LibreSCRS::Agent::Wire::readerInterfaceFromToken(token).value_or(
+        LibreSCRS::Agent::Wire::ReaderInterface::Unknown);
+}
+
 NSString* readerInterfaceWord(const std::string& token)
 {
-    if (token == wire::kReaderInterfaceContact) {
+    using LibreSCRS::Agent::Wire::ReaderInterface;
+    switch (readerInterfaceOf(token)) {
+    case ReaderInterface::Contact:
         return localized("prompter_reader_contact", "contact");
-    }
-    if (token == wire::kReaderInterfaceContactless) {
+    case ReaderInterface::Contactless:
         return localized("prompter_reader_contactless", "contactless");
+    case ReaderInterface::Unknown:
+        break;
     }
     return nil;
 }
@@ -128,11 +140,14 @@ NSString* readerInterfaceWord(const std::string& token)
 // wherever a font lacks the glyph, which is why neither ever stands alone.
 NSString* readerInterfaceGlyph(const std::string& token)
 {
-    if (token == wire::kReaderInterfaceContact) {
+    using LibreSCRS::Agent::Wire::ReaderInterface;
+    switch (readerInterfaceOf(token)) {
+    case ReaderInterface::Contact:
         return @"\U0001F4B3";
-    }
-    if (token == wire::kReaderInterfaceContactless) {
+    case ReaderInterface::Contactless:
         return @"\U0001F4F6";
+    case ReaderInterface::Unknown:
+        break;
     }
     return nil;
 }
@@ -191,7 +206,7 @@ NSString* informativeText(const std::string& description, const std::string& req
     }
     if (!requester.empty()) {
         [info appendFormat:@"%@%@ %@", info.length ? @"\n" : @"", localized("prompter_requested_by", "Requested by:"),
-                           nsstr(requester)];
+                           requesterName(requester)];
     }
     // A batch sign carries the UNTRUSTED per-document names in `artifacts`: list
     // them plainly BELOW the trusted requester line (the formatter neutralizes
@@ -291,6 +306,7 @@ NSString* windowTitleForKind(wire::PromptKind kind)
     case wire::PromptKind::Mrz:
         return localized("prompter_title_mrz", "Machine-Readable Zone");
     case wire::PromptKind::Pin:
+    case wire::PromptKind::ChangePin: // never a RequestSecret: the parser refuses it
         break;
     }
     return localized("prompter_title_pin", "PIN");
@@ -307,6 +323,7 @@ NSString* promptHeading(const wire::PromptRequest& req)
     case wire::PromptKind::Mrz:
         return localized("prompter_heading_mrz", "Enter your Machine-Readable Zone (MRZ)");
     case wire::PromptKind::Pin:
+    case wire::PromptKind::ChangePin: // never a RequestSecret: the parser refuses it
         break;
     }
     return localized("prompter_heading_pin", "Enter your PIN");
@@ -684,6 +701,15 @@ NSString* localized(const char* key, const std::string& fallback)
     return s.length ? s : nsstr(fallback);
 }
 
+NSString* requesterName(const std::string& requester)
+{
+    NSString* named = nsstr(requester);
+    if (const auto wording = wordingForRequester(requester)) {
+        return [NSString stringWithFormat:localized(wording->key, wording->fallback), named != nil ? named : @""];
+    }
+    return named;
+}
+
 namespace {
 
 // The panels standing right now, keyed by the id their prompt was addressed
@@ -845,7 +871,7 @@ wire::MultiPromptReply PromptWindow::showChangePrompt(const wire::RequestSecrets
 {
     // Fail closed on a flow this window does not implement (`kind` is an open
     // discriminator at the wire layer): no UI, no secrets.
-    if (req.kind != "change_pin") {
+    if (req.kind != LibreSCRS::PrompterWire::kKindChangePin) {
         wire::MultiPromptReply refusal;
         refusal.status = wire::PromptReplyStatus::Error;
         refusal.userMessage = "unsupported RequestSecrets kind";

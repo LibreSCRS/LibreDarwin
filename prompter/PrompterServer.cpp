@@ -347,7 +347,7 @@ void PrompterServer::acceptOne(int connFd)
     // Peer-auth BEFORE reading anything: only the agent may drive the prompter
     // (Prompter1 "unauthorized"). The rejection is a tiny frame on a fresh
     // socket; best-effort, then the fd closes.
-    const auto creds = capturePeerCredentials(connFd);
+    const auto creds = Agent::Wire::Darwin::capturePeerCredentials(connFd);
     if (!creds || !m_peerAuth(*creds)) {
         wire::PromptReply rejection = unauthorizedReply();
         wire::sendPromptReplyScrubbed(connFd, rejection);

@@ -4,14 +4,14 @@
 // macOS AgentTransport backend over the App-Group AF_UNIX socket. One serial GCD
 // queue is the loop: the accept source, every per-connection read/write source,
 // and all AgentTransport calls (post-marshaled by the core) run on it, so
-// transport state needs no locks. The agent SELF-BINDS the socket;
-// launch_activate_socket is an optional inherited-fd fallback.
+// transport state needs no locks. The agent binds the socket itself and owns
+// its file.
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 
 #include <LibreSCRS/Agent/SecureZero.h>
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Agent/wire/ReaderInterface.h> // readerInterfaceToken
+#include <LibreSCRS/Logging.h>
 
-#include <launch.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -28,12 +28,14 @@
 namespace LibreSCRS::Darwin {
 namespace {
 
-namespace log = Agent::log;
+namespace log = LibreSCRS::log;
 
 // Same-uid local-DoS bound: concurrent client connections (each may buffer up
 // to one max-size frame in its reassembler). Excess connects are closed at
 // accept.
 constexpr std::size_t kMaxConnections = 32;
+// How long accepting pauses when the process is out of descriptors.
+constexpr std::chrono::milliseconds kAcceptRetryDelay{200};
 
 // Per-connection outbound backpressure bounds: a peer that never reads (or
 // reads slower than it is published to) would otherwise grow its outQueue
@@ -113,24 +115,6 @@ std::expected<BoundSocket, std::string> bindContainerSocket(const std::string& p
     return BoundSocket{std::move(owned), *identity};
 }
 
-std::optional<Agent::Wire::UniqueFd> inheritActivatedSocket(const std::string& name)
-{
-    int* fds = nullptr;
-    size_t count = 0;
-    if (launch_activate_socket(name.c_str(), &fds, &count) != 0 || count == 0 || fds == nullptr) {
-        if (fds != nullptr) {
-            free(fds);
-        }
-        return std::nullopt;
-    }
-    Agent::Wire::UniqueFd owned(fds[0]);
-    for (size_t i = 1; i < count; ++i) {
-        ::close(fds[i]);
-    }
-    free(fds);
-    return owned; // adoptInherited makes it non-blocking
-}
-
 } // namespace
 
 SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
@@ -186,19 +170,13 @@ SocketTransport::SendState SocketTransport::trySendFrame(int fd, OutFrame& f)
     return SendState::Sent;
 }
 
-std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
-SocketTransport::create(std::string socketPath, std::optional<std::string> socketActivationName)
+std::expected<std::unique_ptr<SocketTransport>, ServerStartError> SocketTransport::create(std::string socketPath)
 {
     // Before anything at the path is unlinked or bound: a second instance must
     // leave the first one's socket alone.
     auto lock = SingleInstanceLock::acquire(socketPath);
     if (!lock) {
         return std::unexpected(std::move(lock.error()));
-    }
-    if (socketActivationName) {
-        if (auto activated = inheritActivatedSocket(*socketActivationName)) {
-            return adopt(std::move(*lock), std::move(*activated), std::move(socketPath));
-        }
     }
     auto bound = bindContainerSocket(socketPath);
     if (!bound) {
@@ -207,8 +185,8 @@ SocketTransport::create(std::string socketPath, std::optional<std::string> socke
 
     dispatch_queue_t queue = dispatch_queue_create("rs.librescrs.agent.transport", DISPATCH_QUEUE_SERIAL);
     // Private ctor; make_unique cannot see it.
-    std::unique_ptr<SocketTransport> t(new SocketTransport(queue, std::move(bound->fd), std::move(socketPath), true,
-                                                           bound->identity, std::move(*lock)));
+    std::unique_ptr<SocketTransport> t(
+        new SocketTransport(queue, std::move(bound->fd), std::move(socketPath), bound->identity, std::move(*lock)));
     SocketTransport* raw = t.get();
     dispatch_sync(raw->m_queue, ^{
       raw->installAcceptSource();
@@ -217,38 +195,11 @@ SocketTransport::create(std::string socketPath, std::optional<std::string> socke
     return t;
 }
 
-std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
-SocketTransport::adoptInherited(Agent::Wire::UniqueFd listenFd, std::string socketPath)
-{
-    auto lock = SingleInstanceLock::acquire(socketPath);
-    if (!lock) {
-        return std::unexpected(std::move(lock.error()));
-    }
-    return adopt(std::move(*lock), std::move(listenFd), std::move(socketPath));
-}
-
-std::unique_ptr<SocketTransport> SocketTransport::adopt(SingleInstanceLock instanceLock, Agent::Wire::UniqueFd listenFd,
-                                                        std::string socketPath)
-{
-    // The accept handler drains until EAGAIN; a blocking fd would park the loop.
-    makeNonBlockingCloexec(listenFd.get());
-    dispatch_queue_t queue = dispatch_queue_create("rs.librescrs.agent.transport", DISPATCH_QUEUE_SERIAL);
-    // launchd owns the file: no guard (see the header).
-    std::unique_ptr<SocketTransport> t(new SocketTransport(queue, std::move(listenFd), std::move(socketPath), false,
-                                                           std::nullopt, std::move(instanceLock)));
-    SocketTransport* raw = t.get();
-    dispatch_sync(raw->m_queue, ^{
-      raw->installAcceptSource();
-    });
-    return t;
-}
-
 SocketTransport::SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath,
-                                 bool ownsSocketFile, std::optional<SocketPathIdentity> listenIdentity,
-                                 SingleInstanceLock instanceLock)
+                                 std::optional<SocketPathIdentity> listenIdentity, SingleInstanceLock instanceLock)
     : m_queue(queue), m_listenFd(std::move(listenFd)), m_socketPath(std::move(socketPath)),
-      m_instanceLock(std::move(instanceLock)), m_ownsSocketFile(ownsSocketFile),
-      m_acceptTeardown(dispatch_group_create()), m_listenIdentity(listenIdentity)
+      m_instanceLock(std::move(instanceLock)), m_acceptTeardown(dispatch_group_create()),
+      m_listenIdentity(listenIdentity)
 {}
 
 void SocketTransport::setPathGuardIntervalForTest(std::chrono::microseconds interval)
@@ -279,6 +230,11 @@ SocketTransport::~SocketTransport()
           dispatch_release(m_pathGuardTimer);
           m_pathGuardTimer = nullptr;
       }
+      if (m_acceptRetryTimer != nullptr) {
+          dispatch_source_cancel(m_acceptRetryTimer);
+          dispatch_release(m_acceptRetryTimer);
+          m_acceptRetryTimer = nullptr;
+      }
       if (m_acceptSource != nullptr) {
           cancelAcceptSource(); // its cancel handler closes the listen fd
       }
@@ -305,7 +261,7 @@ SocketTransport::~SocketTransport()
 
     // Only the file this process bound: after a replacement that was not yet
     // (or could not be) answered, the path is someone else's.
-    if (m_ownsSocketFile && m_listenIdentity && m_listenIdentity->stillNames(m_socketPath)) {
+    if (m_listenIdentity && m_listenIdentity->stillNames(m_socketPath)) {
         ::unlink(m_socketPath.c_str());
     }
     dispatch_release(m_queue);
@@ -350,8 +306,7 @@ void SocketTransport::installPathGuard()
 
 void SocketTransport::checkSocketPath()
 {
-    // An inherited (launchd) socket file is not ours to take back.
-    if (!m_ownsSocketFile || m_stopping) {
+    if (m_stopping) {
         return;
     }
     if (m_rebindPending) {
@@ -370,6 +325,9 @@ void SocketTransport::checkSocketPath()
 
 void SocketTransport::cancelAcceptSource()
 {
+    // A suspended source delivers no cancel handler until it is resumed, and
+    // releasing one is a libdispatch crash.
+    resumeAccepting();
     m_cancelledListener = ListenSocketObject::of(m_listenFd.get());
     dispatch_source_cancel(m_acceptSource);
     dispatch_release(m_acceptSource);
@@ -416,11 +374,49 @@ void SocketTransport::onAcceptReady()
             if (errno == EINTR) {
                 continue;
             }
+            if (errno == EMFILE || errno == ENFILE) {
+                // The pending connection stays queued and the listen source
+                // would fire again at once, for as long as no descriptor is
+                // freed: a loop that burns a core and serves nothing.
+                log::warnf("transport: out of file descriptors ({}); pausing new connections for {} ms",
+                           std::strerror(errno), kAcceptRetryDelay.count());
+                pauseAccepting();
+            }
             break; // EAGAIN: drained
         }
         acceptOne(c);
     }
     checkSocketPath(); // every accept is also a look at the path
+}
+
+void SocketTransport::pauseAccepting()
+{
+    if (m_acceptSource == nullptr || m_acceptPaused) {
+        return;
+    }
+    dispatch_suspend(m_acceptSource);
+    m_acceptPaused = true;
+    const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(kAcceptRetryDelay).count();
+    if (m_acceptRetryTimer == nullptr) {
+        m_acceptRetryTimer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, m_queue);
+        dispatch_source_set_event_handler(m_acceptRetryTimer, ^{
+          this->resumeAccepting();
+        });
+        dispatch_source_set_timer(m_acceptRetryTimer, dispatch_time(DISPATCH_TIME_NOW, ns), DISPATCH_TIME_FOREVER,
+                                  static_cast<std::uint64_t>(ns / 10));
+        dispatch_resume(m_acceptRetryTimer);
+    } else {
+        dispatch_source_set_timer(m_acceptRetryTimer, dispatch_time(DISPATCH_TIME_NOW, ns), DISPATCH_TIME_FOREVER,
+                                  static_cast<std::uint64_t>(ns / 10));
+    }
+}
+
+void SocketTransport::resumeAccepting()
+{
+    if (m_acceptSource != nullptr && m_acceptPaused) {
+        dispatch_resume(m_acceptSource);
+    }
+    m_acceptPaused = false;
 }
 
 void SocketTransport::acceptOne(int connFd)
@@ -433,7 +429,7 @@ void SocketTransport::acceptOne(int connFd)
     makeNonBlockingCloexec(connFd);
     setNoSigPipe(connFd);
 
-    auto creds = capturePeerCredentials(connFd);
+    auto creds = Agent::Wire::Darwin::capturePeerCredentials(connFd);
     if (!creds) {
         log::warn("transport: rejecting connection with unidentifiable peer");
         return; // fail closed; fd closed by UniqueFd
@@ -530,8 +526,10 @@ void SocketTransport::onReadReady(std::uint64_t connId)
             return; // conn is gone
         }
         // The connection may have been closed by a prior frame's synchronous
-        // reply-send failure; stop touching it.
-        if (m_connections.find(connId) == m_connections.end()) {
+        // reply-send failure, or be on its way out after a final reply; either
+        // way the frames behind it go unanswered.
+        if (const auto live = m_connections.find(connId);
+            live == m_connections.end() || live->second->closeWhenDrained) {
             return;
         }
         if (m_sink) {
@@ -636,6 +634,9 @@ void SocketTransport::flushWrites(Connection& conn)
         dispatch_release(conn.writeSource);
         conn.writeSource = nullptr;
     }
+    if (conn.closeWhenDrained) {
+        closeConnection(conn.id); // the final frame is out; conn is gone
+    }
 }
 
 void SocketTransport::sendTo(std::uint64_t connId, const Agent::Wire::CborValue& message,
@@ -655,7 +656,34 @@ void SocketTransport::sendTo(std::uint64_t connId, const Agent::Wire::CborValue&
     enqueueSend(*it->second, std::move(framed), std::move(fds));
 }
 
-void SocketTransport::broadcast(const Agent::Wire::CborValue& event)
+void SocketTransport::sendThenClose(std::uint64_t connId, const Agent::Wire::CborValue& message)
+{
+    const auto it = m_connections.find(connId);
+    if (it == m_connections.end()) {
+        return;
+    }
+    Connection& conn = *it->second;
+    // Stop reading first: a request already on its way is not answered, and a
+    // peer that keeps writing cannot keep the connection alive.
+    if (conn.readSource != nullptr) {
+        dispatch_source_cancel(conn.readSource);
+        dispatch_release(conn.readSource);
+        conn.readSource = nullptr;
+    }
+    conn.closeWhenDrained = true;
+    // flushWrites closes the connection once this frame is written, at once or
+    // from the write source when the peer is slow to read.
+    sendTo(connId, message);
+}
+
+void SocketTransport::setWantsPresenceEvents(std::uint64_t connId, bool wants)
+{
+    if (const auto it = m_connections.find(connId); it != m_connections.end()) {
+        it->second->wantsPresenceEvents = wants;
+    }
+}
+
+void SocketTransport::broadcast(const Agent::Wire::CborValue& event, EventKind kind)
 {
     const auto framed = Agent::Wire::encodeFrame(event.encode(), 0);
     // Snapshot the connection ids FIRST: enqueueSend can close + erase the
@@ -666,7 +694,9 @@ void SocketTransport::broadcast(const Agent::Wire::CborValue& event)
     std::vector<std::uint64_t> ids;
     ids.reserve(m_connections.size());
     for (const auto& [id, conn] : m_connections) {
-        ids.push_back(id);
+        if (!conn->closeWhenDrained && (kind == EventKind::AgentWide || conn->wantsPresenceEvents)) {
+            ids.push_back(id);
+        }
     }
     for (const std::uint64_t id : ids) {
         const auto it = m_connections.find(id);
@@ -697,9 +727,39 @@ void SocketTransport::publishReader(const Agent::ReaderState& reader)
     if (reader.card.valid()) {
         r.card = handleFor(reader.card);
     }
+    // The label the agent library gave the reader over the whole roster; a
+    // client shows it and never parses the PC/SC name.
+    r.model = reader.model;
+    r.iface = reader.iface;
     m_readers[r.handle] = r;
     rebuildRoster();
-    broadcast(Agent::Wire::toCbor(Agent::Wire::ReaderAdded{r}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::ReaderAdded{r}), EventKind::Presence);
+}
+
+void SocketTransport::relabelReader(const Agent::ReaderState& reader)
+{
+    const auto handleIt = m_idToHandle.find(reader.id.value());
+    if (handleIt == m_idToHandle.end()) {
+        return;
+    }
+    const auto readerIt = m_readers.find(handleIt->second);
+    if (readerIt == m_readers.end()) {
+        return;
+    }
+    if (readerIt->second.model == reader.model && readerIt->second.iface == reader.iface) {
+        return; // nothing a client shows changed
+    }
+    readerIt->second.model = reader.model;
+    readerIt->second.iface = reader.iface;
+
+    // Same iface/key convention as updateProperties() below; Model and
+    // Interface always travel together.
+    std::map<std::string, Agent::Wire::CborValue> props;
+    props.emplace("Model", Agent::Wire::CborValue(reader.model));
+    props.emplace("Interface", Agent::Wire::CborValue(std::string(Agent::Wire::readerInterfaceToken(reader.iface))));
+    broadcast(Agent::Wire::toCbor(
+                  Agent::Wire::PropertyChanged{readerIt->first, "org.librescrs.Agent.Reader1", std::move(props)}),
+              EventKind::Presence);
 }
 
 void SocketTransport::publishCard(const Agent::CardState& card)
@@ -737,7 +797,7 @@ void SocketTransport::publishCard(const Agent::CardState& card)
     m_cardRouting[c.handle] = std::move(routing);
     rebuildRoster();
 
-    broadcast(Agent::Wire::toCbor(Agent::Wire::CardAdded{c}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::CardAdded{c}), EventKind::Presence);
 }
 
 void SocketTransport::withdraw(Agent::ObjectId object)
@@ -748,10 +808,10 @@ void SocketTransport::withdraw(Agent::ObjectId object)
     }
     const std::string handle = it->second;
     if (m_readers.erase(handle) > 0) {
-        broadcast(Agent::Wire::toCbor(Agent::Wire::ReaderRemoved{handle}));
+        broadcast(Agent::Wire::toCbor(Agent::Wire::ReaderRemoved{handle}), EventKind::Presence);
     } else if (m_cards.erase(handle) > 0) {
         m_cardRouting.erase(handle);
-        broadcast(Agent::Wire::toCbor(Agent::Wire::CardRemoved{handle}));
+        broadcast(Agent::Wire::toCbor(Agent::Wire::CardRemoved{handle}), EventKind::Presence);
     }
     m_idToHandle.erase(it);
     m_handleToId.erase(handle);
@@ -790,7 +850,8 @@ void SocketTransport::updateProperties(Agent::ObjectId reader, const Agent::Prop
         props.emplace("Card", Agent::Wire::CborValue(*readerIt->second.card));
     }
     broadcast(Agent::Wire::toCbor(
-        Agent::Wire::PropertyChanged{readerIt->first, "org.librescrs.Agent.Reader1", std::move(props)}));
+                  Agent::Wire::PropertyChanged{readerIt->first, "org.librescrs.Agent.Reader1", std::move(props)}),
+              EventKind::Presence);
 }
 
 void SocketTransport::updateCardType(const std::string& cardHandle, const std::string& cardType)
@@ -810,7 +871,8 @@ void SocketTransport::updateCardType(const std::string& cardHandle, const std::s
     std::map<std::string, Agent::Wire::CborValue> props;
     props.emplace("CardType", Agent::Wire::CborValue(cardType));
     broadcast(
-        Agent::Wire::toCbor(Agent::Wire::PropertyChanged{cardHandle, "org.librescrs.Agent.Card1", std::move(props)}));
+        Agent::Wire::toCbor(Agent::Wire::PropertyChanged{cardHandle, "org.librescrs.Agent.Card1", std::move(props)}),
+        EventKind::Presence);
 }
 
 void SocketTransport::post(std::function<void()> fn)
@@ -901,7 +963,7 @@ std::optional<SocketTransport::ReaderCardInfo> SocketTransport::readerCard(const
     return info;
 }
 
-SocketTransport::PresenceRoster SocketTransport::presenceRoster() const
+Agent::PresenceRoster SocketTransport::presenceRoster() const
 {
     std::lock_guard<std::mutex> lk(m_rosterMutex);
     return m_roster;
@@ -909,7 +971,7 @@ SocketTransport::PresenceRoster SocketTransport::presenceRoster() const
 
 void SocketTransport::rebuildRoster()
 {
-    PresenceRoster roster;
+    Agent::PresenceRoster roster;
     roster.readerNames.reserve(m_readers.size());
     roster.cardKeys.reserve(m_readers.size());
     for (const auto& [readerHandle, reader] : m_readers) {
@@ -938,15 +1000,16 @@ void SocketTransport::rebuildRoster()
 
 void SocketTransport::broadcastConfigChanged(const std::string& key)
 {
-    broadcast(Agent::Wire::toCbor(Agent::Wire::ConfigChanged{key}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::ConfigChanged{key}), EventKind::AgentWide);
 }
 
 void SocketTransport::broadcastQuiesced(Agent::Wire::QuiesceReason reason)
 {
-    broadcast(Agent::Wire::toCbor(Agent::Wire::AgentQuiesced{reason}));
+    broadcast(Agent::Wire::toCbor(Agent::Wire::AgentQuiesced{reason}), EventKind::AgentWide);
 }
 
-std::optional<PeerCredentials> SocketTransport::credentialsFor(const Agent::CallerToken& caller) const
+std::optional<Agent::Wire::Darwin::PeerCredentials>
+SocketTransport::credentialsFor(const Agent::CallerToken& caller) const
 {
     for (const auto& [id, conn] : m_connections) {
         if (conn->caller == caller) {

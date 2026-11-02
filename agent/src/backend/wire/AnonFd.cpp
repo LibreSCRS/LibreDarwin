@@ -1,31 +1,23 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #include <LibreSCRS/Darwin/backend/wire/AnonFd.h> // brings in the UniqueFd using-declaration (Agent::Wire::UniqueFd)
+
+#include <LibreSCRS/Agent/util/TempDir.h>
+
 #include <fcntl.h>
 #include <unistd.h>
 #include <cerrno>
-#include <cstdlib>
-#include <string>
 #include <vector>
 
 namespace LibreSCRS::Darwin::wire {
 
 std::optional<UniqueFd> anonFdFromBytes(std::span<const std::uint8_t> bytes)
 {
-    // No memfd_create on Darwin: mkstemp into TMPDIR + immediate unlink is the
-    // anonymous-file equivalent (same technique as LibreAgent's client/qt/
-    // src/socket/MemfdSource.cpp, __APPLE__ branch) -- a regular-file fd that
-    // fully supports pread/SCM_RIGHTS. Cross-repo documentation only: this
-    // repository keeps no canonical-types registry, so no gate ties this
-    // comment to that file staying true.
-    const char* tmpDir = std::getenv("TMPDIR");
-    std::string tmpl = (tmpDir != nullptr && *tmpDir != '\0') ? std::string(tmpDir) : std::string("/tmp/");
-    if (tmpl.back() != '/') {
-        tmpl.push_back('/');
-    }
-    tmpl += "lda-XXXXXX";
-    std::vector<char> path(tmpl.begin(), tmpl.end());
-    path.push_back('\0');
+    // No memfd_create on Darwin: mkstemp + immediate unlink is the
+    // anonymous-file equivalent -- a regular-file fd that fully supports
+    // pread/SCM_RIGHTS. The directory is LibreAgent's one rule for it (TMPDIR,
+    // else /tmp), the one its Qt client's anonymous files use as well.
+    std::vector<char> path = Agent::tempFileTemplate("lda-");
 
     const int fd = ::mkstemp(path.data());
     if (fd < 0) {

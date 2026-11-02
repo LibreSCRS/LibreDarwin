@@ -16,6 +16,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Security
 
+- **Trust changes can no longer flood you with confirmation dialogs.** Each
+  request to change a time-stamping or trust-list source, or to forget the
+  country signing anchors, now counts against the same per-client budget as
+  signing, and a client may have only one such confirmation waiting at a time;
+  a second one is refused at once instead of opening another dialog.
 - **The socket agent wipes its copies of a decrypted plaintext or a derived
   secret** on the way to the client: the reply message, its encoded body and
   the queued frame, whether the frame is sent or dropped with its connection.
@@ -76,6 +81,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
   nobody had ever run. The workflow verifies the tag's signature against the
   published key, then publishes the section of this file that names the tag's
   version.
+- **Every reader the socket agent publishes carries its label**: the short
+  model (`OMNIKEY 5422`) and whether the slot is the contact or the
+  contactless side of a dual-interface reader, as `reader-state` `model` and
+  `interface`. A label that changes because a reader arrived or left beside it
+  reaches clients as a `Reader1` property change, so a client shows the label
+  and never parses the PC/SC name.
 - The change-PIN window now counts down and closes with a timeout, like the
   single-secret prompt. Its request carries the budget as an optional
   `deadlineMs`; a request without it (from an older agent) still shows a
@@ -83,6 +94,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Changed
 
+- **`packaging/install-dev.sh` signs the development agent and prompter with
+  the entitlements LibreMac ships them with**, App Sandbox included, instead of
+  a narrower set of its own, so a development run reaches what the shipped
+  agent reaches. It reads them from a LibreMac checkout next to this one (or
+  `LIBREMAC_DIR`).
 - **The hardware signing smoke test names no PKCS#11 module.** The agent signs
   through the card's plugin on the session it already holds, so the test no
   longer derives `LIBRESCRS_PKCS11_MODULE` from the plugin directory, and the
@@ -178,6 +194,33 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **An agent out of file descriptors no longer spins at full CPU.** It pauses
+  accepting new clients briefly instead of retrying at once, and it raises its
+  open-file limit at start-up to what the system allows.
+- **A card inserted while macOS or another token driver is still probing it
+  is no longer reported as unsupported until it is re-inserted.** The agent
+  asks again with growing waits for up to ten seconds, instead of giving up
+  after three tries 50 ms apart. Only a card that was refused because
+  something else holds it is asked about again; one that cannot be read for
+  any other reason is reported at once. A card more than one plugin
+  recognises now reports the type of the plugin that takes precedence, where
+  it used to report none.
+- **The PIN and confirmation dialogs name the application that asks**, by the
+  identifier its signature carries (for example `org.mozilla.firefox`), instead
+  of a process number. A request that comes through the Keychain names the
+  token extension with a `(Keychain)` mark whose wording comes from the host
+  application's translation catalogue.
+- **The agent honours what a client says in its `Hello`.** A client that
+  declines events (`wantsEvents: false`, as the Keychain token extension does)
+  no longer receives reader and card presence frames it never reads, which
+  used to pile up until the agent closed its connection; and a client of
+  another wire protocol version is answered `UnsupportedProtocol`, and its
+  connection closed, instead of failing later on a message it cannot decode.
+- **LibreMiddleware's own diagnostics reach the unified log.** The agent wired
+  its `os_log` sink into the agent core's logging only, so what the middleware
+  reported (reader monitor, plugin loading, signing) went to a standard error
+  launchd discards. The core and the middleware now share one facade, and the
+  agent installs its sink into it once.
 - **Every binary now targets macOS 15, the minimum LibreMac states.** The agent
   and the prompter had been built for macOS 27, the build machine's own
   release, so on an earlier macOS they would not have started.

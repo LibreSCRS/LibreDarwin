@@ -15,9 +15,10 @@
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
 
-#include "SocketRig.h"         // Rig, errName, makeInputFile, the hermetic fakes
-#include "CardRemovalCaches.h" // invalidateCardRemovalCaches (the production removal-invalidation code)
-#include "FullScrubCaches.h"   // clearFullScrubCaches (the production fullScrub cache-clearing code)
+#include "SocketRig.h" // Rig, errName, makeInputFile, the hermetic fakes
+
+#include <LibreSCRS/Agent/cache/CardRemovalCaches.h> // invalidateCardRemovalCaches (the production removal-invalidation code)
+#include <LibreSCRS/Agent/presence/CardResolutionPolicy.h> // releaseReaderOnCardRemoved (the production removal hook's reader half)
 
 #include <LibreSCRS/Agent/AgentCore.h>
 #include <LibreSCRS/Agent/OperationPhase.h> // OperationStatus
@@ -33,17 +34,20 @@
 #include <LibreSCRS/Agent/operations/RateLimiter.h>       // kMaxPerWindow
 #include <LibreSCRS/Agent/operations/Seams.h>             // NullCredentialDepositor
 #include <LibreSCRS/Agent/presence/CapabilityResolver.h>
-#include <LibreSCRS/Agent/value/CredentialRecord.h> // CredentialSnapshot
-#include <LibreSCRS/Agent/value/ErrorTaxonomy.h>    // ErrorCode
-#include <LibreSCRS/Auth/ErrorKeys.h>               // genericComm (a refused open)
-#include <LibreSCRS/Plugin/CardPluginService.h>     // the registry a depositor is bound over
-#include <LibreSCRS/SmartCard/CardSession.h>        // detail::makeDetachedCardSession (LIBRESCRS_INTERNAL_BUILD)
-#include <LibreSCRS/Secure/String.h>                // the BlockingPrompter's dummy Ok secrets
+#include <LibreSCRS/Agent/value/CredentialRecord.h>         // CredentialSnapshot
+#include <LibreSCRS/Agent/value/ErrorTaxonomy.h>            // ErrorCode
+#include <LibreSCRS/Auth/ErrorKeys.h>                       // genericComm (a refused open)
+#include <LibreSCRS/Plugin/CardPluginService.h>             // the registry a depositor is bound over
+#include <LibreSCRS/SmartCard/CardSession.h>                // OpenError
+#include <LibreSCRS/SmartCard/testing/CardSessionTesting.h> // a session with no card behind it
+#include <LibreSCRS/Secure/String.h>                        // the BlockingPrompter's dummy Ok secrets
 
 #include <gtest/gtest.h>
 
 #include <dispatch/dispatch.h>
 #include <fstream>
+#include <poll.h>
+#include <sys/socket.h>
 #include <sstream>
 #include <unistd.h>
 
@@ -59,6 +63,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <span>
 #include <string>
 #include <string_view>
@@ -120,7 +125,9 @@ public:
         std::unique_lock<std::mutex> lock(m_mutex);
         m_entered = true;
         m_cv.notify_all();
-        if (!m_cv.wait_for(lock, std::chrono::seconds(5), [this] { return m_cancelled; })) {
+        const bool cancelled = m_cv.wait_for(lock, std::chrono::seconds(5), [this] { return m_cancelled; });
+        m_left = true;
+        if (!cancelled) {
             // Deadline hit with no cancel(promptId): report Ok with dummy secrets, NOT
             // Cancelled — a cancel that never reaches the prompter must fail
             // the userCancelled asserts, not impersonate a genuine cancel.
@@ -142,11 +149,19 @@ public:
         std::unique_lock<std::mutex> lock(m_mutex);
         return m_cv.wait_for(lock, std::chrono::seconds(5), [this] { return m_entered; });
     }
+    // True while the worker is inside the modal: entered and not yet returned,
+    // whether by a cancel or by the deadline.
+    [[nodiscard]] bool holding()
+    {
+        const std::lock_guard<std::mutex> lock(m_mutex);
+        return m_entered && !m_left;
+    }
 
 private:
     std::mutex m_mutex;
     std::condition_variable m_cv;
     bool m_entered{false};
+    bool m_left{false};
     bool m_cancelled{false};
 };
 
@@ -156,7 +171,7 @@ Agent::Operations::SessionFactory detachedSessionFactory()
 {
     return [](const std::string& reader)
                -> std::expected<std::shared_ptr<LibreSCRS::SmartCard::CardSession>, LibreSCRS::SmartCard::OpenError> {
-        return LibreSCRS::SmartCard::detail::makeDetachedCardSession(reader);
+        return LibreSCRS::SmartCard::Testing::makeDetachedCardSession(reader);
     };
 }
 
@@ -192,6 +207,18 @@ constexpr const char* kInjectedCardKey = "8";
 // limiter see, mirroring the Linux e2e's use of the client's unique bus name.
 constexpr const char* kFirstConnCaller = "conn:1";
 
+// Sign options with only the three required fields set; the optional ones stay
+// disengaged. Assigned rather than designated so that a new optional field on
+// the wire struct does not have to be spelled out at every call site.
+Agent::Wire::SignOpts signOpts(std::string format, std::string level, std::string packaging)
+{
+    Agent::Wire::SignOpts opts;
+    opts.format = std::move(format);
+    opts.level = std::move(level);
+    opts.packaging = std::move(packaging);
+    return opts;
+}
+
 // A single-record snapshot seeded under the injected card's key (bypasses the
 // list flow, exactly like the Linux e2e seeding): a changeable UserPIN
 // addressed by "user:0x01", so a change request resolves to a canChange record.
@@ -222,6 +249,112 @@ TEST(SocketFrontend, HelloReturnsAck)
     EXPECT_EQ(*reply.find("agentVer")->asText(), "0.1-test");
     ASSERT_NE(reply.find("req"), nullptr);
     EXPECT_EQ(reply.find("req")->asUInt().value_or(0), 1u);
+}
+
+// A client of another wire version is told so in the Hello reply, gets no
+// acknowledgement it would go on to misread, and the connection ends with the
+// refusal: the next read is the end of the stream. Bounded, so a connection
+// left open fails the test instead of wedging it.
+TEST(SocketFrontend, HelloOfAnotherProtocolVersionIsRefusedAndTheConnectionCloses)
+{
+    Rig rig;
+    Client client(rig.path);
+    client.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion + 1, std::nullopt});
+    const auto reply = client.recv();
+    EXPECT_EQ(errName(reply), "UnsupportedProtocol");
+    EXPECT_EQ(reply.find("agentVer"), nullptr);
+
+    pollfd readable{.fd = client.fd, .events = POLLIN, .revents = 0};
+    ASSERT_EQ(::poll(&readable, 1, 2000), 1) << "the connection stayed open after a refused Hello";
+    char byte = 0;
+    EXPECT_EQ(::recv(client.fd, &byte, 1, 0), 0) << "expected the end of the stream, not another frame";
+}
+
+// A connection whose Hello declines events gets no presence frame; one that
+// says nothing still gets every one. The quiet client's next frame after a
+// reader and card appear is the reply to its own request: the presence events
+// were published on the loop before that request was served, so had they been
+// queued for it they would have arrived first.
+TEST(SocketFrontend, AHelloThatDeclinesEventsReceivesNoPresenceEvents)
+{
+    Rig rig;
+    Client quiet(rig.path);
+    quiet.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt, /*wantsEvents=*/false});
+    ASSERT_EQ(errName(quiet.waitFor("Reply")), "");
+    Client listening(rig.path);
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt});
+    ASSERT_EQ(errName(listening.waitFor("Reply")), "");
+
+    rig.injectCard(kIdentityCap);
+
+    (void)listening.waitFor("ReaderAdded");
+    (void)listening.waitFor("CardAdded");
+    quiet.send(2, Agent::Wire::GetState{});
+    const auto next = quiet.recv();
+    ASSERT_NE(next.find("t"), nullptr);
+    ASSERT_NE(next.find("t")->asText(), nullptr);
+    EXPECT_EQ(*next.find("t")->asText(), "Reply");
+    ASSERT_NE(next.find("req"), nullptr);
+    EXPECT_EQ(next.find("req")->asUInt().value_or(0), 2u);
+}
+
+// The label a client shows comes from the agent library's registry, which
+// decides it over the whole roster: the contact slot of a dual-interface unit
+// is only "contact" once its contactless twin is there, so the twin's arrival
+// relabels the reader already published. The registry is wired to the
+// frontend's entry points exactly as main.cpp wires it.
+TEST(SocketFrontend, AReaderGoesOutWithItsLabelAndATwinRelabelsIt)
+{
+    Rig rig;
+    Client listening(rig.path);
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt});
+    ASSERT_EQ(errName(listening.waitFor("Reply")), "");
+
+    auto& registry = rig.core->objectRegistry();
+    SocketFrontend& frontend = *rig.frontend;
+    registry.setObservers(
+        [&frontend](const Agent::ReaderState& r) { frontend.onReaderPublished(r); },
+        [&frontend](const Agent::CardState& c) { frontend.onCardPublished(c); },
+        [&frontend](Agent::ObjectId id) { frontend.onWithdrawn(id); },
+        [&frontend](Agent::ObjectId r, const Agent::PropertyDelta& d) { frontend.onReaderPropertiesChanged(r, d); },
+        [&frontend](const Agent::ReaderState& r) { frontend.onReaderRelabelled(r); });
+
+    const auto text = [](const Agent::Wire::CborValue* v) -> std::string {
+        return v != nullptr && v->asText() != nullptr ? *v->asText() : std::string{"<absent>"};
+    };
+
+    Agent::ReaderState contact;
+    contact.id = Agent::ObjectId(21);
+    contact.name =
+        "HID Global OMNIKEY 5422 Smartcard Reader [OMNIKEY 5422 Smartcard Reader] (IM0O2C00NF10456904) 01 00";
+    registry.addReader(contact);
+    const auto first = listening.waitFor("ReaderAdded");
+    const auto* firstReader = first.find("reader");
+    ASSERT_NE(firstReader, nullptr);
+    EXPECT_EQ(text(firstReader->find("model")), "OMNIKEY 5422");
+    EXPECT_EQ(text(firstReader->find("interface")), "unknown") << "alone, the slot is not known to be a contact slot";
+    const std::string contactHandle = text(firstReader->find("handle"));
+
+    Agent::ReaderState contactless;
+    contactless.id = Agent::ObjectId(22);
+    contactless.name =
+        "HID Global OMNIKEY 5422 Smartcard Reader [OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00";
+    registry.addReader(contactless);
+    const auto second = listening.waitFor("ReaderAdded");
+    const auto* secondReader = second.find("reader");
+    ASSERT_NE(secondReader, nullptr);
+    EXPECT_EQ(text(secondReader->find("model")), "OMNIKEY 5422");
+    EXPECT_EQ(text(secondReader->find("interface")), "contactless");
+
+    const auto relabel = listening.waitFor("PropertyChanged");
+    EXPECT_EQ(text(relabel.find("handle")), contactHandle);
+    EXPECT_EQ(text(relabel.find("iface")), "org.librescrs.Agent.Reader1");
+    const auto* props = relabel.find("props");
+    ASSERT_NE(props, nullptr);
+    EXPECT_EQ(text(props->find("Model")), "OMNIKEY 5422");
+    EXPECT_EQ(text(props->find("Interface")), "contact");
+
+    registry.setObservers({}, {}, {}, {});
 }
 
 TEST(SocketFrontend, GetStateReturnsSnapshot)
@@ -308,9 +441,7 @@ TEST(SocketFrontend, SignOnNonPkiCardIsUnsupported)
 {
     Rig rig;
     const std::string card = rig.injectCard(kIdentityCap); // no PKI bit
-    const auto reply = rig.roundTrip(
-        4, Agent::Wire::Sign{card, "cert-id", 0,
-                             Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
+    const auto reply = rig.roundTrip(4, Agent::Wire::Sign{card, "cert-id", 0, signOpts("pades", "b-b", "enveloped")});
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
 }
 
@@ -318,9 +449,27 @@ TEST(SocketFrontend, SignWithEmptyCertIsRejected)
 {
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
-    const auto reply = rig.roundTrip(
-        5, Agent::Wire::Sign{card, "", 0,
-                             Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
+    const auto reply = rig.roundTrip(5, Agent::Wire::Sign{card, "", 0, signOpts("pades", "b-b", "enveloped")});
+    EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
+}
+
+// A document behind a pipe is refused before the first read: a pipe whose
+// writer stays open would hold that read -- and with it the loop that serves
+// every client -- for as long as the writer likes. The pipe here already
+// holds a whole PDF and is closed, so an agent that read it anyway would mint
+// the operation instead of refusing.
+TEST(SocketFrontend, SignRefusesADocumentBehindAPipe)
+{
+    Rig rig;
+    const std::string card = rig.injectCard(kPkiCap);
+    int pipeFds[2] = {-1, -1};
+    ASSERT_EQ(::pipe(pipeFds), 0);
+    constexpr std::string_view kPdf = "%PDF-1.7";
+    ASSERT_EQ(::write(pipeFds[1], kPdf.data(), kPdf.size()), static_cast<ssize_t>(kPdf.size()));
+    ::close(pipeFds[1]);
+    const auto reply = rig.roundTrip(53, Agent::Wire::Sign{card, "cert-id", 0, signOpts("pades", "b-b", "enveloped")},
+                                     std::array{pipeFds[0]});
+    ::close(pipeFds[0]);
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
 }
 
@@ -332,7 +481,7 @@ TEST(SocketFrontend, SignRejectsANonHttpsTsaUrl)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-t", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-t", "enveloped");
     opts.tsaUrl = std::string{"http://tsa.example.com"};
     const auto reply = rig.roundTrip(50, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -345,7 +494,7 @@ TEST(SocketFrontend, SignRejectsTsaUrlPairedWithTheBaselineLevel)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-b", "enveloped");
     opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
     const auto reply = rig.roundTrip(51, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -358,7 +507,7 @@ TEST(SocketFrontend, SignAcceptsTsaUrlOverrideAtTheTimestampedLevel)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-t", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-t", "enveloped");
     opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
     // The method-entry gate passes -- an Operation is minted (no "err" key).
     // SignParams.tsaUrl's exact threading into the LM signing request is
@@ -379,7 +528,7 @@ TEST(SocketFrontend, SignAcceptsTheAgentDecidesSentinelForLevel)
     for (const char* sentinel : {"auto", ""}) {
         const int fd = makeInputFile("%PDF-1.7");
         ASSERT_GE(fd, 0);
-        const Agent::Wire::SignOpts opts{.format = "pades", .level = sentinel, .packaging = "enveloped"};
+        const Agent::Wire::SignOpts opts = signOpts("pades", sentinel, "enveloped");
         const auto reply = rig.roundTrip(90, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
         ::close(fd);
         EXPECT_EQ(errName(reply), "") << "sentinel: " << sentinel;
@@ -403,7 +552,7 @@ TEST(SocketFrontend, SignAcceptsATsaUrlAlongsideTheAgentDecidesSentinel)
     EXPECT_TRUE(setConfigReply.find("ok")->asBool().value_or(false));
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "auto", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "auto", "enveloped");
     opts.tsaUrl = std::string{"https://tsa.example.com/ts"};
     const auto reply = rig.roundTrip(92, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -421,7 +570,7 @@ TEST(SocketFrontend, SignSniffsTheFormatWhenTheCallerDefersIt)
     for (const char* sentinel : {"auto", ""}) {
         const int fd = makeInputFile("%PDF-1.7");
         ASSERT_GE(fd, 0);
-        const Agent::Wire::SignOpts opts{.format = sentinel, .level = "b-b", .packaging = "enveloped"};
+        const Agent::Wire::SignOpts opts = signOpts(sentinel, "b-b", "enveloped");
         const auto reply = rig.roundTrip(93, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
         ::close(fd);
         EXPECT_EQ(errName(reply), "") << "sentinel: " << sentinel;
@@ -429,7 +578,7 @@ TEST(SocketFrontend, SignSniffsTheFormatWhenTheCallerDefersIt)
     for (const char* sentinel : {"auto", ""}) {
         const int fd = makeInputFile("zzzz");
         ASSERT_GE(fd, 0);
-        const Agent::Wire::SignOpts opts{.format = sentinel, .level = "b-b", .packaging = "enveloped"};
+        const Agent::Wire::SignOpts opts = signOpts(sentinel, "b-b", "enveloped");
         const auto reply = rig.roundTrip(94, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
         ::close(fd);
         EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter") << "sentinel: " << sentinel;
@@ -446,7 +595,7 @@ TEST(SocketFrontend, SignTakesTheFormatsDefaultPackagingWhenTheCallerDefersIt)
     for (const char* sentinel : {"auto", ""}) {
         const int fd = makeInputFile("%PDF-1.7");
         ASSERT_GE(fd, 0);
-        const Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = sentinel};
+        const Agent::Wire::SignOpts opts = signOpts("pades", "b-b", sentinel);
         const auto reply = rig.roundTrip(95, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
         ::close(fd);
         EXPECT_EQ(errName(reply), "") << "sentinel: " << sentinel;
@@ -459,7 +608,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureOnANonPadesFormat)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "cades", .level = "b-b", .packaging = "detached"};
+    Agent::Wire::SignOpts opts = signOpts("cades", "b-b", "detached");
     opts.visualSignature = Agent::Wire::VisualSignatureOpts{0, 0.0, 0.0, 100.0, 50.0, "x"};
     const auto reply = rig.roundTrip(53, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
     ::close(fd);
@@ -472,7 +621,7 @@ TEST(SocketFrontend, SignAcceptsVisualSignatureOnPades)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-b", "enveloped");
     opts.visualSignature = Agent::Wire::VisualSignatureOpts{1, 10.5, 20.25, 150.0, 60.0, "Signed by {cn}"};
     // The method-entry gate passes -- an Operation is minted (no "err" key).
     // The exact field-for-field mapping into LM's VisualSignatureParams is
@@ -500,7 +649,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureWithNonFiniteWidth)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-b", "enveloped");
     opts.visualSignature =
         Agent::Wire::VisualSignatureOpts{0, 0.0, 0.0, std::numeric_limits<double>::infinity(), 50.0, "x"};
     const auto reply = rig.roundTrip(55, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
@@ -514,7 +663,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureWithNaNX)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-b", "enveloped");
     opts.visualSignature =
         Agent::Wire::VisualSignatureOpts{0, std::numeric_limits<double>::quiet_NaN(), 0.0, 100.0, 50.0, "x"};
     const auto reply = rig.roundTrip(56, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
@@ -528,7 +677,7 @@ TEST(SocketFrontend, SignRejectsVisualSignatureWithNegativeInfinityY)
     const std::string card = rig.injectCard(kPkiCap);
     const int fd = makeInputFile("%PDF-1.7");
     ASSERT_GE(fd, 0);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-b", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-b", "enveloped");
     opts.visualSignature =
         Agent::Wire::VisualSignatureOpts{0, 0.0, -std::numeric_limits<double>::infinity(), 100.0, 50.0, "x"};
     const auto reply = rig.roundTrip(57, Agent::Wire::Sign{card, "cert-id", 0, opts}, std::array{fd});
@@ -545,11 +694,8 @@ TEST(SocketFrontend, SignBatchOnNonPkiCardIsUnsupported)
     Rig rig;
     const std::string card = rig.injectCard(kIdentityCap); // no PKI bit
     auto [docs, fds] = makeBatchDocuments(1);
-    const auto reply = rig.roundTrip(
-        58,
-        Agent::Wire::SignBatch{card, "cert-id", docs,
-                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
-        fds);
+    const auto reply =
+        rig.roundTrip(58, Agent::Wire::SignBatch{card, "cert-id", docs, signOpts("pades", "b-b", "enveloped")}, fds);
     EXPECT_EQ(errName(reply), "UnsupportedOnThisCard");
     for (const int fd : fds) {
         ::close(fd);
@@ -561,11 +707,8 @@ TEST(SocketFrontend, SignBatchWithEmptyCertIsRejected)
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(1);
-    const auto reply = rig.roundTrip(
-        59,
-        Agent::Wire::SignBatch{card, "", docs,
-                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
-        fds);
+    const auto reply =
+        rig.roundTrip(59, Agent::Wire::SignBatch{card, "", docs, signOpts("pades", "b-b", "enveloped")}, fds);
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
     for (const int fd : fds) {
         ::close(fd);
@@ -576,10 +719,8 @@ TEST(SocketFrontend, SignBatchRejectsZeroDocuments)
 {
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
-    const auto reply = rig.roundTrip(
-        60,
-        Agent::Wire::SignBatch{
-            card, "cert-id", {}, Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
+    const auto reply =
+        rig.roundTrip(60, Agent::Wire::SignBatch{card, "cert-id", {}, signOpts("pades", "b-b", "enveloped")});
     EXPECT_EQ(errName(reply), "InvalidRequest");
 }
 
@@ -601,11 +742,8 @@ TEST(SocketFrontend, SignBatchAcceptsOneDocumentAndMintsOp)
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(1);
-    const auto reply = rig.roundTrip(
-        61,
-        Agent::Wire::SignBatch{card, "cert-id", docs,
-                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
-        fds);
+    const auto reply =
+        rig.roundTrip(61, Agent::Wire::SignBatch{card, "cert-id", docs, signOpts("pades", "b-b", "enveloped")}, fds);
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("op"), nullptr);
     for (const int fd : fds) {
@@ -623,11 +761,8 @@ TEST(SocketFrontend, SignBatchAcceptsATwelveDocumentBatchAndMintsOp)
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(Agent::Operations::kMaxBatchDocuments);
-    const auto reply = rig.roundTrip(
-        62,
-        Agent::Wire::SignBatch{card, "cert-id", docs,
-                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
-        fds);
+    const auto reply =
+        rig.roundTrip(62, Agent::Wire::SignBatch{card, "cert-id", docs, signOpts("pades", "b-b", "enveloped")}, fds);
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("op"), nullptr);
     for (const int fd : fds) {
@@ -640,11 +775,8 @@ TEST(SocketFrontend, SignBatchRejectsThirteenDocuments)
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(Agent::Operations::kMaxBatchDocuments + 1);
-    const auto reply = rig.roundTrip(
-        63,
-        Agent::Wire::SignBatch{card, "cert-id", docs,
-                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
-        fds);
+    const auto reply =
+        rig.roundTrip(63, Agent::Wire::SignBatch{card, "cert-id", docs, signOpts("pades", "b-b", "enveloped")}, fds);
     EXPECT_EQ(errName(reply), "InvalidRequest");
     for (const int fd : fds) {
         ::close(fd);
@@ -659,7 +791,7 @@ TEST(SocketFrontend, SignBatchRejectsANonHttpsTsaUrlViaTheSharedOptionsResolver)
     Rig rig;
     const std::string card = rig.injectCard(kPkiCap);
     auto [docs, fds] = makeBatchDocuments(2);
-    Agent::Wire::SignOpts opts{.format = "pades", .level = "b-t", .packaging = "enveloped"};
+    Agent::Wire::SignOpts opts = signOpts("pades", "b-t", "enveloped");
     opts.tsaUrl = std::string{"http://tsa.example.com"};
     const auto reply = rig.roundTrip(64, Agent::Wire::SignBatch{card, "cert-id", docs, opts}, fds);
     EXPECT_EQ(errName(reply), "UnsupportedSignatureParameter");
@@ -681,11 +813,8 @@ TEST(SocketFrontend, SignBatchOverCapCallerIsRateLimited)
         ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
     }
     auto [docs, fds] = makeBatchDocuments(1);
-    const auto reply = rig.roundTrip(
-        65,
-        Agent::Wire::SignBatch{card, "cert-id", docs,
-                               Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
-        fds);
+    const auto reply =
+        rig.roundTrip(65, Agent::Wire::SignBatch{card, "cert-id", docs, signOpts("pades", "b-b", "enveloped")}, fds);
     EXPECT_EQ(errName(reply), "RateLimited");
     for (const int fd : fds) {
         ::close(fd);
@@ -705,10 +834,8 @@ TEST(SocketFrontend, SignBatchRateLimitFiresBeforeTheDocumentCountGate)
     for (std::size_t i = 0; i < Agent::Operations::RateLimiter::kMaxPerWindow; ++i) {
         ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
     }
-    const auto reply = rig.roundTrip(
-        66,
-        Agent::Wire::SignBatch{
-            card, "cert-id", {}, Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}});
+    const auto reply =
+        rig.roundTrip(66, Agent::Wire::SignBatch{card, "cert-id", {}, signOpts("pades", "b-b", "enveloped")});
     EXPECT_EQ(errName(reply), "RateLimited");
 }
 
@@ -1035,29 +1162,55 @@ TEST(SocketFrontend, CardRemovalDropsSnapshot)
     EXPECT_FALSE(snapshotCache.get(cardKey).has_value()) << "card removal must drop the credential snapshot";
 }
 
-// main.cpp's fullScrub (sleep / fast-user-switch away) must also drop the
-// per-card ListCredentials snapshots — the listing id namespace dies with the
-// session. Rather than re-stating the scrub's cache statements (which would
-// pass even if the real scrub forgot the snapshots), this drives
-// clearFullScrubCaches() — the SHARED helper the production fullScrub lambda
-// actually calls — so dropping the snapshot clear from the scrub fails here
-// AND in production together. Both caches in the helper's set are seeded and
-// asserted empty: the CAN/MRZ secret cache and the snapshot cache.
-TEST(SocketFrontend, FullScrubDropsCredentialSnapshots)
+// The lifecycle handler comes from the function main.cpp builds its own with,
+// over the rig's real core and transport, so this is the production step and
+// not a restatement of it. A lock keeps the cached CAN and the credential
+// listing (it only re-asks for the PIN); a sleep forgets both; every client
+// hears each reason in the order the events came; a wake changes nothing and
+// says nothing; power-off stops the agent instead of quiescing it.
+TEST(SocketFrontend, ALifecycleEventQuiescesTheCoreAndTellsEveryClient)
 {
-    Agent::CredentialCache credCache;
-    Agent::CredentialSnapshotCache snapshotCache;
+    Rig rig;
+    Client listening(rig.path);
+    timeval tv{5, 0};
+    ASSERT_EQ(::setsockopt(listening.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), 0);
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt});
+    ASSERT_EQ(errName(listening.waitFor("Reply")), "");
+
     const std::string cardKey = kInjectedCardKey;
-    credCache.putCan(cardKey, Agent::CredentialCache::Secret{"123456"});
-    ASSERT_TRUE(credCache.hasCan(cardKey));
-    snapshotCache.put(cardKey, makeSnapshot());
-    ASSERT_TRUE(snapshotCache.get(cardKey).has_value());
+    rig.core->credentialCache().putCan(cardKey, Agent::CredentialCache::Secret{"123456"});
+    rig.core->credentialSnapshotCache().put(cardKey, makeSnapshot());
 
-    // The exact production scrub cache-clearing code (not a re-statement).
-    Agent::clearFullScrubCaches(credCache, snapshotCache);
+    std::mutex stateMutex;
+    int stops = 0;
+    const auto handle = makeLifecycleHandler(*rig.core, stateMutex, *rig.transport, [&stops] { ++stops; });
+    using Event = SystemLifecycle::Event;
 
-    EXPECT_FALSE(credCache.hasCan(cardKey)) << "fullScrub must drop the cached secrets";
-    EXPECT_FALSE(snapshotCache.get(cardKey).has_value()) << "fullScrub must drop the credential snapshots";
+    handle(Event::ScreenLock);
+    EXPECT_TRUE(rig.core->credentialCache().getCan(cardKey).has_value()) << "a lock must keep the cached CAN";
+    EXPECT_TRUE(rig.core->credentialSnapshotCache().get(cardKey).has_value()) << "a lock must keep the listing";
+    handle(Event::Resume);
+    handle(Event::Suspend);
+    EXPECT_FALSE(rig.core->credentialCache().getCan(cardKey).has_value()) << "a sleep must forget the cached CAN";
+    EXPECT_FALSE(rig.core->credentialSnapshotCache().get(cardKey).has_value()) << "a sleep must forget the listing";
+    handle(Event::PowerOff);
+    EXPECT_EQ(stops, 1) << "power-off stops the agent";
+
+    const auto reasonOf = [](const Agent::Wire::CborValue& event) {
+        const auto* reason = event.find("reason");
+        return reason != nullptr ? reason->asUInt().value_or(~0ULL) : ~0ULL;
+    };
+    EXPECT_EQ(reasonOf(listening.waitFor("AgentQuiesced", 4)),
+              static_cast<std::uint64_t>(Agent::QuiesceReason::ScreenLocked));
+    EXPECT_EQ(reasonOf(listening.waitFor("AgentQuiesced", 4)),
+              static_cast<std::uint64_t>(Agent::QuiesceReason::SystemSleep))
+        << "the wake between them must not be announced";
+    // Anything the power-off had posted would be queued ahead of this reply.
+    listening.send(2, Agent::Wire::GetState{});
+    const auto next = listening.recv();
+    ASSERT_NE(next.find("t"), nullptr);
+    ASSERT_NE(next.find("t")->asText(), nullptr);
+    EXPECT_EQ(*next.find("t")->asText(), "Reply") << "power-off must not announce a quiesce";
 }
 
 // --- trust tier: a human confirms, or the value does not move ----------------
@@ -1102,6 +1255,191 @@ TEST(SocketFrontend, ApprovedTrustConfirmationAppliesTheWrite)
     ASSERT_NE(reply.find("ok"), nullptr);
     EXPECT_TRUE(reply.find("ok")->asBool().value_or(false));
     EXPECT_EQ(rig.core->configStore().tsaUrls(), (std::vector<std::string>{"https://tsa.example/"}));
+}
+
+// Every trust-tier verb raises a dialog, so a caller past the shared budget is
+// refused before one is raised, the way every other verb that asks a person is.
+TEST(SocketFrontend, TrustChangesFromAnOverCapCallerAreRateLimitedBeforeAnyDialog)
+{
+    const std::vector<Agent::Wire::Request> verbs{
+        Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"https://tsa.example/"})},
+        Agent::Wire::ResetConfig{"TsaUrls"},
+        Agent::Wire::ForgetCscaAnchors{},
+    };
+    for (const auto& verb : verbs) {
+        Rig rig;
+        std::atomic<bool> asked{false};
+        rig.frontend->setConfirmProvider([&asked](const wire::ConfirmAction&) {
+            asked = true;
+            return wire::ConfirmReply{wire::PromptReplyStatus::Ok, {}};
+        });
+        const Agent::CallerToken caller{kFirstConnCaller};
+        for (std::size_t i = 0; i < Agent::Operations::RateLimiter::kMaxPerWindow; ++i) {
+            ASSERT_TRUE(rig.core->rateLimiter().allow(caller));
+        }
+        const auto reply = rig.roundTrip(76, verb);
+        EXPECT_EQ(errName(reply), "RateLimited");
+        EXPECT_FALSE(asked.load()) << "no dialog may be raised for a refused request";
+    }
+}
+
+// One trust confirmation per connection waits for a person at a time; a second
+// one is refused at once instead of stacking another dialog and another blocked
+// worker behind the first. The first still completes when it is answered.
+TEST(SocketFrontend, ASecondTrustConfirmationOnOneConnectionIsRefusedWhileTheFirstWaits)
+{
+    Rig rig;
+    struct Gate
+    {
+        std::mutex m;
+        std::condition_variable cv;
+        bool entered{false};
+        bool released{false};
+        int asked{0};
+    };
+    auto gate = std::make_shared<Gate>();
+    // Only the first dialog waits; any later one declines at once, so a host
+    // that let a second through fails this case on its answer instead of
+    // hanging it.
+    rig.frontend->setConfirmProvider([gate](const wire::ConfirmAction&) {
+        std::unique_lock lock(gate->m);
+        if (gate->asked++ > 0) {
+            return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
+        }
+        gate->entered = true;
+        gate->cv.notify_all();
+        gate->cv.wait(lock, [&] { return gate->released; });
+        return wire::ConfirmReply{wire::PromptReplyStatus::Ok, {}};
+    });
+    const auto release = [gate] {
+        const std::lock_guard lock(gate->m);
+        gate->released = true;
+        gate->cv.notify_all();
+    };
+
+    Client client(rig.path);
+    client.send(1, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"https://tsa.example/"})});
+    {
+        std::unique_lock lock(gate->m);
+        if (!gate->cv.wait_for(lock, std::chrono::seconds(10), [&] { return gate->entered; })) {
+            lock.unlock();
+            release();
+            FAIL() << "the first confirmation never reached the provider";
+        }
+    }
+    client.send(2, Agent::Wire::ResetConfig{"TsaUrls"});
+    const auto second = client.waitFor("Reply");
+    release();
+    const auto first = client.waitFor("Reply");
+
+    ASSERT_NE(second.find("req"), nullptr);
+    EXPECT_EQ(second.find("req")->asUInt().value_or(0), 2u);
+    EXPECT_EQ(errName(second), "RateLimited");
+    ASSERT_NE(first.find("req"), nullptr);
+    EXPECT_EQ(first.find("req")->asUInt().value_or(0), 1u);
+    ASSERT_NE(first.find("ok"), nullptr);
+    EXPECT_TRUE(first.find("ok")->asBool().value_or(false));
+    const std::lock_guard lock(gate->m);
+    EXPECT_EQ(gate->asked, 1);
+}
+
+// A connection that goes away while its confirmation waits leaves the set of
+// waiting connections with it, not only when the person answers: the entry is
+// per-connection state, evicted on disconnect like the rest of it.
+TEST(SocketFrontend, AConnectionThatClosesWhileItsConfirmationWaitsLeavesTheWaitingSet)
+{
+    Rig rig;
+    // The composition step main.cpp performs; the rig leaves disconnects
+    // unwired for every other case.
+    rig.transport->onClientDisconnect([&rig](Agent::CallerToken caller) {
+        if (rig.frontend) {
+            rig.frontend->onClientDisconnected(caller);
+        }
+    });
+    struct Gate
+    {
+        std::mutex m;
+        std::condition_variable cv;
+        bool entered{false};
+        bool released{false};
+    };
+    auto gate = std::make_shared<Gate>();
+    rig.frontend->setConfirmProvider([gate](const wire::ConfirmAction&) {
+        std::unique_lock lock(gate->m);
+        gate->entered = true;
+        gate->cv.notify_all();
+        gate->cv.wait(lock, [&] { return gate->released; });
+        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
+    });
+    const auto release = [gate] {
+        const std::lock_guard lock(gate->m);
+        gate->released = true;
+        gate->cv.notify_all();
+    };
+    const auto waiting = [&rig] {
+        __block std::size_t n = 0;
+        auto* fe = &*rig.frontend;
+        dispatch_sync(rig.transport->loopQueue(), ^{
+          n = fe->confirmsInFlightForTest();
+        });
+        return n;
+    };
+
+    std::size_t whileOpen = 0;
+    {
+        Client client(rig.path);
+        client.send(1, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"https://tsa.example/"})});
+        {
+            std::unique_lock lock(gate->m);
+            if (!gate->cv.wait_for(lock, std::chrono::seconds(10), [&] { return gate->entered; })) {
+                lock.unlock();
+                release();
+                FAIL() << "the confirmation never reached the provider";
+            }
+        }
+        whileOpen = waiting();
+    } // the client closes while the dialog is still standing
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (waiting() != 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    const std::size_t afterClose = waiting();
+    release();
+    EXPECT_EQ(whileOpen, 1u) << "nothing to evict: the confirmation is not counted while it waits";
+    EXPECT_EQ(afterClose, 0u) << "the closed connection is still counted while its dialog stands";
+}
+
+// The dialogs name the requester the way a person knows it: by the signing
+// identifier, not by a process number. The agent adds no words of its own, not
+// even for the Keychain bridge: it has no catalogue to say them in, so the
+// prompter does.
+TEST(SocketFrontendRequester, IsTheSigningIdentifierAndNothingElse)
+{
+    EXPECT_EQ(detail::requesterLabelFor(std::string("org.mozilla.firefox"), "pid:1/gen:2"), "org.mozilla.firefox");
+    EXPECT_EQ(detail::requesterLabelFor(std::string("org.librescrs.LibreMac.LibreMacToken"), "pid:1/gen:2"),
+              "org.librescrs.LibreMac.LibreMacToken");
+    // A peer whose signature names nothing falls back to the process label.
+    EXPECT_EQ(detail::requesterLabelFor(std::nullopt, "pid:1/gen:2"), "pid:1/gen:2");
+    EXPECT_EQ(detail::requesterLabelFor(std::string(), "pid:1/gen:2"), "pid:1/gen:2");
+    // Claimed by the peer, so it is shown as one inert line.
+    EXPECT_EQ(detail::requesterLabelFor(std::string("evil\nRequested by: Apple"), "pid:1/gen:2"),
+              "evil Requested by: Apple");
+}
+
+// End to end: the trust dialog of a request from this test binary names the
+// binary. It is signed after linking (agent/tests/CMakeLists.txt) with
+// codesign's default identifier, the file name.
+TEST(SocketFrontend, TrustDialogNamesTheRequesterBySigningIdentifier)
+{
+    Rig rig;
+    wire::ConfirmAction seen;
+    rig.frontend->setConfirmProvider([&seen](const wire::ConfirmAction& a) {
+        seen = a;
+        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
+    });
+    static_cast<void>(rig.roundTrip(77, Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({})}));
+    EXPECT_EQ(seen.requester, "SocketFrontendTest");
 }
 
 // The confused-deputy guard: the human must be told what is being changed.
@@ -1655,7 +1993,32 @@ TEST(SocketFrontend, ARefusedCallerForgetsNothing)
 // a no-op of its own regardless, so a CAN prompt renegotiated into an MRZ read
 // deposited nothing and the re-run failed auth. Which seam this host binds is a
 // decision, and it gets a test of its own: nothing here can drive a
-// renegotiation without a passport in a reader.
+// renegotiation without a passport in a reader. The depositor is read off the
+// dependencies the launcher hands the two reads, the ones a real operation is
+// built from, not off a member that operations might not use.
+
+namespace {
+
+Agent::Operations::OperationTarget anyTarget()
+{
+    return Agent::Operations::OperationTarget{
+        .card = Agent::ReaderCard{.readerId = Agent::ObjectId{1}, .readerName = "reader", .cardKey = "card"},
+        .caller = Agent::CallerToken{"conn:1"},
+        .requester = "requester",
+    };
+}
+
+// The depositor each of the two reads that deposit is handed by @p fe.
+std::pair<Agent::Operations::CredentialDepositor*, Agent::Operations::CredentialDepositor*>
+depositorsHandedBy(const SocketFrontend& fe)
+{
+    const auto& launcher = fe.operationLauncher();
+    auto identity = launcher.depsFor(nullptr, anyTarget(), Agent::Operations::OperationLauncher::ReadIdentity{});
+    auto photo = launcher.depsFor(nullptr, anyTarget(), Agent::Operations::OperationLauncher::GetPhoto{});
+    return {&identity.depositor, &photo.depositor};
+}
+
+} // namespace
 
 TEST(SocketFrontend, BindsTheRegistryBackedDepositorWhenComposedWithARegistry)
 {
@@ -1667,8 +2030,11 @@ TEST(SocketFrontend, BindsTheRegistryBackedDepositorWhenComposedWithARegistry)
     auto plugins = std::make_shared<LibreSCRS::Plugin::CardPluginService>(dir);
 
     Rig rig(nullptr, nullptr, {}, plugins);
-    EXPECT_NE(dynamic_cast<Agent::Operations::LmCredentialDepositor*>(&rig.frontend->credentialDepositor()), nullptr)
-        << "a host composed with a plugin registry bound the no-op depositor";
+    const auto [identity, photo] = depositorsHandedBy(*rig.frontend);
+    EXPECT_NE(dynamic_cast<Agent::Operations::LmCredentialDepositor*>(identity), nullptr)
+        << "an identity read on a host composed with a plugin registry was handed the no-op depositor";
+    EXPECT_NE(dynamic_cast<Agent::Operations::LmCredentialDepositor*>(photo), nullptr)
+        << "a photo read on a host composed with a plugin registry was handed the no-op depositor";
 
     std::error_code ec;
     std::filesystem::remove_all(dir, ec);
@@ -1677,8 +2043,60 @@ TEST(SocketFrontend, BindsTheRegistryBackedDepositorWhenComposedWithARegistry)
 TEST(SocketFrontend, FallsBackToTheNoOpDepositorWithoutARegistry)
 {
     Rig rig; // no registry
-    EXPECT_NE(dynamic_cast<Agent::Operations::NullCredentialDepositor*>(&rig.frontend->credentialDepositor()), nullptr)
-        << "a host with no registry must hand the flows the shared no-op, not nothing";
+    const auto [identity, photo] = depositorsHandedBy(*rig.frontend);
+    EXPECT_NE(dynamic_cast<Agent::Operations::NullCredentialDepositor*>(identity), nullptr)
+        << "a host with no registry must hand the identity read the shared no-op, not nothing";
+    EXPECT_NE(dynamic_cast<Agent::Operations::NullCredentialDepositor*>(photo), nullptr)
+        << "a host with no registry must hand the photo read the shared no-op, not nothing";
+}
+
+// --- a launch the reader's queue cannot take ----------------------------------
+//
+// The launcher refuses an operation when the reader's backlog is full, and the
+// host must answer that refusal rather than an OpStarted for an id that was
+// never queued. One credentials change holds the worker in its prompt; the
+// listings behind it fill the queue to its cap, and the one after them is
+// refused as retryable.
+TEST(SocketFrontend, ALaunchPastAFullReaderQueueIsRateLimited)
+{
+    auto prompter = std::make_shared<BlockingPrompter>();
+    Rig rig(nullptr, prompter);
+    rig.core->operationManager().setSessionFactoryForTest(detachedSessionFactory());
+    const std::string card = rig.injectCard(kPinMgmtCap);
+    rig.core->credentialSnapshotCache().put(kInjectedCardKey, makeSnapshot());
+
+    Client client(rig.path);
+    client.send(40, Agent::Wire::ManagePin{card, "user:0x01", "change", std::nullopt});
+    const auto started = client.waitFor("Reply");
+    ASSERT_EQ(errName(started), "");
+    ASSERT_NE(started.find("op"), nullptr);
+    const std::uint64_t blockingOp = started.find("op")->asUInt().value_or(0);
+    ASSERT_TRUE(prompter->waitEntered()) << "the worker must be held in the change prompt, off the queue";
+
+    // Listings are not rate-limited, so only the queue can refuse them.
+    std::set<std::uint64_t> queued;
+    for (std::size_t i = 0; i < Agent::Operations::kMaxQueuedOpsPerReader; ++i) {
+        client.send(41 + i, Agent::Wire::ListCredentials{card});
+        const auto reply = client.waitFor("Reply");
+        ASSERT_EQ(errName(reply), "") << "listing " << i << " was refused below the queue's cap";
+        ASSERT_NE(reply.find("op"), nullptr);
+        queued.insert(reply.find("op")->asUInt().value_or(0));
+    }
+    EXPECT_EQ(queued.size(), Agent::Operations::kMaxQueuedOpsPerReader) << "every queued listing has its own id";
+
+    client.send(41 + Agent::Operations::kMaxQueuedOpsPerReader, Agent::Wire::ListCredentials{card});
+    const auto refused = client.waitFor("Reply");
+    // The verdict below means something only if the change still held the
+    // worker when that launch was answered: had the prompter's own deadline let
+    // it go, the worker would have drained the queue and the launch would
+    // rightly be taken. A run that slow says nothing about the cap.
+    ASSERT_TRUE(prompter->holding()) << "the change prompt was released before the last launch was answered";
+    EXPECT_EQ(errName(refused), "RateLimited") << "a launch past the reader's backlog cap must be refused";
+    EXPECT_EQ(refused.find("op"), nullptr) << "a refused launch names no operation";
+
+    // Let the held change go so the worker drains the queue before teardown.
+    client.send(100, Agent::Wire::CancelOp{blockingOp});
+    (void)client.waitFor("Reply", 256);
 }
 
 namespace {
@@ -1701,20 +2119,21 @@ const std::array<BenchReader, 3> kBench{{
      "HID Global OMNIKEY 5422 Smartcard Reader [OMNIKEY 5422CL Smartcard Reader] (IM0O2C00NF10456904) 00 00"},
 }};
 
-// Counts the connections the reader workers open. The first @p failFirst are
-// refused, the way a card another process holds exclusively refuses them. The
-// count is shared-owned, so a worker that outlives the case counts into live
-// memory.
-Agent::Operations::SessionFactory countingSessionFactory(std::shared_ptr<std::atomic<int>> opens, int failFirst = 0)
+// Counts the connections the reader workers open. The first @p failFirst fail
+// as @p failure: by default refused, the way a card another process holds
+// exclusively refuses them. The count is shared-owned, so a worker that
+// outlives the case counts into live memory.
+Agent::Operations::SessionFactory countingSessionFactory(
+    std::shared_ptr<std::atomic<int>> opens, int failFirst = 0,
+    LibreSCRS::SmartCard::OpenError::Kind failure = LibreSCRS::SmartCard::OpenError::Kind::SessionRefused)
 {
-    return [opens = std::move(opens), failFirst](const std::string& reader)
+    return [opens = std::move(opens), failFirst, failure](const std::string& reader)
                -> std::expected<std::shared_ptr<LibreSCRS::SmartCard::CardSession>, LibreSCRS::SmartCard::OpenError> {
         if (opens->fetch_add(1) < failFirst) {
-            return std::unexpected{LibreSCRS::SmartCard::OpenError{
-                LibreSCRS::SmartCard::OpenError::Kind::ReaderUnavailable, LibreSCRS::Auth::ErrorKeys::genericComm(),
-                std::string{"SCARD_E_SHARING_VIOLATION"}}};
+            return std::unexpected{
+                LibreSCRS::SmartCard::OpenError{failure, LibreSCRS::Auth::ErrorKeys::genericComm(), std::nullopt}};
         }
-        return LibreSCRS::SmartCard::detail::makeDetachedCardSession(reader);
+        return LibreSCRS::SmartCard::Testing::makeDetachedCardSession(reader);
     };
 }
 
@@ -1821,10 +2240,10 @@ TEST(SocketFrontend, AnUnservedCardIsOpenedOnceOnInsertion)
     EXPECT_EQ(opens->load(), 1) << "an unserved card was opened again after the probe said no plugin serves it";
 }
 
-// A probe that could not open the card says nothing about it, so the host asks
+// A probe refused a session says nothing about the card, so the host asks
 // again; once an open succeeds the card is exported with what its plugins
 // serve. Two refused opens, then the served one.
-TEST(SocketFrontend, AProbeThatCouldNotOpenTheCardIsRetried)
+TEST(SocketFrontend, AProbeThatWasRefusedASessionIsRetried)
 {
     Rig rig;
     auto opens = std::make_shared<std::atomic<int>>(0);
@@ -1835,6 +2254,43 @@ TEST(SocketFrontend, AProbeThatCouldNotOpenTheCardIsRetried)
     ASSERT_EQ(cards.size(), 1U);
     EXPECT_EQ(cards.front().caps, kPkiCap) << "exported with what its plugin serves";
     EXPECT_EQ(opens->load(), 3) << "two refused opens, then the one that served";
+}
+
+// Another prober holding the card at insertion -- the system, or another
+// vendor's token driver -- may keep it for longer than a few quick retries
+// last. Six refused opens (2.55 s of growing waits) still end in the card
+// exported with what its plugin serves, not as a card nothing serves.
+TEST(SocketFrontend, AProbeRefusedForSecondsStillExportsTheServedCard)
+{
+    Rig rig;
+    auto opens = std::make_shared<std::atomic<int>>(0);
+    ASSERT_NO_FATAL_FAILURE(
+        exportCards(rig, std::span{kBench}.first(1), /*served=*/true, countingSessionFactory(opens, /*failFirst=*/6)));
+
+    const auto cards = exportedCards(rig);
+    ASSERT_EQ(cards.size(), 1U);
+    EXPECT_EQ(cards.front().caps, kPkiCap) << "exported with what its plugin serves";
+    EXPECT_EQ(opens->load(), 7) << "six refused opens, then the one that served";
+}
+
+// Only a refused session passes by waiting. A probe that found no card in the
+// reader is the answer: the card is exported at once with nothing known about
+// it, not after ten seconds of asking a reader that has nothing to give. The
+// rig's plugin serves the card, so an open after the failed one would export
+// it with that plugin's capability; zero capabilities and one open say that
+// no second open was made.
+TEST(SocketFrontend, AProbeThatFoundNoCardIsNotRetried)
+{
+    Rig rig;
+    auto opens = std::make_shared<std::atomic<int>>(0);
+    ASSERT_NO_FATAL_FAILURE(exportCards(
+        rig, std::span{kBench}.first(1), /*served=*/true,
+        countingSessionFactory(opens, /*failFirst=*/1, LibreSCRS::SmartCard::OpenError::Kind::NoCardPresent)));
+
+    const auto cards = exportedCards(rig);
+    ASSERT_EQ(cards.size(), 1U);
+    EXPECT_EQ(cards.front().caps, 0U) << "exported with nothing known about it";
+    EXPECT_EQ(opens->load(), 1) << "a card that was not there was asked about again";
 }
 
 // The prompt gate stamps every dialog with the reader holding the card. The
@@ -1953,14 +2409,4 @@ TEST(SocketFrontend, ALoginStateIsServed)
     EXPECT_EQ(errName(reply), "");
     ASSERT_NE(reply.find("active"), nullptr);
     EXPECT_EQ(reply.find("active")->asBool(), std::optional<bool>{false});
-}
-
-// A request the key refuses before any prompt is the caller's: InvalidRequest,
-// the same name a malformed request gets.
-TEST(SocketFrontend, AnInvalidInputIsInvalidRequest)
-{
-    using CO = Agent::Pkcs11Broker::CryptoOutcome;
-    EXPECT_EQ(detail::mapCryptoOutcome(CO::InvalidInput), Agent::Wire::SyncError::InvalidRequest);
-    EXPECT_EQ(detail::mapCryptoOutcome(CO::CardError), Agent::Wire::SyncError::CommunicationError);
-    EXPECT_EQ(detail::mapCryptoOutcome(CO::RateLimited), Agent::Wire::SyncError::RateLimited);
 }

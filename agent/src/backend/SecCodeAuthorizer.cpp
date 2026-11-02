@@ -8,7 +8,7 @@
 // for the trust tier; fail-closed on an unidentifiable peer.
 #include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>
 
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 
 #include <algorithm>
 #include <utility>
@@ -16,7 +16,7 @@
 namespace LibreSCRS::Darwin {
 namespace {
 
-namespace log = Agent::log;
+namespace log = LibreSCRS::log;
 
 bool contains(const std::vector<std::string>& list, const std::string& v)
 {
@@ -27,8 +27,9 @@ bool contains(const std::vector<std::string>& list, const std::string& v)
 
 SecCodeAuthorizer::SecCodeAuthorizer(CredentialsResolver credentials, Policy policy)
     : m_credentials(std::move(credentials)), m_policy(std::move(policy)),
-      m_authResolver(
-          [teamId = m_policy.teamId](const PeerCredentials& creds) { return resolvePeerCodeSigning(creds, teamId); })
+      m_authResolver([teamId = m_policy.teamId](const PeerCredentials& creds) {
+          return Agent::Wire::Darwin::resolvePeerCodeSigning(creds, teamId);
+      })
 {}
 
 SecCodeAuthorizer::~SecCodeAuthorizer() = default;

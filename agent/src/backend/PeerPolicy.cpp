@@ -6,8 +6,9 @@ namespace LibreSCRS::Darwin {
 
 std::function<bool(int connectedFd)> makeDefaultPrompterVerifier()
 {
-    return
-        [expected = expectedPrompterIdentity()](int connectedFd) { return verifyConnectedPeer(connectedFd, expected); };
+    return [expected = expectedPrompterIdentity()](int connectedFd) {
+        return Agent::Wire::Darwin::verifyConnectedPeer(connectedFd, expected);
+    };
 }
 
 } // namespace LibreSCRS::Darwin

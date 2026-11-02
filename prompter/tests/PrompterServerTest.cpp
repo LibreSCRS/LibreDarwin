@@ -9,6 +9,7 @@
 // replaced-path test polls, since the guard is a timer. The AppKit window +
 // real SecTask peer-auth are exercised manually / in the HW gate.
 #include "ArtifactText.h"
+#include "RequesterText.h"
 #include "PrompterServer.h"
 
 #include <LibreSCRS/Agent/wire/Framing.h>
@@ -38,6 +39,7 @@
 #include <vector>
 
 using namespace LibreSCRS::Darwin;
+using PeerCredentials = PrompterServer::PeerCredentials;
 namespace Agent = ::LibreSCRS::Agent;
 
 namespace {
@@ -998,6 +1000,20 @@ TEST(ArtifactText, ThePkcs11TokensReadAsOperations)
     EXPECT_STREQ(derive->key, "prompter_operation_pkcs11_derive");
     EXPECT_FALSE(operationForArtifact("invoice.pdf").has_value()) << "a document name stays a document";
     EXPECT_FALSE(operationForArtifact("").has_value());
+}
+
+// The token extension is named with the catalogue's Keychain wording around its
+// identifier; every other requester is shown as the identifier it sent.
+TEST(RequesterText, TheKeychainBridgeIsWordedByTheCatalogue)
+{
+    const auto bridge = wordingForRequester("org.librescrs.LibreMac.LibreMacToken");
+    ASSERT_TRUE(bridge.has_value());
+    EXPECT_STREQ(bridge->key, "prompter_requester_keychain");
+    EXPECT_STREQ(bridge->fallback, "%@ (Keychain)");
+    EXPECT_FALSE(wordingForRequester("org.mozilla.firefox").has_value());
+    EXPECT_FALSE(wordingForRequester("org.librescrs.LibreMac.LibreMacToken (Keychain)").has_value())
+        << "only the bare identifier is the bridge";
+    EXPECT_FALSE(wordingForRequester("").has_value());
 }
 
 } // namespace

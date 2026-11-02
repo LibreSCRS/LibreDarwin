@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
-#include <LibreSCRS/Darwin/backend/PeerIdentity.h>
-
 #include <LibreSCRS/Agent/backend/Authorizer.h>
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h>
+#include <LibreSCRS/Agent/wire/darwin/PeerIdentity.h>
 
 #include <functional>
 #include <optional>
@@ -48,11 +47,12 @@ class SecCodeAuthorizer final : public Agent::Authorizer
 public:
     // Resolves a live CallerToken to its captured peer credentials (the
     // transport's credentialsFor). Injected so the gate stays testable.
+    using PeerCredentials = Agent::Wire::Darwin::PeerCredentials;
     using CredentialsResolver = std::function<std::optional<PeerCredentials>(const Agent::CallerToken&)>;
 
     // The code-signing facts read from a peer's audit_token (the shared
-    // SecTask resolution in PeerCodeSigning.h).
-    using PeerAuth = PeerCodeSigning;
+    // SecTask resolution in LibreAgent's wire/darwin/PeerCodeSigning.h).
+    using PeerAuth = Agent::Wire::Darwin::PeerCodeSigning;
     // Resolves a peer's SecTask facts (and, with Policy::teamId, its designated
     // requirement). Called only when an allow-list decides, never for the
     // default posture. Default = the real resolution; a fake is injected in

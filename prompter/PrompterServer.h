@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
-#include <LibreSCRS/Darwin/backend/PeerIdentity.h>
 #include <LibreSCRS/Darwin/backend/SingleInstanceLock.h>
 #include <LibreSCRS/Darwin/backend/SocketPathIdentity.h>
 #include <LibreSCRS/Darwin/backend/wire/PrompterProtocol.h>
 
 #include <LibreSCRS/Agent/wire/FrameReassembler.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
+#include <LibreSCRS/Agent/wire/darwin/PeerIdentity.h>
 
 #include <dispatch/dispatch.h>
 
@@ -78,6 +78,7 @@ public:
     // this server imposes.
     using ResetHandler = std::function<std::uint32_t()>;
     // Is this connecting peer the agent? (real impl: SecTask signing-id match).
+    using PeerCredentials = Agent::Wire::Darwin::PeerCredentials;
     using PeerAuthorized = std::function<bool(const PeerCredentials&)>;
 
     PrompterServer(std::string socketPath, SecretProvider provider, MultiSecretProvider multiProvider,

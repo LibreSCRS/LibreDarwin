@@ -15,7 +15,7 @@ namespace {
 
 namespace fs = std::filesystem;
 
-using Level = LibreSCRS::Agent::log::Level;
+using Level = LibreSCRS::log::Level;
 using LoadOutcome = LibreSCRS::Plugin::LoadOutcome;
 using Source = PluginDirCandidate::Source;
 using Verdict = PluginDirCandidate::Verdict;
@@ -166,14 +166,16 @@ void reportPluginLoad(const PluginDirResolution& resolution, const LibreSCRS::Pl
 {
     for (const auto& [level, line] : pluginLoadReportLines(resolution, service.size(), service.loadReport())) {
         switch (level) {
+        case Level::Trace: // a load report carries no trace lines
+            break;
         case Level::Info:
-            LibreSCRS::Agent::log::info(line);
+            LibreSCRS::log::info(line);
             break;
         case Level::Warn:
-            LibreSCRS::Agent::log::warn(line);
+            LibreSCRS::log::warn(line);
             break;
         case Level::Error:
-            LibreSCRS::Agent::log::error(line);
+            LibreSCRS::log::error(line);
             break;
         }
     }

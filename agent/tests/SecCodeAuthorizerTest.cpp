@@ -12,6 +12,7 @@
 #include <gtest/gtest.h>
 
 using namespace LibreSCRS::Darwin;
+using PeerCredentials = SecCodeAuthorizer::PeerCredentials;
 namespace Agent = ::LibreSCRS::Agent;
 
 namespace {

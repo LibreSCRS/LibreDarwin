@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 #pragma once
-#include <LibreSCRS/Darwin/backend/PeerIdentity.h>
 #include <LibreSCRS/Darwin/backend/SingleInstanceLock.h>
 #include <LibreSCRS/Darwin/backend/SocketPathIdentity.h>
 #include <LibreSCRS/Agent/wire/FrameReassembler.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
+#include <LibreSCRS/Agent/wire/darwin/PeerIdentity.h>
 
 #include <LibreSCRS/Agent/backend/AgentTransport.h>
+#include <LibreSCRS/Agent/value/ReaderLabels.h> // PresenceRoster
 #include <LibreSCRS/Secure/Buffer.h>
 #include <LibreSCRS/Auth/AuthRequirement.h> // LibreSCRS::Auth::PreReadAuthMethod (CardRouting::preAuth)
 
@@ -34,9 +35,9 @@ namespace LibreSCRS::Darwin {
 // fd-passing, peer identity, the ObjectId<->wire-handle mapping, and the
 // published presence snapshot; the neutral core never touches wire paths. The
 // Linux twin is LibreLinux's D-Bus ObjectManager + sd-event backend; here it is
-// GCD dispatch sources on one serial queue (the loop). The agent SELF-BINDS
-// the container socket (SMAppService can't template a per-user SockPathName);
-// launch_activate_socket is an optional inherited-fd fallback.
+// GCD dispatch sources on one serial queue (the loop). The agent binds the
+// container socket itself (SMAppService can't template a per-user
+// SockPathName) and owns its file.
 //
 // THREADING: everything that touches transport state runs on the single serial
 // dispatch queue (the loop). Cross-thread entry is only via post()/postAfter()
@@ -59,22 +60,12 @@ public:
 
     // Take the path's instance lock (SingleInstanceLock), then bind the
     // container socket at `socketPath` (0600, sun_path-guarded, unlink-stale,
-    // cleanup-on-exit), or inherit a launchd-activated fd when
-    // `socketActivationName` is set and available. On success the loop + accept
-    // source are installed (driven by the process CFRunLoop / dispatch main).
-    // Another instance holding the lock is ServerStartError::AnotherInstance,
-    // and nothing at the path has been touched.
+    // cleanup-on-exit). On success the loop + accept source are installed
+    // (driven by the process CFRunLoop / dispatch main). Another instance
+    // holding the lock is ServerStartError::AnotherInstance, and nothing at the
+    // path has been touched.
     [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
-    create(std::string socketPath, std::optional<std::string> socketActivationName = std::nullopt);
-
-    // Serve an already-listening socket whose FILE this process does not own
-    // (the launchd-activated fd create() inherits). launchd owns that path, so
-    // no replaced-path guard is installed and the file is never unlinked here:
-    // binding a fresh socket over it would sever the activation. The instance
-    // lock still applies: launchd starts one job per label, but a second agent
-    // started by hand beside it would own PC/SC on the same cards all the same.
-    [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
-    adoptInherited(Agent::Wire::UniqueFd listenFd, std::string socketPath);
+    create(std::string socketPath);
 
     ~SocketTransport() override;
     SocketTransport(const SocketTransport&) = delete;
@@ -125,24 +116,33 @@ public:
     // prompt gate stamps a dialog from a reader WORKER thread. It returns a copy
     // of a snapshot the loop rebuilds on every presence change, under its own
     // mutex, so a worker never walks the loop-owned maps.
-    struct PresenceRoster
-    {
-        std::vector<std::string> readerNames;
-        std::vector<std::string> cardKeys;
-    };
-    [[nodiscard]] PresenceRoster presenceRoster() const;
+    [[nodiscard]] Agent::PresenceRoster presenceRoster() const;
 
     // Send one CBOR message to a specific connection, optionally taking ownership
     // of fds to pass via SCM_RIGHTS. Loop-thread only (the sink runs there).
     void sendTo(std::uint64_t connId, const Agent::Wire::CborValue& message,
                 std::vector<Agent::Wire::UniqueFd> fds = {});
 
+    // Send @p message as the last frame of connection @p connId, then close it
+    // once that frame is written. Nothing the peer sends after this point is
+    // read, and no event is queued behind the message. A vanished id is
+    // ignored. Loop-thread only.
+    void sendThenClose(std::uint64_t connId, const Agent::Wire::CborValue& message);
+
     // The current presence snapshot for a GetState reply. Loop-thread only.
     [[nodiscard]] Agent::Wire::StateReply currentState() const;
 
+    // Whether connection @p connId receives presence events (a reader or card
+    // added, removed or changed). Every connection does until its Hello says
+    // otherwise: a client that reads only while it waits for its own reply
+    // would otherwise queue every presence frame until the outbound bound
+    // closes it. It still receives every reply, every event of an operation it
+    // started, and the agent-wide ConfigChanged and AgentQuiesced. A vanished
+    // id is ignored. Loop-thread only.
+    void setWantsPresenceEvents(std::uint64_t connId, bool wants);
+
     // Broadcast a Config1.Changed event to every connection (the frontend's
-    // emitConfigChanged path); there is no per-connection subscription
-    // filtering in this version. Loop-thread only.
+    // emitConfigChanged path). Loop-thread only.
     void broadcastConfigChanged(const std::string& key);
 
     // Broadcast an AgentQuiesced event (system sleep / screen lock / user switch /
@@ -162,7 +162,8 @@ public:
     // Resolve a live CallerToken to its captured peer credentials (for the
     // Authorizer's SecTask check). Loop-thread only; nullopt if the connection
     // is gone.
-    [[nodiscard]] std::optional<PeerCredentials> credentialsFor(const Agent::CallerToken& caller) const;
+    [[nodiscard]] std::optional<Agent::Wire::Darwin::PeerCredentials>
+    credentialsFor(const Agent::CallerToken& caller) const;
 
     // The serial loop queue (for the daemon to target other work at the loop).
     [[nodiscard]] dispatch_queue_t loopQueue() const noexcept
@@ -205,6 +206,13 @@ public:
     void postAfter(std::chrono::microseconds delay, std::function<void()> fn) override;
     void onClientDisconnect(std::function<void(Agent::CallerToken)> handler) override;
 
+    // A published reader's label (model / interface) changed because another
+    // reader arrived or left beside it (ObjectRegistry's relabelled observer):
+    // store it for the next State snapshot and push the new pair to every
+    // presence subscriber as one Reader1 PropertyChanged. A reader no longer
+    // published is ignored. Loop thread, like the publish entry points above.
+    void relabelReader(const Agent::ReaderState& reader);
+
 private:
     // Rebuild the roster snapshot from m_readers / m_cards / m_cardRouting. Loop
     // thread; called at the end of every presence mutation.
@@ -231,7 +239,7 @@ private:
         // cancellation completes races the kevent dereg). Never null after accept.
         std::shared_ptr<int> fd;
         Agent::CallerToken caller;
-        PeerCredentials creds;
+        Agent::Wire::Darwin::PeerCredentials creds;
         Agent::Wire::FrameReassembler reassembler;
         dispatch_source_t readSource{nullptr};
         dispatch_source_t writeSource{nullptr};
@@ -242,6 +250,11 @@ private:
         dispatch_source_t firstFrameTimer{nullptr};
         bool sawFirstFrame{false};
         bool writeSourceResumed{false};
+        // Hello's wantsEvents; absent on the wire means true.
+        bool wantsPresenceEvents{true};
+        // Set by sendThenClose: reading has stopped and the connection closes
+        // as soon as the outbound queue drains.
+        bool closeWhenDrained{false};
         std::deque<OutFrame> outQueue;
         // Sum of every currently-queued OutFrame::bytes.size(): incremented in
         // enqueueSend before push_back, decremented in flushWrites alongside
@@ -255,10 +268,8 @@ private:
     enum class SendState : std::uint8_t { Sent, WouldBlock, Error };
     [[nodiscard]] static SendState trySendFrame(int fd, OutFrame& f);
 
-    SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath, bool ownsSocketFile,
+    SocketTransport(dispatch_queue_t queue, Agent::Wire::UniqueFd listenFd, std::string socketPath,
                     std::optional<SocketPathIdentity> listenIdentity, SingleInstanceLock instanceLock);
-    [[nodiscard]] static std::unique_ptr<SocketTransport> adopt(SingleInstanceLock instanceLock,
-                                                                Agent::Wire::UniqueFd listenFd, std::string socketPath);
     void installAcceptSource();
     // Replaced-path guard (own socket file only): on every accept and on a
     // timer, compare what the path names with the inode this process bound.
@@ -270,6 +281,8 @@ private:
     void onAcceptSourceCancelled();
     void rebindListenSocket();
     void onAcceptReady();
+    void pauseAccepting();
+    void resumeAccepting();
     void acceptOne(int connFd);
     void onReadReady(std::uint64_t connId);
     void closeConnection(std::uint64_t connId);
@@ -278,7 +291,10 @@ private:
     static void cancelFirstFrameTimer(Connection& conn) noexcept;
     void enqueueSend(Connection& conn, std::vector<std::uint8_t> framed, std::vector<Agent::Wire::UniqueFd> fds);
     void flushWrites(Connection& conn);
-    void broadcast(const Agent::Wire::CborValue& event);
+    // Presence events skip the connections that declined them in their Hello;
+    // agent-wide events reach every connection.
+    enum class EventKind : std::uint8_t { Presence, AgentWide };
+    void broadcast(const Agent::Wire::CborValue& event, EventKind kind);
 
     // ObjectId <-> opaque wire handle. The handle is a stable per-insertion
     // string ("obj/<n>"), the same shape for readers and cards; NEVER a
@@ -292,7 +308,6 @@ private:
     // after the destructor body has removed the socket file: a successor
     // cannot bind in between and then lose its fresh file to that removal.
     SingleInstanceLock m_instanceLock;
-    bool m_ownsSocketFile{false};
     dispatch_source_t m_acceptSource{nullptr};
     // The listen fd is closed ONLY in the accept source's cancel handler
     // (closing it first races GCD's kevent teardown). Every installed accept
@@ -302,6 +317,12 @@ private:
     // Inode the path named right after our bind(); nullopt while unbound.
     std::optional<SocketPathIdentity> m_listenIdentity;
     dispatch_source_t m_pathGuardTimer{nullptr};
+    // Out of descriptors, accept() fails at once and the level-triggered listen
+    // source fires again at once: accepting pauses (the source suspended) and
+    // this one-shot timer resumes it. A suspended source must be resumed
+    // before it is cancelled or released, which cancelAcceptSource does.
+    dispatch_source_t m_acceptRetryTimer{nullptr};
+    bool m_acceptPaused{false};
     std::chrono::microseconds m_pathGuardInterval{std::chrono::seconds(10)};
     bool m_rebindPending{false}; // replacement seen; bind again until it succeeds
     bool m_stopping{false};      // destructor started: cancel handlers must not bind
@@ -330,7 +351,7 @@ private:
     // (rebuildRoster) after every publish / withdraw, read from any thread
     // under m_rosterMutex.
     mutable std::mutex m_rosterMutex;
-    PresenceRoster m_roster;
+    Agent::PresenceRoster m_roster;
     // ObjectId -> handle for withdraw / updateProperties, and the reverse for the
     // request path (a request carries a wire handle; the seams need the ObjectId).
     std::map<std::uint64_t, std::string> m_idToHandle;

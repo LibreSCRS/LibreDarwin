@@ -31,7 +31,11 @@ std::string toStdString(NSString* s, const char* fallback)
 wire::ConfirmReply confirmWithDeviceOwner(const wire::ConfirmAction& req)
 {
     @autoreleasepool {
-        LAContext* ctx = [[LAContext alloc] init];
+        // This file is compiled without ARC, like the rest of the prompter:
+        // the context is owned here and goes with the pool below, on every
+        // return. Each one holds a connection to the authentication daemon,
+        // so one leaked per confirmation would grow for the helper's lifetime.
+        LAContext* ctx = [[[LAContext alloc] init] autorelease];
         NSError* canErr = nil;
         // deviceOwnerAuthentication, NOT ...WithBiometrics: it falls back to
         // the account password, which is the direct analogue of the Linux
@@ -57,7 +61,7 @@ wire::ConfirmReply confirmWithDeviceOwner(const wire::ConfirmAction& req)
         // dialog the holder only half-reads. The claimed name is substituted
         // INTO the catalogue's format rather than concatenated around it, so a
         // language that places the name differently can say so.
-        NSString* who = [NSString stringWithUTF8String:req.requester.c_str()];
+        NSString* who = requesterName(req.requester);
         NSString* attribution = [NSString
             stringWithFormat:localized("prompter_confirm_requested_by", "(requested by “%@”)"), who != nil ? who : @""];
         NSString* reason = [NSString stringWithFormat:@"%@ %@", sentence, attribution];

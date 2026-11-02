@@ -5,16 +5,17 @@
 # the plist this repository actually shipped, and on each rule on its own.
 #
 # The restored defect is ci/fixtures/check-launchd-plist/agent-env-block-template.plist,
-# the template as it stood before the environment block was dropped, byte for
-# byte. It fails twice over: a `--` inside an XML comment that plutil accepts
-# and a conforming parser does not, and -- once that is repaired and the file
-# is configured the way configure_file() configured it -- an EnvironmentVariables
-# block whose two values came out empty.
+# the template as it stood before the environment block was dropped, less the
+# plugin-directory variable the agent no longer reads (it takes --plugin-dir).
+# It fails twice over: a `--` inside an XML comment that plutil accepts and a
+# conforming parser does not, and -- once that is repaired and the file is
+# configured the way configure_file() configured it -- an EnvironmentVariables
+# block whose value came out empty.
 #
 # Cases:
 #   1  the tracked template                                   -> 0
 #   2  the restored template, verbatim                        -> 1  (does not parse)
-#   3  the restored template, comment repaired, configured    -> 1  (block + 2 empty values)
+#   3  the restored template, comment repaired, configured    -> 1  (block + an empty value)
 #   4  the tracked template, Label emptied                    -> 1
 #   5  the tracked template, ProgramArguments[0] emptied      -> 1
 #   6  the tracked template, a block with non-empty values    -> 1  (the block alone)
@@ -93,7 +94,6 @@ s = re.sub(r"@[A-Z_]+@", "", s)                # what configure_file makes of an
 open(sys.argv[2], "w").write(s)'
 out="$(run "$WORK/c3.plist")"; rc=$?; check 3 1 $rc
 says 3 "carries an EnvironmentVariables block" "$out"
-says 3 "empty string at /EnvironmentVariables/LIBRESCRS_PLUGIN_DIR" "$out"
 says 3 "empty string at /EnvironmentVariables/DYLD_LIBRARY_PATH" "$out"
 
 derive 4 "$TEMPLATE" "$WORK/c4.plist" '

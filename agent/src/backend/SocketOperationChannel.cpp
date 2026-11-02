@@ -12,7 +12,7 @@
 #include <LibreSCRS/Agent/wire/Messages.h>
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 
-#include <LibreSCRS/Agent/backend/Logging.h>
+#include <LibreSCRS/Logging.h>
 
 #include <LibreSCRS/Agent/value/CardReadSnapshot.h>
 #include <LibreSCRS/Agent/value/CertSnapshot.h>
@@ -25,7 +25,7 @@
 
 namespace LibreSCRS::Darwin {
 
-namespace log = Agent::log;
+namespace log = LibreSCRS::log;
 
 namespace {
 

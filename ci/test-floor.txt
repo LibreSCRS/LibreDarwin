@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: LGPL-2.1-or-later
 #
-# <test binary>  <tests it must register at least>. Raised in the change that
-# adds tests; a binary that disappears or registers fewer is red.
-AgentCoreSeamsTest 1
+# <test binary>  <CTest tests it must register at least>. A binary that
+# disappears or registers fewer is red. Every binary here is registered with
+# add_test, as ONE CTest test that runs all of its cases, so 1 is the count
+# each can reach: the floor catches a binary that stops being built or
+# registered, not a case lost inside one, and a count above 1 would be red
+# on every build. A new test binary gets its line in the change that adds it.
 AppGroupPathsProductionTest 1
 CscaImportSocketTest 1
 MacPrompterClientTest 1
 ManagePinOperationTest 1
 OsLogSinkTest 1
-PeerCodeSigningTest 1
-PeerIdentityTest 1
 PluginDirectoryTest 1
 ProcessHardeningTest 1
 PrompterHardeningTest 1
 PrompterProtocolTest 1
 PrompterServerTest 1
-ReadCertificatesOperationTest 1
 SecCodeAuthorizerTest 1
 SignHwSmokeTest 1
 SocketAgentClientFactoryTest 1

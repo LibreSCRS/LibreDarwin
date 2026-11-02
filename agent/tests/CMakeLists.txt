@@ -7,6 +7,25 @@
 # just a consumed, already-tested dependency from this repo's point of view).
 find_package(GTest REQUIRED)
 
+# The wire core and the prompter server are middleware-free by their link lines,
+# but their headers include two headers from the agent library's Core tree, so
+# the link lines alone no longer say it. This object library compiles all of
+# their headers with nothing on the include path but this tree and the fetched
+# agent's include/ -- no middleware prefix, no linked target -- so the first
+# middleware include reaching them fails the build. Built from source only: an
+# installed agent may share its include prefix with the middleware, which would
+# let that include resolve and prove nothing.
+if(TARGET LibreAgentWire)
+    get_target_property(wire_core_purity_agent_dir LibreAgentWire SOURCE_DIR)
+    add_library(WireCoreHeaderPurityCheck OBJECT WireCoreHeaderPurity.cpp)
+    target_include_directories(WireCoreHeaderPurityCheck
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/agent/include
+            ${PROJECT_SOURCE_DIR}/prompter
+            ${wire_core_purity_agent_dir}/include)
+    target_compile_features(WireCoreHeaderPurityCheck PRIVATE cxx_std_23)
+endif()
+
 # OsLogSink smoke: the sink is constructible + emits each severity (os_log has no
 # public readback, so this is a crash/throw smoke only).
 add_executable(OsLogSinkTest OsLogSinkTest.cpp)
@@ -17,8 +36,8 @@ target_link_libraries(OsLogSinkTest
         GTest::gtest_main)
 add_test(NAME OsLogSinkTest COMMAND OsLogSinkTest)
 
-# Backend: peer identity + the socket transport (real bound socket + GCD loop).
-foreach(backend_test PeerIdentityTest PeerCodeSigningTest AgentCoreSeamsTest SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest ReadCertificatesOperationTest ManagePinOperationTest PluginDirectoryTest AppGroupPathsProductionTest)
+# Backend: the socket transport (real bound socket + GCD loop) and what sits on it.
+foreach(backend_test SocketTransportTest SecCodeAuthorizerTest PrompterProtocolTest MacPrompterClientTest SocketOperationChannelTest SocketFrontendTest SystemLifecycleTest ProcessHardeningTest SignHwSmokeTest ManagePinOperationTest PluginDirectoryTest AppGroupPathsProductionTest)
     add_executable(${backend_test} ${backend_test}.cpp)
     target_link_libraries(${backend_test}
         PRIVATE
@@ -42,7 +61,7 @@ set_tests_properties(SignHwSmokeTest PROPERTIES SKIP_REGULAR_EXPRESSION "\\[  SK
 # real CardSession::open (SocketFrontendTest's sign flows open "Test Reader") are
 # signed ad hoc with the entitlement after every link, so they see what the
 # agent sees and the hardware smoke does not skip as if no card were present.
-# The rest keep the linker's signature, and PeerCodeSigningTest relies on that.
+# The rest keep the linker's signature.
 foreach(card_test SignHwSmokeTest SocketFrontendTest)
     add_custom_command(TARGET ${card_test} POST_BUILD
         COMMAND codesign --force --sign - --entitlements ${CMAKE_CURRENT_SOURCE_DIR}/smartcard-entitlement.plist
@@ -50,26 +69,20 @@ foreach(card_test SignHwSmokeTest SocketFrontendTest)
         VERBATIM)
 endforeach()
 
-# ReadCertificatesOperationTest drives the agent's own operation, reached through
-# LibreAgent::Core's public headers like every other consumer (this host carried
-# a copy of it until the core exported one). It builds a session via the
-# LM-internal detached-session factory
-# LibreSCRS::SmartCard::detail::makeDetachedCardSession, whose prototype in
-# <LibreSCRS/SmartCard/CardSession.h> is guarded behind LIBRESCRS_INTERNAL_BUILD.
-# Only this TEST TU opts in; production agent targets never define it, so the
-# internal surface stays out of the shipped binaries.
-target_compile_definitions(ReadCertificatesOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
+# ManagePinOperationTest and SocketFrontendTest open sessions with no card
+# behind them through LibreMiddleware's declared test support (a static
+# archive, never in a shipped library), so no target here compiles against
+# LibreMiddleware's internal surface.
+foreach(session_test ManagePinOperationTest SocketFrontendTest)
+    target_link_libraries(${session_test} PRIVATE LibreSCRS::SmartCardTesting)
+endforeach()
 
-# ManagePinOperationTest builds a detached session the same way, so it takes the
-# identical internal-build opt-in.
-target_compile_definitions(ManagePinOperationTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
-
-# SocketFrontendTest drives the credentials ops end-to-end over the socket: it
-# includes the src-private CardRemovalCaches.h (the shared removal-invalidation
-# helper under test) and opens detached sessions via the same LM-internal
-# factory, so it takes the identical src/ include + internal-build opt-in.
-target_include_directories(SocketFrontendTest PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_compile_definitions(SocketFrontendTest PRIVATE LIBRESCRS_INTERNAL_BUILD)
+# The authorizer that grants everything is a test double the agent library
+# ships with its test support, never with the headers a host is built from.
+# CscaImportSocketTest (below) links the same component for its fixture.
+foreach(granting_test SocketFrontendTest SignHwSmokeTest)
+    target_link_libraries(${granting_test} PRIVATE LibreAgent::TestSupport)
+endforeach()
 
 # ImportCscaMasterList end to end over the socket: the authorise -> rate-limit
 # -> read ORDER (proved by the descriptor's own file offset and by a pipe, not

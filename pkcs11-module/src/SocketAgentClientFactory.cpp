@@ -10,8 +10,8 @@
 
 #include <LibreSCRS/Agent/pkcs11/AgentClientFactory.h>
 #include <LibreSCRS/Agent/pkcs11/SocketAgentClient.h>
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h>
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
-#include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 
 #include <memory>
 #include <utility>
@@ -22,7 +22,7 @@ std::unique_ptr<AgentClient> makeAgentClientAt(std::string socketPath)
 {
     // The same identity the app and its token extension hold the agent to.
     return std::make_unique<SocketAgentClient>(std::move(socketPath), SocketTimeouts{}, [](int fd) {
-        return Darwin::verifyConnectedPeer(fd, Darwin::expectedAgentIdentity());
+        return Agent::Wire::Darwin::verifyConnectedPeer(fd, Agent::Wire::Darwin::expectedAgentIdentity());
     });
 }
 

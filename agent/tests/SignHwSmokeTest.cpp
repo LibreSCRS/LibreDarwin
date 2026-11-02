@@ -15,18 +15,20 @@
 // failure (g_pinFailed) and never retries (SKIP_IF_PIN_FAILED). CAN/MRZ (PACE
 // channel secrets, no lockout) also come from the environment.
 //   LIBRESCRS_HW=1                 enable (else every test SKIPs)
-//   LIBRESCRS_PLUGIN_DIR=<dir>     LM card plugins
+//   LIBRESCRS_TEST_PLUGIN_DIR=<dir> LM card plugins (this test's own knob;
+//                                  the agent takes its directory only as
+//                                  --plugin-dir and reads no variable for it)
 //   LIBRESCRS_TEST_PIN=<pin>       the card's signing PIN (sign phase)
 //   LIBRESCRS_TEST_CAN / _MRZ      PACE channel secret (as the card needs)
 //
 // The agent signs through the card's plugin on the session it already holds,
 // so no PKCS#11 module is named or loaded.
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>
 #include <LibreSCRS/Agent/wire/Cbor.h>
 #include <LibreSCRS/Agent/wire/Framing.h>
 #include <LibreSCRS/Agent/wire/Messages.h>
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h>
 
 #include <LibreSCRS/Agent/AgentCore.h>
 #include <LibreSCRS/Agent/backend/Authorizer.h>
@@ -36,6 +38,8 @@
 #include <LibreSCRS/Agent/util/HexEncode.h>
 #include <LibreSCRS/Plugin/CardPluginService.h>
 #include <LibreSCRS/Secure/String.h>
+
+#include "AllowAllAuthorizer.h" // LibreAgent::TestSupport
 
 #include <gtest/gtest.h>
 
@@ -167,7 +171,7 @@ struct HwRig
 
     HwRig()
         : resolver(std::make_shared<LibreSCRS::Plugin::CardPluginService>(
-              std::filesystem::path{env("LIBRESCRS_PLUGIN_DIR").value_or("/usr/local/lib/librescrs/plugins")}))
+              std::filesystem::path{env("LIBRESCRS_TEST_PLUGIN_DIR").value_or("/usr/local/lib/librescrs/plugins")}))
     {
         std::filesystem::create_directories(tmp);
         transport = std::move(*SocketTransport::create(path));
@@ -181,7 +185,8 @@ struct HwRig
             [this](const Agent::ReaderState& r) { frontend->onReaderPublished(r); },
             [this](const Agent::CardState& c) { frontend->onCardPublished(c); },
             [this](Agent::ObjectId id) { frontend->onWithdrawn(id); },
-            [this](Agent::ObjectId r, const Agent::PropertyDelta& d) { frontend->onReaderPropertiesChanged(r, d); });
+            [this](Agent::ObjectId r, const Agent::PropertyDelta& d) { frontend->onReaderPropertiesChanged(r, d); },
+            [this](const Agent::ReaderState& r) { frontend->onReaderRelabelled(r); });
         bridge.emplace(core->presenceModel(), core->cardKeyTracker(), stateMutex);
         bridge->start();
     }
@@ -286,7 +291,7 @@ std::optional<std::string> waitForCard(int client)
 // reader and the gate below would skip as if no card were present.
 TEST(SignHwSmoke, BinaryCarriesTheSmartcardEntitlement)
 {
-    EXPECT_TRUE(selfHasSmartcardEntitlement());
+    EXPECT_TRUE(LibreSCRS::Agent::Wire::Darwin::selfHasSmartcardEntitlement());
 }
 
 TEST(SignHwSmoke, PresenceReadAndSign)
@@ -375,11 +380,11 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     const int docFd = ::open(docPath.c_str(), O_RDONLY);
     ASSERT_GE(docFd, 0);
 
-    const auto signReply =
-        sendReq(client, 3,
-                Agent::Wire::Sign{*card, certId, 0,
-                                  Agent::Wire::SignOpts{.format = "pades", .level = "b-b", .packaging = "enveloped"}},
-                {docFd});
+    Agent::Wire::SignOpts opts; // the optional fields stay disengaged
+    opts.format = "pades";
+    opts.level = "b-b";
+    opts.packaging = "enveloped";
+    const auto signReply = sendReq(client, 3, Agent::Wire::Sign{*card, certId, 0, opts}, {docFd});
     ::close(docFd);
     ASSERT_EQ(signReply.find("err"), nullptr)
         << "Sign method-entry rejected: " << (signReply.find("err") ? "see err" : "");

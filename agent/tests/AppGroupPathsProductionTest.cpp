@@ -6,8 +6,8 @@
 // moved the container here would move it there too: `launchctl setenv` reaches
 // every job the user's launchd starts, and the container is where both sockets
 // live.
+#include <LibreSCRS/Agent/wire/darwin/PeerCodeSigning.h>
 #include <LibreSCRS/Darwin/backend/AppGroupPaths.h>
-#include <LibreSCRS/Darwin/backend/PeerCodeSigning.h>
 
 #include <gtest/gtest.h>
 
@@ -29,7 +29,7 @@ std::filesystem::path canonicalContainer()
 {
     const struct passwd* pw = getpwuid(getuid());
     EXPECT_NE(pw, nullptr);
-    const auto team = configuredTeamId();
+    const auto team = LibreSCRS::Agent::Wire::Darwin::configuredTeamId();
     const std::string group = team ? *team + ".org.librescrs.LibreMac" : "group.org.librescrs.LibreMac";
     return std::filesystem::path(pw != nullptr ? pw->pw_dir : "") / "Library" / "Group Containers" / group;
 }
