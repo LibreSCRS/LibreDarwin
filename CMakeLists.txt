@@ -61,6 +61,10 @@ endif()
 # The single LibreMiddleware owner: the daemon links LM through LibreAgent::Core.
 find_package(LibreMiddleware 5.0 REQUIRED CONFIG)
 
+# The agent core links OpenSSL itself; found here, so the check below reads
+# the library this build links rather than whatever a dependency left set.
+find_package(OpenSSL 3 REQUIRED)
+
 # A universal build needs an OpenSSL with both slices. Left alone, the one found
 # above is whatever the machine has first (Homebrew's, arm64 only, on a runner),
 # and the x86_64 slice then fails to link. Refuse in configure instead.
