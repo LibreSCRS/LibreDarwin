@@ -46,7 +46,7 @@ set_property(TARGET librescrs-prompter APPEND PROPERTY LINK_DEPENDS
 
 install(TARGETS librescrs-prompter RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
 
-if(PROJECT_IS_TOP_LEVEL)
+if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
     find_package(GTest REQUIRED)
     add_executable(PrompterServerTest tests/PrompterServerTest.cpp)
     target_link_libraries(PrompterServerTest PRIVATE LibreDarwinPrompterServer GTest::gtest GTest::gtest_main)
