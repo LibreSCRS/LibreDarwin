@@ -48,8 +48,8 @@ versioning follows [Semantic Versioning](https://semver.org/).
   the same code as a bad argument; a binary signed into the wrong App Group
   started, served a container its clients never look in, and passed a smoke
   test that expected 2 from a bogus argument. The check runs before the
-  arguments are read, so an unsigned build-tree agent now exits 4; sign it
-  with `packaging/install-dev.sh --sign-only` to run it by hand.
+  arguments are read, so an unsigned build-tree agent now exits 4; run it by
+  hand with `packaging/install-dev.sh run`, which signs it first.
 - **The agent refuses to start, with exit code 5, when its signature lacks
   `com.apple.security.smartcard`.** CryptoTokenKit shows a process without it
   no reader and opens it no card, so such an agent started, served its socket

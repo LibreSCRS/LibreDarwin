@@ -74,9 +74,8 @@ jobs:
       - name: The LaunchAgent template parses and carries no empty value
         # plutil accepted a template whose comment was not well-formed XML, so
         # a check on the Mac alone said nothing about it. This one uses a
-        # conforming parser and needs no Mac; the build job runs it again on the
-        # plist the install writes, which is the one that ships. Its self-test
-        # runs with the others below.
+        # conforming parser and needs no Mac. Its self-test runs with the others
+        # below.
         run: python3 ci/scripts/check-launchd-plist.py packaging/launchd/*.plist
 
       - name: Shared gates
@@ -204,24 +203,14 @@ jobs:
             echo "$bin embeds $got"
           done
 
-      - name: Install the tree and check the LaunchAgent it installs
-        # The template is checked in the format job; this is the file
-        # configure_file() made of it, where a placeholder whose variable is
-        # not set has become an empty string without a word. Installed into a
-        # directory of its own so nothing on the runner is touched.
-        working-directory: LibreDarwin
-        run: |
-          cmake --install build --prefix "$PWD/install-probe"
-          python3 ci/scripts/check-launchd-plist.py install-probe/share/librescrs/launchd/org.librescrs.agent.plist
-
-      - name: The installed prompter carries its process hardening
+      - name: The built prompter carries its process hardening
         # The prompter denies debugger attach and core dumps before it reads a
         # secret. A link that stopped pulling the routine in would still build
         # and pass every test that does not look at the binary; this reads the
-        # binary the install step put in place. Proved by
+        # binary LibreMac stages into its bundle. Proved by
         # ci/scripts/check-defined-symbol.selftest.sh, run in the format job.
         working-directory: LibreDarwin
-        run: ./ci/scripts/check-defined-symbol.sh install-probe/libexec/librescrs-prompter 'LibreSCRS::Darwin::hardenSecretProcess()'
+        run: ./ci/scripts/check-defined-symbol.sh build/prompter/librescrs-prompter 'LibreSCRS::Darwin::hardenSecretProcess()'
 
       - name: Test
         # SignHwSmokeTest skips without LIBRESCRS_HW, and ctest reports it as

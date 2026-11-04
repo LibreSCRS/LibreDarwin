@@ -146,9 +146,5 @@ add_subdirectory(agent)
 add_subdirectory(pkcs11-module)
 
 # librescrs-prompter: the agent-owned macOS credential window (secure PIN / CAN /
-# MRZ), served over its own socket to the agent alone. Optional so a headless
-# build can drop the UI target.
-option(LIBREDARWIN_BUILD_PROMPTER "Build the macOS credential prompter" ON)
-if(LIBREDARWIN_BUILD_PROMPTER)
-    add_subdirectory(prompter)
-endif()
+# MRZ), served over its own socket to the agent alone.
+add_subdirectory(prompter)

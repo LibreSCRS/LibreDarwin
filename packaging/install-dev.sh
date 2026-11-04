@@ -8,7 +8,7 @@
 # the entitlements the shipped one carries. Modes:
 #
 #   ./install-dev.sh run        # foreground: create the container, exec the agent
-#   ./install-dev.sh launchd    # bootstrap a dev LaunchAgent (libexec path)
+#   ./install-dev.sh launchd    # bootstrap a dev LaunchAgent (build-tree agent)
 #   ./install-dev.sh unload      # bootout the dev LaunchAgent
 #   ./install-dev.sh smoke       # start the agent, connect, expect readiness
 #
@@ -34,9 +34,7 @@
 # whichever of these subcommands they run. SecTask reads the signature of
 # the already-running process, not the file on disk, so a prompter that is
 # already loaded needs restarting after a re-sign -- each subcommand prints
-# (never runs) the `launchctl kickstart` line for that. `--sign-only <path>
-# <identifier>` (see below) is the same signing step, callable on its own
-# for testing or for a binary this harness does not otherwise touch.
+# (never runs) the `launchctl kickstart` line for that.
 set -euo pipefail
 
 LABEL="org.librescrs.agent"
@@ -245,21 +243,7 @@ case "${1:-run}" in
         [ -S "$SOCK" ] || die "agent did not bind $SOCK within 4s"
         echo "OK: agent bound $SOCK (0600). Connect a client to exchange Hello/HelloAck."
         ;;
-    --sign-only)
-        # Internal dev/test helper, kept out of the {run|launchd|unload|smoke}
-        # list because it is not one of this harness's user-facing modes: it
-        # signs one binary and exits, touching no container, launchd, or
-        # process. Exists so the signing step above can be exercised (and
-        # verified with `codesign -dv --entitlements -`) without running
-        # `run`, `launchd`, or `smoke` against a real dev App-Group container.
-        # The identifier is required, not guessed from the path, because a
-        # guess in a signing path is the wrong kind of convenient.
-        SIGN_BIN="${2:?usage: $0 --sign-only <path> <identifier>  (identifier: $LABEL or $PROMPTER_LABEL)}"
-        SIGN_ID="${3:?usage: $0 --sign-only <path> <identifier>  (identifier: $LABEL or $PROMPTER_LABEL)}"
-        load_socket_location
-        sign_dev_binary "$SIGN_BIN" "$SIGN_ID"
-        ;;
     *)
-        die "usage: $0 {run|launchd|unload|smoke}  (also: --sign-only <path> <identifier>, an internal dev/test helper)"
+        die "usage: $0 {run|launchd|unload|smoke}"
         ;;
 esac

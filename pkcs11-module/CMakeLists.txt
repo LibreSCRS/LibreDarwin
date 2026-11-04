@@ -16,7 +16,6 @@ target_link_libraries(librescrs-pkcs11-agent PRIVATE
 # The facade, whole, and one exported name. Never LibreAgent::Pkcs11Facade by
 # bare name: that builds a module with no entry point in it.
 librescrs_pkcs11_module_link(librescrs-pkcs11-agent)
-install(TARGETS librescrs-pkcs11-agent LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}/librescrs)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

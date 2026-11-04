@@ -75,8 +75,8 @@ target_compile_definitions(librescrs-agent PRIVATE
 
 # Bundle-ready: the LibreMac host stages this binary at
 # Contents/MacOS/librescrs-agent with LM dylibs at Contents/Frameworks/.
-# @executable_path/../Frameworks covers that layout; the bare @executable_path entry covers the dev-harness libexec
-# install (co-located dylibs, none today, kept for symmetry with the prompter).
+# @executable_path/../Frameworks covers that layout; the bare @executable_path entry covers co-located dylibs
+# (none today, kept for symmetry with the prompter).
 set_target_properties(librescrs-agent PROPERTIES
     INSTALL_RPATH "@executable_path;@executable_path/../Frameworks"
     BUILD_WITH_INSTALL_RPATH ON)
@@ -93,15 +93,9 @@ target_link_options(librescrs-agent PRIVATE
 set_property(TARGET librescrs-agent APPEND PROPERTY LINK_DEPENDS
     ${CMAKE_CURRENT_BINARY_DIR}/librescrs-agent-info.plist)
 
-# Install the daemon to libexec (the dev harness path; in production it is the
-# librescrs-agent inside the LibreMac host's Contents/MacOS) and the bundled
-# SMAppService-ready LaunchAgent plist, configured with the installed path.
-install(TARGETS librescrs-agent RUNTIME DESTINATION ${CMAKE_INSTALL_LIBEXECDIR})
-set(LIBRESCRS_AGENT_PROGRAM "${CMAKE_INSTALL_FULL_LIBEXECDIR}/librescrs-agent")
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/../packaging/launchd/org.librescrs.agent.plist
-               ${CMAKE_CURRENT_BINARY_DIR}/org.librescrs.agent.plist @ONLY)
-install(FILES ${CMAKE_CURRENT_BINARY_DIR}/org.librescrs.agent.plist
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/librescrs/launchd)
+# Nothing is installed: LibreMac stages the agent from this build tree into its
+# bundle with a LaunchAgent plist of its own, and the dev harness
+# (packaging/install-dev.sh) runs it from here.
 
 if(PROJECT_IS_TOP_LEVEL AND BUILD_TESTING)
     add_subdirectory(tests)

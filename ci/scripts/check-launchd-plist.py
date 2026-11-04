@@ -20,8 +20,8 @@ Three properties, each of which has already shipped broken here:
     reads no configuration from its environment, and the one thing a
     development build needs is added by the dev harness, not the template.
 
-It reads the file it is given: run it on the template in the source tree and
-on the plist `cmake --install` wrote, since the second is the one that ships.
+It reads the file it is given: the template in the source tree, which the dev
+harness fills in (LibreMac ships a LaunchAgent plist of its own).
 
 Usage:  check-launchd-plist.py <plist> [<plist> ...]
 

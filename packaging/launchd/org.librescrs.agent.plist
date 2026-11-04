@@ -37,7 +37,7 @@
 
   ProgramArguments points at the librescrs-agent inside the host bundle
   (Contents/MacOS). The dev harness (packaging/install-dev.sh) substitutes the
-  installed libexec path for a standalone launchd smoke.
+  build-tree agent for a standalone launchd smoke.
 
   No EnvironmentVariables: the agent reads no configuration from its
   environment, since `launchctl setenv` reaches every job the user's launchd
