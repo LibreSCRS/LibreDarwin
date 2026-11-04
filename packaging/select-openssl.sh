@@ -40,8 +40,10 @@ ossl=("$lm"/thirdparty/openssl-*/macosx)
 [ "${#ossl[@]}" -eq 1 ] || fail "want one thirdparty/openssl-*/macosx in $lm, found ${#ossl[@]}"
 root="${ossl[0]}"
 [ -f "$root/lib/libcrypto.a" ] || fail "$root holds no lib/libcrypto.a"
+# Which slices the archive holds, for the log only: the link is what judges
+# them, so a file lipo cannot read is reported here and not refused.
 if command -v lipo >/dev/null 2>&1; then
-    lipo -info "$root/lib/libcrypto.a"
+    lipo -info "$root/lib/libcrypto.a" || echo "select-openssl: lipo cannot read $root/lib/libcrypto.a" >&2
 fi
 
 cat > "$out" <<CMAKE
