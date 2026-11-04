@@ -87,31 +87,33 @@ static_assert(kPromptReceiveBudget > Agent::Operations::kLongestDeadline,
               "fires before the window the prompter is still showing ever could");
 
 // What recvFrameBounded's bounded receive came back with, beyond a frame:
-//   * BudgetNotSet -- the bound itself could not be applied, so recvFrame is
-//     not even attempted (same discipline as reset()'s own guard: reading
-//     with no bound in place would reopen the unbounded wait this exists to
-//     close).
 //   * TimedOut -- the budget expired on a peer that took the request and then
 //     went silent: wedged, not dead (a dead helper closes the socket, which
 //     surfaces as RecvFailed below instead).
 //   * RecvFailed -- every other recvFrame failure (malformed header, EOF,
 //     I/O error).
-enum class BoundedReceiveError : std::uint8_t { BudgetNotSet, TimedOut, RecvFailed };
+enum class BoundedReceiveError : std::uint8_t { TimedOut, RecvFailed };
 
-// Sets SO_RCVTIMEO to @p budget on @p fd, then reads exactly one frame.
-// Shared by request() and requestPinChange(): both send one prompt request
-// and block on its reply while a card operation is in progress, so both must
-// stop waiting at the same bound rather than each growing its own copy of
-// this sequence.
-[[nodiscard]] std::expected<Agent::Wire::Frame, BoundedReceiveError> recvFrameBounded(int fd,
-                                                                                      std::chrono::milliseconds budget)
+// Sets SO_RCVTIMEO to @p budget on @p fd. Called BEFORE the request is sent:
+// macOS refuses the option (EINVAL) on a socket whose peer has already closed,
+// so set after the send it fails whenever the prompter answers and closes
+// first, and a reply already waiting in the buffer was reported as an error.
+// A failure here means no bound can be had, and the request is not sent.
+[[nodiscard]] bool setReceiveBudget(int fd, std::chrono::milliseconds budget)
 {
     const auto budgetMs = budget.count();
     const timeval receiveBudget{.tv_sec = static_cast<time_t>(budgetMs / 1000),
                                 .tv_usec = static_cast<suseconds_t>((budgetMs % 1000) * 1000)};
-    if (::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0) {
-        return std::unexpected(BoundedReceiveError::BudgetNotSet);
-    }
+    return ::setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) == 0;
+}
+
+// Reads exactly one frame within the budget setReceiveBudget put on @p fd.
+// Shared by request() and requestPinChange(): both send one prompt request
+// and block on its reply while a card operation is in progress, so both must
+// stop waiting at the same bound rather than each growing its own copy of
+// this sequence.
+[[nodiscard]] std::expected<Agent::Wire::Frame, BoundedReceiveError> recvFrameBounded(int fd)
+{
     auto frame = Agent::Wire::recvFrame(fd);
     if (!frame.has_value()) {
         if (frame.error() == Agent::Wire::FrameError::WouldBlock) {
@@ -315,23 +317,25 @@ Agent::PromptResult MacPrompterClient::request(wire::PromptKind kind, const Agen
         return errorResult("prompter peer verification failed");
     }
 
+    // Bound the wait for the reply (kPromptReceiveBudget above) before the
+    // receive that could otherwise sit on a wedged helper indefinitely --
+    // and before the send, while the prompter cannot have closed yet.
+    if (!setReceiveBudget(fd.get(), m_promptReceiveBudget)) {
+        return errorResult("prompter reply wait could not be bounded");
+    }
     const auto body = wire::toCbor(buildRequest(kind, options)).encode();
     if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return errorResult("prompter send failed");
     }
 
-    // Bound the wait for the reply (kPromptReceiveBudget above) before the
-    // receive that could otherwise sit on a wedged helper indefinitely.
-    auto received = recvFrameBounded(fd.get(), m_promptReceiveBudget);
+    auto received = recvFrameBounded(fd.get());
     if (!received.has_value()) {
         if (received.error() == BoundedReceiveError::TimedOut) {
             Agent::PromptResult result;
             result.status = Agent::PromptStatus::Timeout;
             return result;
         }
-        return errorResult(received.error() == BoundedReceiveError::BudgetNotSet
-                               ? "prompter reply wait could not be bounded"
-                               : "prompter recv failed");
+        return errorResult("prompter recv failed");
     }
     auto frame = std::move(*received);
     auto reply = wire::parsePromptReply(frame.body);
@@ -401,23 +405,25 @@ Agent::PinChangePromptResult MacPrompterClient::requestPinChange(const Agent::Pr
         return changeErrorResult("prompter peer verification failed");
     }
 
+    // Same bound as request() (kPromptReceiveBudget above), set before the
+    // send for the same reason: this call runs inside a PIN-change card
+    // operation too, and a wedged helper here must not hold the card any
+    // longer than a single-secret prompt would.
+    if (!setReceiveBudget(fd.get(), m_promptReceiveBudget)) {
+        return changeErrorResult("prompter reply wait could not be bounded");
+    }
     const auto body = wire::toCbor(buildChangeRequest(options)).encode();
     if (!Agent::Wire::sendFrame(fd.get(), body).has_value()) {
         return changeErrorResult("prompter send failed");
     }
-    // Same bound as request() (kPromptReceiveBudget above): this call runs
-    // inside a PIN-change card operation too, and a wedged helper here must
-    // not hold the card any longer than a single-secret prompt would.
-    auto received = recvFrameBounded(fd.get(), m_promptReceiveBudget);
+    auto received = recvFrameBounded(fd.get());
     if (!received.has_value()) {
         if (received.error() == BoundedReceiveError::TimedOut) {
             Agent::PinChangePromptResult result;
             result.status = Agent::PromptStatus::Timeout;
             return result;
         }
-        return changeErrorResult(received.error() == BoundedReceiveError::BudgetNotSet
-                                     ? "prompter reply wait could not be bounded"
-                                     : "prompter recv failed");
+        return changeErrorResult("prompter recv failed");
     }
     auto frame = std::move(*received);
     auto reply = wire::parseMultiPromptReply(frame.body);
@@ -523,7 +529,11 @@ void MacPrompterClient::reset() noexcept
         const timeval receiveBudget{
             .tv_sec = 0,
             .tv_usec = static_cast<suseconds_t>(std::max<std::int64_t>(left->count(), kMinReceiveBudgetUs))};
-        if (::setsockopt(fd.get(), SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0) {
+        // EINVAL is macOS refusing the option on a socket whose peer has
+        // already closed -- the prompter answered and let go. Its reply is in
+        // the buffer and the read below cannot block, so that one is taken.
+        if (::setsockopt(fd.get(), SOL_SOCKET, SO_RCVTIMEO, &receiveBudget, sizeof(receiveBudget)) != 0 &&
+            errno != EINVAL) {
             // With no bound in place there is nothing to stop the read below
             // sitting on a half-sent frame, so it is not attempted at all.
             LibreSCRS::log::warn("prompter reset: the reply wait could not be bounded, so it was not taken");

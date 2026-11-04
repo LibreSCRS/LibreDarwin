@@ -194,6 +194,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- A prompter reply that arrived together with the prompter closing the
+  connection is read instead of being reported as an error. macOS refuses a
+  receive timeout on a socket whose peer has already closed, and the agent set
+  it only after sending the request, so a prompter that answered at once (a
+  refused caller, for one) read as "the reply wait could not be bounded".
+  The timeout is now set before the request is sent.
 - **An agent out of file descriptors no longer spins at full CPU.** It pauses
   accepting new clients briefly instead of retrying at once, and it raises its
   open-file limit at start-up to what the system allows.
