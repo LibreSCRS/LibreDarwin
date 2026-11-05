@@ -64,7 +64,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - id: pre
-        uses: LibreSCRS/ci/actions/release-preflight@a6efbfe4072c3ef31aaf928fcfc64e6673658a7a
+        uses: LibreSCRS/ci/actions/release-preflight@2d5d8c63e77bf90a9ca5b0354028b9396093bd79
         with:
           mode: ${{ inputs.mode || 'publish' }}
           # The floor arm must find at least one first-party floor (the
@@ -82,7 +82,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-      - uses: LibreSCRS/ci/actions/release-publish@a6efbfe4072c3ef31aaf928fcfc64e6673658a7a
+      - uses: LibreSCRS/ci/actions/release-publish@2d5d8c63e77bf90a9ca5b0354028b9396093bd79
         with:
           mode: ${{ needs.preflight.outputs.mode }}
           version: ${{ needs.preflight.outputs.version }}
