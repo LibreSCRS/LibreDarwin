@@ -242,7 +242,7 @@ Agent::CredentialSnapshot makeSnapshot()
 TEST(SocketFrontend, HelloReturnsAck)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(1, Agent::Wire::Hello{1, std::nullopt});
+    const auto reply = rig.roundTrip(1, Agent::Wire::Hello{1});
     ASSERT_NE(reply.find("t"), nullptr);
     EXPECT_EQ(*reply.find("t")->asText(), "Reply");
     ASSERT_NE(reply.find("agentVer"), nullptr);
@@ -259,7 +259,7 @@ TEST(SocketFrontend, HelloOfAnotherProtocolVersionIsRefusedAndTheConnectionClose
 {
     Rig rig;
     Client client(rig.path);
-    client.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion + 1, std::nullopt});
+    client.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion + 1});
     const auto reply = client.recv();
     EXPECT_EQ(errName(reply), "UnsupportedProtocol");
     EXPECT_EQ(reply.find("agentVer"), nullptr);
@@ -279,10 +279,10 @@ TEST(SocketFrontend, AHelloThatDeclinesEventsReceivesNoPresenceEvents)
 {
     Rig rig;
     Client quiet(rig.path);
-    quiet.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt, /*wantsEvents=*/false});
+    quiet.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, /*wantsEvents=*/false});
     ASSERT_EQ(errName(quiet.waitFor("Reply")), "");
     Client listening(rig.path);
-    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt});
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion});
     ASSERT_EQ(errName(listening.waitFor("Reply")), "");
 
     rig.injectCard(kIdentityCap);
@@ -307,7 +307,7 @@ TEST(SocketFrontend, AReaderGoesOutWithItsLabelAndATwinRelabelsIt)
 {
     Rig rig;
     Client listening(rig.path);
-    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt});
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion});
     ASSERT_EQ(errName(listening.waitFor("Reply")), "");
 
     auto& registry = rig.core->objectRegistry();
@@ -905,7 +905,7 @@ TEST(SocketFrontend, GetSignResultUnknownOpIsNoResult)
 TEST(SocketFrontend, HelloAdvertisesCredentialsFeature)
 {
     Rig rig;
-    const auto reply = rig.roundTrip(20, Agent::Wire::Hello{1, std::nullopt});
+    const auto reply = rig.roundTrip(20, Agent::Wire::Hello{1});
     const auto* features = reply.find("features");
     ASSERT_NE(features, nullptr);
     ASSERT_NE(features->asArray(), nullptr);
@@ -1174,7 +1174,7 @@ TEST(SocketFrontend, ALifecycleEventQuiescesTheCoreAndTellsEveryClient)
     Client listening(rig.path);
     timeval tv{5, 0};
     ASSERT_EQ(::setsockopt(listening.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), 0);
-    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion, std::nullopt});
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion});
     ASSERT_EQ(errName(listening.waitFor("Reply")), "");
 
     const std::string cardKey = kInjectedCardKey;
@@ -1264,7 +1264,6 @@ TEST(SocketFrontend, TrustChangesFromAnOverCapCallerAreRateLimitedBeforeAnyDialo
     const std::vector<Agent::Wire::Request> verbs{
         Agent::Wire::SetConfig{"TsaUrls", cborArrayOfStrings({"https://tsa.example/"})},
         Agent::Wire::ResetConfig{"TsaUrls"},
-        Agent::Wire::ForgetCscaAnchors{},
     };
     for (const auto& verb : verbs) {
         Rig rig;
@@ -1482,27 +1481,6 @@ TEST(SocketFrontend, TheConfirmationForATimestampingAuthorityNamesItsOwnSentence
     EXPECT_EQ(seen.artifact, "TsaUrls");
     EXPECT_EQ(seen.description, "Change the timestamping authorities this computer will use.");
     EXPECT_EQ(seen.descriptionKey, "prompter_trust_tsa");
-}
-
-// A trust key with no sentence written for it: CscaSources is gated exactly
-// like the two above and has no wording of its own, so it must arrive carrying
-// the generic sentence AND the generic key. An unnamed fallback is the one that
-// would go untranslated without anything failing.
-TEST(SocketFrontend, ATrustKeyWithNoSentenceOfItsOwnFallsBackToTheGenericOne)
-{
-    Rig rig;
-    wire::ConfirmAction seen;
-    rig.frontend->setConfirmProvider([&seen](const wire::ConfirmAction& a) {
-        seen = a;
-        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
-    });
-
-    static_cast<void>(rig.roundTrip(74, Agent::Wire::SetConfig{"CscaSources", cborArrayOfStrings({})}));
-
-    EXPECT_EQ(seen.kind, "configure_trust");
-    EXPECT_EQ(seen.artifact, "CscaSources");
-    EXPECT_EQ(seen.description, "Change a trust setting on this computer.");
-    EXPECT_EQ(seen.descriptionKey, "prompter_trust_generic");
 }
 
 // An ordinary key must not acquire a prompt, or the latency of one.
@@ -1763,7 +1741,6 @@ Agent::Trust::AnchorState stateWith(std::vector<Agent::Trust::AcceptedSigner> si
     st.anchorCount = 903;
     st.issuerCount = 146;
     st.acceptedAt = 1'700'000'000;
-    st.origin = "import";
     return st;
 }
 
@@ -1849,7 +1826,6 @@ TEST(CscaReconciliation, ConstructionDiscardsAReportTheCacheDoesNotBearOut)
     recorded.signer = std::string(64, 'a');
     recorded.signerPinned = true;
     recorded.acceptedAt = 1'700'000'000;
-    recorded.origin = "import";
     first.core->configStore().recordCscaAnchorState(recorded);
     ASSERT_TRUE(first.core->configStore().cscaAnchorState().has_value())
         << "the fixture must record something for the reconciliation to have anything to discard";
@@ -1882,107 +1858,6 @@ TEST(CscaReconciliation, ConstructionLeavesAStoreWithNothingRecordedAlone)
     buffer << in.rdbuf();
     EXPECT_EQ(buffer.str().find("CscaAnchorState"), std::string::npos)
         << "a key nothing had recorded was written out by reconciling";
-}
-
-// --- a way out of the pin ----------------------------------------------------
-//
-// The rotation rule refuses a list signed by a publisher the agent does not
-// follow unless it chains to an anchor already held. Right, and it has a
-// consequence nobody chose: import one country's list, then be offered the ICAO
-// collection, and every list in it is refused. Without a way out the protection
-// is also a trap, and the only cure is knowing about a cache directory and
-// deleting it by hand -- outside the authorization covering every other change
-// to this store, which is the point of putting it on the wire at all.
-
-TEST(SocketFrontend, ForgetCscaAnchorsClearsTheRecordedReport)
-{
-    Rig rig;
-    confirmEverything(rig);
-
-    Agent::Config::CscaAnchorState recorded;
-    recorded.anchors = 903;
-    recorded.issuers = 146;
-    recorded.replayRefusalActive = true;
-    recorded.signer = std::string(64, 'a');
-    recorded.signerPinned = true;
-    recorded.acceptedAt = 1'700'000'000;
-    recorded.origin = "import";
-    rig.core->configStore().recordCscaAnchorState(recorded);
-    ASSERT_TRUE(rig.core->configStore().cscaAnchorState().has_value());
-
-    const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
-    ASSERT_NE(reply.find("t"), nullptr);
-    // Not the envelope tag: a refusal is tagged "Reply" as well, and a gate on
-    // the tag passed for every answer the verb could give.
-    EXPECT_EQ(errName(reply), "") << "forgetting was refused";
-
-    EXPECT_FALSE(rig.core->configStore().cscaAnchorState().has_value())
-        << "the report survived the verb whose whole purpose is to remove it";
-
-    // Zero, and correct: the count comes from the CACHE's own record of what it
-    // believed it held, and nothing was ever imported into this rig's cache.
-    // Counting files instead would put a second, disagreeing answer next to the
-    // one every other surface here gives.
-    ASSERT_NE(reply.find("anchorsForgotten"), nullptr);
-    EXPECT_EQ(reply.find("anchorsForgotten")->asUInt().value_or(999u), 0u);
-}
-
-TEST(SocketFrontend, ForgetCscaAnchorsHoldingNothingIsNotAFailure)
-{
-    Rig rig;
-    confirmEverything(rig);
-
-    // An installation with nothing imported must not be told the operation
-    // failed: there is a difference between "could not remove" and "there was
-    // nothing to remove", and only the first is a refusal.
-    const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
-    ASSERT_NE(reply.find("t"), nullptr);
-    EXPECT_EQ(errName(reply), "") << "holding nothing was reported as a failure";
-    ASSERT_NE(reply.find("hadPinnedSigner"), nullptr);
-    EXPECT_FALSE(reply.find("hadPinnedSigner")->asBool().value_or(true));
-}
-
-// The sentence the person reads before the anchors go. Import and forget share
-// a config key, so the key cannot say which of the two is being asked for -- and
-// a forget carrying the import's sentence, or the generic one, refuses and
-// clears exactly the same way.
-TEST(SocketFrontend, TheConfirmationForForgettingNamesWhatWillBeRemoved)
-{
-    Rig rig;
-    wire::ConfirmAction seen;
-    rig.frontend->setConfirmProvider([&seen](const wire::ConfirmAction& a) {
-        seen = a;
-        return wire::ConfirmReply{wire::PromptReplyStatus::Cancelled, {}};
-    });
-
-    static_cast<void>(rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{}));
-
-    EXPECT_EQ(seen.kind, "configure_trust");
-    EXPECT_EQ(seen.artifact, "CscaAnchorState");
-    EXPECT_EQ(seen.description, "Remove every country signing certificate this computer holds.");
-    EXPECT_EQ(seen.descriptionKey, "prompter_trust_forget");
-}
-
-TEST(SocketFrontend, ARefusedCallerForgetsNothing)
-{
-    DenyAllAuthorizer deny;
-    Rig rig(&deny);
-    confirmEverything(rig);
-
-    Agent::Config::CscaAnchorState recorded;
-    recorded.anchors = 903;
-    recorded.issuers = 146;
-    recorded.origin = "import";
-    rig.core->configStore().recordCscaAnchorState(recorded);
-
-    const auto reply = rig.roundTrip(1, Agent::Wire::ForgetCscaAnchors{});
-    EXPECT_EQ(errName(reply), "NotAuthorized");
-
-    // The assertion that matters. A refusal that still destroyed the anchors
-    // would answer exactly like one that did not, so the reply cannot tell
-    // these apart and the store is the only place the difference shows.
-    EXPECT_TRUE(rig.core->configStore().cscaAnchorState().has_value())
-        << "a caller the policy refused still cleared the report";
 }
 
 // --- which depositor an identity read is handed ------------------------------

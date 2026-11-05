@@ -128,7 +128,7 @@ Wired wireUp()
         hs->cv.notify_all();
     });
     w.client = connectClient(w.path);
-    const auto hello = A::Wire::toCbor(A::Wire::RequestEnvelope{1, A::Wire::Hello{1, std::nullopt}}).encode();
+    const auto hello = A::Wire::toCbor(A::Wire::RequestEnvelope{1, A::Wire::Hello{1}}).encode();
     EXPECT_TRUE(A::Wire::sendFrame(w.client, hello).has_value());
     std::unique_lock<std::mutex> lk(hs->m);
     hs->cv.wait_for(lk, std::chrono::seconds(2), [&] { return hs->id != 0; });
@@ -357,7 +357,6 @@ TEST(SocketOperationChannel, CredentialsResultInvalidPinMutationDecodes)
     EXPECT_EQ(*credOp->find("outcome")->asText(), "invalidPin");
     EXPECT_EQ(credOp->find("retriesLeft")->asUInt(), 2u);
     EXPECT_EQ(*credOp->find("blocked")->asBool(), false);
-    EXPECT_EQ(credOp->find("pinActivated"), nullptr); // omitted: nullopt on the source
 
     const auto* recordsVal = res->find("records");
     ASSERT_NE(recordsVal, nullptr);

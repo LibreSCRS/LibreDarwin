@@ -147,10 +147,6 @@ private:
     // SCM_RIGHTS in `in.fds` and the caller identity in `in.caller`, and both
     // are needed before a single byte is read.
     void handleImportCscaMasterList(SocketTransport::Inbound& in, const Agent::Wire::ImportCscaMasterList& msg);
-
-    // No message members and none possible: forgetting is all-or-nothing,
-    // because the rotation rule is applied against the whole anchor set.
-    void handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t req, const Agent::CallerToken& caller);
     void handleReadIdentity(SocketTransport::Inbound& in, const Agent::Wire::ReadIdentity& msg);
     void handleGetPhoto(SocketTransport::Inbound& in, const Agent::Wire::GetPhoto& msg);
     void handleReadCertificates(SocketTransport::Inbound& in, const Agent::Wire::ReadCertificates& msg);
@@ -304,11 +300,12 @@ private:
     std::set<Agent::CallerToken> m_confirmsInFlight;
 
     // What a trust-tier verb is about to do, for the sentence the person reads.
-    // The config key alone cannot say it: import and forget share a key.
-    enum class TrustChange { SetValue, Reset, ImportAnchors, ForgetAnchors };
+    // The config key alone cannot say it: the anchor import has no config key
+    // of its own (it reports under CscaAnchorState).
+    enum class TrustChange { SetValue, Reset, ImportAnchors };
 
     // The trust-tier detour: ask on a worker, come back to the loop, then run
-    // `apply`. All four trust-tier verbs share it so none can drift out of the
+    // `apply`. All three trust-tier verbs share it so none can drift out of the
     // gate.
     void confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
                           const Agent::CallerToken& caller, TrustChange what, std::function<void()> apply);
@@ -322,7 +319,9 @@ private:
         std::string_view key;
         std::string_view text;
     };
-    static TrustChangeCopy describeTrustChange(const std::string& key, TrustChange what);
+    // Empty for a trust key that has no sentence of its own: the caller refuses
+    // rather than show the person a vague one.
+    static std::optional<TrustChangeCopy> describeTrustChange(const std::string& key, TrustChange what);
     // The per-key write cascades, shared by the immediate and the confirmed
     // path so both run identical code.
     void applyConfigWrite(std::uint64_t connId, std::uint64_t req, const Agent::Wire::SetConfig& msg);

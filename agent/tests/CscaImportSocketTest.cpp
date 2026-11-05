@@ -349,7 +349,7 @@ TEST(CscaImportSocket, RateLimitPrecedesTheDescriptorInspection)
 // --- the human's veto ---------------------------------------------------------
 //
 // Installing country signing anchors is a trust change of the same size as
-// naming a trust source or forgetting the anchors, and those two already stop
+// naming a trust source, and that one already stops
 // at a person. The refusal name is NotAuthorized either way, so -- as with the
 // authoriser -- the proof is the side effect: the descriptor untouched, the
 // cache empty, nothing recorded. The refusal is also identical whichever
@@ -432,6 +432,15 @@ TEST(CscaImportSocket, AnImportAddressingADescriptorThatIsNotThereAsksNobody)
         << "a malformed import installed anchors";
 }
 
+// A trust-tier write that reaches the person and whose answer, applied late,
+// would change something observable: the timestamping authorities.
+static Agent::Wire::SetConfig aTrustChange()
+{
+    Agent::Wire::CborValue::Array urls;
+    urls.emplace_back(std::string{"https://late.example/"});
+    return Agent::Wire::SetConfig{"TsaUrls", Agent::Wire::CborValue(std::move(urls))};
+}
+
 // --- an answer that arrives after everything that asked for it is gone -------
 //
 // The block that waits for the person outlives whatever asked it: the person
@@ -451,10 +460,7 @@ TEST(CscaImportSocket, AnAnswerThatArrivesAfterTheFrontendIsGoneIsDiscarded)
     // it.
     Rig rig;
     confirmEverything(rig);
-    ASSERT_EQ(errName(importBytes(rig, 1, aValidMasterList())), "") << "a valid list was refused";
-
-    const fs::path cacheDir{rig.core->configStore().cscaCacheDir()};
-    ASSERT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor()) << "the import installed no anchor to protect";
+    const auto tsaBefore = rig.core->configStore().tsaUrls();
 
     CapturedLog log;
 
@@ -474,12 +480,12 @@ TEST(CscaImportSocket, AnAnswerThatArrivesAfterTheFrontendIsGoneIsDiscarded)
     // Sent and deliberately never read: what this client is for is getting a
     // question in front of a person, not hearing the answer.
     Client client(rig.path);
-    client.send(1, Agent::Wire::ForgetCscaAnchors{});
+    client.send(1, aTrustChange());
     if (!entered->wait(std::chrono::seconds(5))) {
         // Let the worker go before failing, so a parked block finishes rather
         // than sitting on the latch for the length of the binary.
         released->open();
-        FAIL() << "the forget request never reached the confirmation";
+        FAIL() << "the trust change never reached the confirmation";
     }
 
     // The hosts' order, by hand, with the person still holding the dialog open:
@@ -499,8 +505,9 @@ TEST(CscaImportSocket, AnAnswerThatArrivesAfterTheFrontendIsGoneIsDiscarded)
         << log.joined();
 
     // The core is gone, so the disk is the only witness left -- and it still
-    // holds what the import put there.
-    EXPECT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor()) << "a late answer forgot the anchors";
+    // holds what it held before the question was asked.
+    Agent::Config::ConfigStore reread(rig.tmp / "config.json", rig.tmp / "cache");
+    EXPECT_EQ(reread.tsaUrls(), tsaBefore) << "a late answer changed the timestamping authorities";
 }
 
 // The SECOND place the same answer can arrive too late, and the one no
@@ -520,10 +527,7 @@ TEST(CscaImportSocket, AnAnswerMarshalledBackToALoopThatRunsItTooLateIsDiscarded
 {
     Rig rig;
     confirmEverything(rig);
-    ASSERT_EQ(errName(importBytes(rig, 1, aValidMasterList())), "") << "a valid list was refused";
-
-    const fs::path cacheDir{rig.core->configStore().cscaCacheDir()};
-    ASSERT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor()) << "the import installed no anchor to protect";
+    const auto tsaBefore = rig.core->configStore().tsaUrls();
 
     CapturedLog log;
 
@@ -547,10 +551,10 @@ TEST(CscaImportSocket, AnAnswerMarshalledBackToALoopThatRunsItTooLateIsDiscarded
     // registers no disconnect handlers.
     {
         Client client(rig.path);
-        client.send(1, Agent::Wire::ForgetCscaAnchors{});
+        client.send(1, aTrustChange());
         if (!entered->wait(std::chrono::seconds(5))) {
             released->open();
-            FAIL() << "the forget request never reached the confirmation";
+            FAIL() << "the trust change never reached the confirmation";
         }
     }
 
@@ -604,8 +608,8 @@ TEST(CscaImportSocket, AnAnswerMarshalledBackToALoopThatRunsItTooLateIsDiscarded
         << "the verdict was dropped on the loop without a word of its own:\n"
         << log.joined();
 
-    EXPECT_TRUE(Agent::Trust::AnchorCache{cacheDir}.holdsAnchor())
-        << "an answer that arrived too late forgot the anchors anyway";
+    EXPECT_EQ(rig.core->configStore().tsaUrls(), tsaBefore)
+        << "an answer that arrived too late changed the timestamping authorities anyway";
 }
 
 // The Linux suite spends the budget over the wire, one refused import at a
@@ -700,7 +704,6 @@ TEST(CscaImportSocket, AValidListIsImportedAndSummarised)
     EXPECT_EQ(uintOf(reply, "anchors"), 3u);
     EXPECT_EQ(uintOf(reply, "issuers"), 2u);
     EXPECT_EQ(textOf(reply, "signer"), Agent::Trust::toHex(list.signerSpkiSha256));
-    EXPECT_EQ(textOf(reply, "origin"), "import");
     EXPECT_GT(intOf(reply, "acceptedAt").value_or(0), 0);
     // Trusted on first import: nothing was compared, and the wire says so
     // rather than letting a client render "verified".
@@ -744,7 +747,6 @@ TEST(CscaImportSocket, AnAcceptedImportIsRememberedInTheConfiguration)
     EXPECT_TRUE(recorded->replayRefusalActive);
     ASSERT_TRUE(recorded->signedAt.has_value());
     EXPECT_EQ(*recorded->signedAt, kSignedEarlier);
-    EXPECT_EQ(recorded->origin, "import");
 
     // On DISK, not merely in memory. A second store over the same file is the
     // restart this record exists for: it is the only thing a client that has
@@ -910,62 +912,4 @@ TEST(CscaReconciliationSocket, DiscardingAStaleReportLeavesTheSignerPinStanding)
     const auto reply = importBytes(second, 3, secondList.der);
     ASSERT_EQ(errName(reply), "") << "the publisher this agent follows was refused";
     EXPECT_EQ(boolOf(reply, "signerPinned"), std::optional{true}) << "the pin was discarded along with the report";
-}
-
-// --- forgetting, over the socket ---------------------------------------------
-//
-// The shared library owns WHAT a forget is and in which order; SocketFrontendTest
-// holds the verb's authorization and its empty case. What only a real import can
-// show is here: that the reply describes what was actually destroyed, and that
-// the verb re-opens the door the rotation rule closed.
-
-TEST(CscaForgetSocket, ForgettingClearsTheAnchorsAndTheServedReport)
-{
-    Rig rig;
-    confirmEverything(rig);
-
-    const auto list = fixture::signMasterList({fixture::makeCsca("CSCA A", "AA"), fixture::makeCsca("CSCA B", "BB")},
-                                              fixture::makeIndependentSigner());
-    ASSERT_EQ(errName(importBytes(rig, 1, list.der)), "");
-    ASSERT_FALSE(nothingInstalled(anchorState(rig, 2)));
-
-    const auto reply = rig.roundTrip(3, Agent::Wire::ForgetCscaAnchors{});
-    // Not the envelope tag: a refusal is tagged "Reply" as well, and a gate on
-    // the tag passed for every answer the verb could give.
-    ASSERT_NE(reply.find("t"), nullptr) << "no reply frame";
-    ASSERT_EQ(errName(reply), "") << "forgetting was refused";
-
-    EXPECT_EQ(uintOf(reply, "anchorsForgotten"), 2u) << "the reply describes what was destroyed";
-    EXPECT_EQ(boolOf(reply, "hadPinnedSigner"), std::optional{true})
-        << "a publisher was being followed and the reply did not say so";
-    EXPECT_TRUE(nothingInstalled(anchorState(rig, 4)))
-        << "the property still serves a report for anchors that are gone";
-    EXPECT_FALSE(Agent::Trust::AnchorCache{fs::path{rig.core->configStore().cscaCacheDir()}}.holdsAnchor())
-        << "the anchors survived the verb whose whole purpose is to remove them";
-}
-
-// The reason the verb exists, asserted end to end over the socket: a publisher
-// the agent refused before is taken in afterwards, and taken in as a first
-// import.
-TEST(CscaForgetSocket, AfterForgettingARefusedPublisherIsAcceptedAgain)
-{
-    Rig rig;
-    confirmEverything(rig);
-
-    const auto first = fixture::signMasterList({fixture::makeCsca("CSCA A", "AA")}, fixture::makeIndependentSigner());
-    ASSERT_EQ(errName(importBytes(rig, 1, first.der)), "");
-
-    const auto stranger =
-        fixture::signMasterList({fixture::makeCsca("CSCA X", "XX")}, fixture::makeIndependentSigner());
-    ASSERT_EQ(errName(importBytes(rig, 2, stranger.der)), "InvalidRequest") << "the fixture did not reproduce the trap";
-    ASSERT_EQ(uintOf(anchorState(rig, 3), "anchors"), 1u) << "the refused list changed what a client reads";
-
-    ASSERT_EQ(errName(rig.roundTrip(4, Agent::Wire::ForgetCscaAnchors{})), "") << "forgetting was refused";
-
-    const auto reply = importBytes(rig, 5, stranger.der);
-    ASSERT_EQ(errName(reply), "") << "the publisher refused before the forget is still refused after it";
-    EXPECT_EQ(uintOf(reply, "anchors"), 1u);
-    EXPECT_EQ(textOf(reply, "signer"), Agent::Trust::toHex(stranger.signerSpkiSha256));
-    EXPECT_EQ(boolOf(reply, "signerPinned"), std::optional{false})
-        << "a first import after a forget claimed the publisher had been established";
 }

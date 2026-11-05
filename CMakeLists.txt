@@ -82,7 +82,7 @@ if(LIBREDARWIN_UNIVERSAL)
 endif()
 
 # The platform-neutral agent core (flows, scheduler, presence model, caches,
-# lease/broker policy, LM-backed seams, the 5 backend interfaces). The macOS
+# lease/broker policy, LM-backed seams, the 4 backend interfaces). The macOS
 # backend under agent/ implements those interfaces and builds the
 # librescrs-agent daemon on top of LibreAgent::Core — exactly as LibreLinux does
 # with its D-Bus backend. Built from the deps.lock revision by default

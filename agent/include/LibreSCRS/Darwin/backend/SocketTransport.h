@@ -8,7 +8,8 @@
 #include <LibreSCRS/Agent/wire/UniqueFd.h>
 #include <LibreSCRS/Agent/wire/darwin/PeerIdentity.h>
 
-#include <LibreSCRS/Agent/backend/AgentTransport.h>
+#include <LibreSCRS/Agent/Identity.h>
+#include <LibreSCRS/Agent/PresenceTypes.h>
 #include <LibreSCRS/Agent/value/ReaderLabels.h> // PresenceRoster
 #include <LibreSCRS/Secure/Buffer.h>
 #include <LibreSCRS/Auth/AuthRequirement.h> // LibreSCRS::Auth::PreReadAuthMethod (CardRouting::preAuth)
@@ -30,7 +31,7 @@
 
 namespace LibreSCRS::Darwin {
 
-// macOS AgentTransport backend: the client membrane + its GCD loop over the
+// macOS socket transport: the client membrane + its GCD loop over the
 // App-Group `0600` AF_UNIX socket. It owns the CBOR framing, the SCM_RIGHTS
 // fd-passing, peer identity, the ObjectId<->wire-handle mapping, and the
 // published presence snapshot; the neutral core never touches wire paths. The
@@ -44,7 +45,7 @@ namespace LibreSCRS::Darwin {
 // (thread-safe dispatch_async/after). The core's presence updates arrive
 // post-marshaled, so publish*/withdraw/updateProperties, the inbound sink, and
 // sendTo all run on the loop with no additional locking.
-class SocketTransport final : public Agent::AgentTransport
+class SocketTransport final
 {
 public:
     // One inbound request delivered to the frontend, with the fds that
@@ -67,7 +68,7 @@ public:
     [[nodiscard]] static std::expected<std::unique_ptr<SocketTransport>, ServerStartError>
     create(std::string socketPath);
 
-    ~SocketTransport() override;
+    ~SocketTransport();
     SocketTransport(const SocketTransport&) = delete;
     SocketTransport& operator=(const SocketTransport&) = delete;
 
@@ -145,8 +146,8 @@ public:
     // emitConfigChanged path). Loop-thread only.
     void broadcastConfigChanged(const std::string& key);
 
-    // Broadcast an AgentQuiesced event (system sleep / screen lock / user switch /
-    // shutdown) so clients render "card suspended" rather than a bare removal.
+    // Broadcast an AgentQuiesced event (system sleep / screen lock / user switch)
+    // so clients render "card suspended" rather than a bare removal.
     // Loop-thread only (wrap in post() from another thread).
     void broadcastQuiesced(Agent::Wire::QuiesceReason reason);
 
@@ -197,14 +198,14 @@ public:
         return m_closedListenFdAtCancel;
     }
 
-    // --- AgentTransport ----------------------------------------------------
-    void publishReader(const Agent::ReaderState& reader) override;
-    void publishCard(const Agent::CardState& card) override;
-    void withdraw(Agent::ObjectId object) override;
-    void updateProperties(Agent::ObjectId reader, const Agent::PropertyDelta& delta) override;
-    void post(std::function<void()> fn) override;
-    void postAfter(std::chrono::microseconds delay, std::function<void()> fn) override;
-    void onClientDisconnect(std::function<void(Agent::CallerToken)> handler) override;
+    // --- presence, posting and client liveness -----------------------------
+    void publishReader(const Agent::ReaderState& reader);
+    void publishCard(const Agent::CardState& card);
+    void withdraw(Agent::ObjectId object);
+    void updateProperties(Agent::ObjectId reader, const Agent::PropertyDelta& delta);
+    void post(std::function<void()> fn);
+    void postAfter(std::chrono::microseconds delay, std::function<void()> fn);
+    void onClientDisconnect(std::function<void(Agent::CallerToken)> handler);
 
     // A published reader's label (model / interface) changed because another
     // reader arrived or left beside it (ObjectRegistry's relabelled observer):

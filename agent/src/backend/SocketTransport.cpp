@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 // SPDX-FileCopyrightText: 2026 hirashix0
 //
-// macOS AgentTransport backend over the App-Group AF_UNIX socket. One serial GCD
+// macOS socket transport over the App-Group AF_UNIX socket. One serial GCD
 // queue is the loop: the accept source, every per-connection read/write source,
-// and all AgentTransport calls (post-marshaled by the core) run on it, so
+// and every presence or post call (marshaled onto it by the host) run on it, so
 // transport state needs no locks. The agent binds the socket itself and owns
 // its file.
 #include <LibreSCRS/Darwin/backend/SocketTransport.h>

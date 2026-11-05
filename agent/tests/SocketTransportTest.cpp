@@ -94,8 +94,7 @@ TEST(SocketTransport, InboundRequestReachesSinkWithPeerToken)
 
     const int client = connectClient(path);
     // Send a Hello request.
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
 
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
@@ -168,8 +167,7 @@ TEST(SocketTransport, AFullDescriptorTablePausesAcceptingInsteadOfSpinning)
     table.release();
     EXPECT_LT(burned, std::chrono::milliseconds(150)) << "the accept loop spun while the descriptor table was full";
 
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     // Darwin's accept() takes the connection off the queue before it fails
     // with EMFILE, so the client that arrived while the table was full is
     // gone; what must hold there is that accepting resumes for the next one.
@@ -203,8 +201,7 @@ TEST(SocketTransport, PublishBroadcastsEventToClient)
     tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
 
     const int client = connectClient(path);
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2))); // connection is up
 
@@ -247,8 +244,7 @@ TEST(SocketTransport, AReaderCarriesItsLabelAndARelabelReachesTheClient)
     tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
 
     const int client = connectClient(path);
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
@@ -340,8 +336,7 @@ TEST(SocketTransport, DisconnectFiresHandlersInRegistrationOrder)
     tr->onClientDisconnect([&](Agent::CallerToken) { order.push(2); });
 
     const int client = connectClient(path);
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
@@ -370,8 +365,7 @@ TEST(SocketTransport, ConnectionCapRefusesTheExcessConnection)
     // ack (a burst of raw connects would overflow the listen(16) backlog and
     // fail at connect() before the cap is even exercised).
     std::vector<int> clients;
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     for (std::size_t i = 0; i < 32; ++i) {
         const int c = connectClient(path);
         ASSERT_TRUE(Agent::Wire::sendFrame(c, helloBytes).has_value());
@@ -406,8 +400,7 @@ TEST(SocketTransport, WatchdogReapsOnlyThePartialFrameConnection)
 
     // A well-behaved client delivers its first frame inside the window.
     const int good = connectClient(path);
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(good, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
@@ -727,8 +720,7 @@ TEST(SocketTransport, OutboundQueueIsBounded)
     int rcvbuf = 1;
     ::setsockopt(client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
@@ -810,8 +802,7 @@ TEST(SocketTransport, OutboundQueueIsBoundedInFrames)
     const int client = connectClient(path);
     int rcvbuf = 1; // see OutboundQueueIsBounded
     ::setsockopt(client, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
@@ -883,8 +874,7 @@ TEST(SocketTransport, ReaderThatDrainsIsNeverClosed)
     timeval rcvTimeout{15, 0};
     ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &rcvTimeout, sizeof(rcvTimeout));
 
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     ASSERT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
 
@@ -1126,8 +1116,7 @@ TEST(SocketTransport, RebindsWhenTheSocketPathIsReplaced)
 
     Latch<std::string> sink;
     tr->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
 
     int replacements = 0;
     for (std::size_t round = 1; round <= 2; ++round) {
@@ -1228,8 +1217,7 @@ TEST(SocketTransport, SecondInstanceOnTheSamePathRefusesToStart)
     EXPECT_EQ(warnings.count(kReplacedLine), 0u);
 
     const int client = connectClient(path);
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     EXPECT_TRUE(sink.waitFor(1, std::chrono::seconds(2))) << "the first instance stopped serving";
 
@@ -1254,8 +1242,7 @@ TEST(SocketTransport, NextInstanceStartsOnceThePreviousHasShutDown)
     Latch<std::string> sink;
     second->setRequestSink([&](SocketTransport::Inbound&& in) { sink.push(in.caller.str()); });
     const int client = connectClient(path);
-    const auto helloBytes =
-        Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1, std::nullopt}}).encode();
+    const auto helloBytes = Agent::Wire::toCbor(Agent::Wire::RequestEnvelope{1, Agent::Wire::Hello{1}}).encode();
     ASSERT_TRUE(Agent::Wire::sendFrame(client, helloBytes).has_value());
     EXPECT_TRUE(sink.waitFor(1, std::chrono::seconds(2)));
     ::close(client);

@@ -17,7 +17,7 @@ versioning follows [Semantic Versioning](https://semver.org/).
 ### Security
 
 - **Trust changes can no longer flood you with confirmation dialogs.** Each
-  request to change a time-stamping or trust-list source, or to forget the
+  request to change a time-stamping or trust-list source, or to replace the
   country signing anchors, now counts against the same per-client budget as
   signing, and a client may have only one such confirmation waiting at a time;
   a second one is refused at once instead of opening another dialog.

@@ -90,7 +90,6 @@ A::Wire::CscaAnchorStateReply toAnchorStateReply(const A::Config::CscaAnchorStat
     reply.signerPinned = recorded.signerPinned;
     reply.acceptedAt = recorded.acceptedAt;
     reply.signedAt = recorded.signedAt;
-    reply.origin = recorded.origin;
     return reply;
 }
 
@@ -415,8 +414,6 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         handleGetAppearanceFont(connId, req);
     } else if (const auto* m = std::get_if<A::Wire::ImportCscaMasterList>(&body)) {
         handleImportCscaMasterList(in, *m);
-    } else if (std::get_if<A::Wire::ForgetCscaAnchors>(&body)) {
-        handleForgetCscaAnchors(connId, req, caller);
     } else {
         // A request family this chain does not name used to fall out of here
         // with no reply and no log: the client waited out its timeout and
@@ -431,7 +428,7 @@ void SocketFrontend::dispatch(SocketTransport::Inbound&& in)
         // is worth today. Instead, adding an alternative to Wire::Request breaks
         // THIS line, which forces a person to look at this chain rather than
         // let the new message class disappear into the else.
-        static_assert(std::variant_size_v<A::Wire::Request> == 28,
+        static_assert(std::variant_size_v<A::Wire::Request> == 27,
                       "Wire::Request grew or shrank: give the new alternative a branch above "
                       "(or confirm the floor is right for it) and update this count");
         log::warnf("socket: unhandled request family on conn {} req {}", connId, req);
@@ -1070,20 +1067,8 @@ void SocketFrontend::handleGetConfig(std::uint64_t connId, std::uint64_t req)
         reply.entries.emplace("TslSources", A::Wire::CborValue(std::move(sources)));
     }
     reply.entries.emplace("TslCacheDir", A::Wire::CborValue(cfg.tslCacheDir()));
-    reply.entries.emplace("AiaCacheDir", A::Wire::CborValue(cfg.aiaCacheDir()));
     reply.entries.emplace("DefaultReason", A::Wire::CborValue(cfg.defaultReason()));
     reply.entries.emplace("DefaultLocation", A::Wire::CborValue(cfg.defaultLocation()));
-    reply.entries.emplace("PluginDir", A::Wire::CborValue(cfg.pluginDir()));
-    {
-        A::Wire::CborValue::Array sources;
-        for (const auto& s : cfg.cscaSources()) {
-            A::Wire::CborValue::Map m;
-            m.emplace("uri", A::Wire::CborValue(s.uri));
-            m.emplace("eager", A::Wire::CborValue(s.eager));
-            sources.emplace_back(std::move(m));
-        }
-        reply.entries.emplace("CscaSources", A::Wire::CborValue(std::move(sources)));
-    }
     reply.entries.emplace("CscaAnchorState", anchorStateEntry(cfg.cscaAnchorState()));
     sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
 }
@@ -1197,33 +1182,6 @@ void SocketFrontend::applyConfigWrite(std::uint64_t connId, std::uint64_t req, c
             sources.push_back(std::move(src));
         }
         r = cfg.setTslSources(std::move(sources));
-    } else if (msg.key == "CscaSources") {
-        const auto* arr = msg.value.asArray();
-        if (!arr) {
-            replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
-            return;
-        }
-        std::vector<A::Config::CscaSource> sources;
-        for (const auto& e : *arr) {
-            // Two members, not three: a country-signing source has no LOTL
-            // equivalent, so mirroring TslSource's shape here would invent a
-            // field with nothing to put in it.
-            if (e.asMap() == nullptr) {
-                replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
-                return;
-            }
-            A::Config::CscaSource src;
-            const auto* uri = e.find("uri");
-            const auto* eager = e.find("eager");
-            if (uri == nullptr || !uri->asText()) {
-                replyError(connId, req, A::Wire::SyncError::InvalidConfigValue);
-                return;
-            }
-            src.uri = *uri->asText();
-            src.eager = eager != nullptr && eager->asBool().value_or(false);
-            sources.push_back(std::move(src));
-        }
-        r = cfg.setCscaSources(std::move(sources));
     } else {
         replyError(connId, req, A::Wire::SyncError::UnknownConfigKey);
         return;
@@ -1304,7 +1262,6 @@ A::Config::CscaAnchorState recordedStateFor(const A::Trust::AnchorState& importe
     out.signerPinned = imported.everyPublisherEstablished();
     out.acceptedAt = imported.acceptedAt;
     out.signedAt = only != nullptr ? only->signedAt : std::nullopt;
-    out.origin = imported.origin;
     return out;
 }
 
@@ -1323,8 +1280,8 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
     // was turned away before or after the agent touched what they handed over.
     //
     // Authorize the client. Then rate-limit, then the person, and only then
-    // read. The trust-tier action is shared with CscaSources: an import is a
-    // larger trust change than naming a source, not a smaller one.
+    // read. The trust-tier action is shared with the other trust writes: an
+    // import is a larger trust change than naming a source, not a smaller one.
     switch (m_core.authorizer().authorize(A::kActionConfigureTrust, in.caller)) {
     case A::AuthorizationOutcome::Granted:
         break;
@@ -1402,50 +1359,6 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
     });
 }
 
-void SocketFrontend::handleForgetCscaAnchors(std::uint64_t connId, std::uint64_t req, const A::CallerToken& caller)
-{
-    // The trust tier, shared with the import and with CscaSources: undoing a
-    // trust decision is the same size of decision as making one, and a person
-    // who may not add anchors may not silently drop them either.
-    switch (m_core.authorizer().authorize(A::kActionConfigureTrust, caller)) {
-    case A::AuthorizationOutcome::Granted:
-        break;
-    case A::AuthorizationOutcome::Denied:
-        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
-        return;
-    case A::AuthorizationOutcome::Undecided:
-        // Nothing was decided and nothing was changed -- see the LibreLinux
-        // ManagerObject/CardObject switches this mirrors.
-        replyError(connId, req, A::Wire::SyncError::CommunicationError);
-        return;
-    }
-    if (!m_core.rateLimiter().allow(caller)) {
-        replyError(connId, req, A::Wire::SyncError::RateLimited);
-        return;
-    }
-    // Human confirmation, same as a trust-tier config write. This one destroys
-    // rather than replaces, and there is nothing to read it back from
-    // afterwards, so the reply below is the only account of what went.
-    confirmThenApply(connId, req, "CscaAnchorState", caller, TrustChange::ForgetAnchors, [this, connId, req] {
-        auto& cfg = m_core.configStore();
-        const auto forgotten = A::Trust::forgetCscaAnchors(cfg);
-        if (!forgotten) {
-            // Nothing was changed, the report included -- which is why this is
-            // not reported as a partial success. Holding nothing would have
-            // answered a zeroed report, so an empty answer here really does
-            // mean the anchors could not be removed.
-            replyError(connId, req, A::Wire::SyncError::CommunicationError);
-            return;
-        }
-        log::infof("country signing anchors forgotten: anchors={} hadPinnedSigner={}", forgotten->anchors,
-                   forgotten->hadPinnedSigner);
-        A::Wire::ForgetCscaAnchorsReply reply;
-        reply.anchorsForgotten = forgotten->anchors;
-        reply.hadPinnedSigner = forgotten->hadPinnedSigner;
-        sendReplyOnLoop(connId, A::Wire::makeReply(req, reply));
-    });
-}
-
 void SocketFrontend::handleResetConfig(std::uint64_t connId, std::uint64_t req, const A::Wire::ResetConfig& msg,
                                        const A::CallerToken& caller)
 {
@@ -1504,6 +1417,13 @@ void SocketFrontend::applyConfigReset(std::uint64_t connId, std::uint64_t req, c
 void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, const std::string& key,
                                       const A::CallerToken& caller, TrustChange what, std::function<void()> apply)
 {
+    const std::optional<TrustChangeCopy> copy = describeTrustChange(key, what);
+    if (!copy) {
+        // A trust key with no sentence of its own cannot be put to a person
+        // honestly, so the change is refused instead of asked about vaguely.
+        replyError(connId, req, A::Wire::SyncError::NotAuthorized);
+        return;
+    }
     if (!m_confirmsInFlight.insert(caller).second) {
         replyError(connId, req, A::Wire::SyncError::RateLimited);
         return;
@@ -1511,9 +1431,8 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
     wire::ConfirmAction ask;
     ask.kind = "configure_trust";
     ask.title = "Confirm trust change";
-    const TrustChangeCopy copy = describeTrustChange(key, what);
-    ask.description = std::string(copy.text);
-    ask.descriptionKey = std::string(copy.key);
+    ask.description = std::string(copy->text);
+    ask.descriptionKey = std::string(copy->key);
     // The CLAIMED caller identity. The public SecTask path cannot verify it,
     // so nothing here may word it as verified -- the human is deciding, and a
     // name presented as proven would be doing the deciding for them.
@@ -1587,28 +1506,28 @@ void SocketFrontend::confirmThenApply(std::uint64_t connId, std::uint64_t req, c
 // sentences keep two keys -- one key covering both would merge "which
 // timestamping authority" with "which trusted list" into a single translatable
 // sentence that can only be right about one of them.
-SocketFrontend::TrustChangeCopy SocketFrontend::describeTrustChange(const std::string& key, TrustChange what)
+std::optional<SocketFrontend::TrustChangeCopy> SocketFrontend::describeTrustChange(const std::string& key,
+                                                                                   TrustChange what)
 {
     switch (what) {
     case TrustChange::ImportAnchors:
-        return {.key = "prompter_trust_import",
-                .text = "Install the country signing certificates from the offered file, replacing the ones this "
-                        "computer checks passports against."};
-    case TrustChange::ForgetAnchors:
-        return {.key = "prompter_trust_forget",
-                .text = "Remove every country signing certificate this computer holds."};
+        return TrustChangeCopy{
+            .key = "prompter_trust_import",
+            .text = "Install the country signing certificates from the offered file, replacing the ones this "
+                    "computer checks passports against."};
     case TrustChange::SetValue:
     case TrustChange::Reset:
         break;
     }
     if (key == "TsaUrls") {
-        return {.key = "prompter_trust_tsa", .text = "Change the timestamping authorities this computer will use."};
+        return TrustChangeCopy{.key = "prompter_trust_tsa",
+                               .text = "Change the timestamping authorities this computer will use."};
     }
     if (key == "TslSources") {
-        return {.key = "prompter_trust_tsl",
-                .text = "Change the trusted lists this computer accepts signatures against."};
+        return TrustChangeCopy{.key = "prompter_trust_tsl",
+                               .text = "Change the trusted lists this computer accepts signatures against."};
     }
-    return {.key = "prompter_trust_generic", .text = "Change a trust setting on this computer."};
+    return std::nullopt;
 }
 
 // --- pkcs11 / cert-der (async broker handoff) --------------------------------

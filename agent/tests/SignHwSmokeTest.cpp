@@ -176,7 +176,7 @@ struct HwRig
         std::filesystem::create_directories(tmp);
         transport = std::move(*SocketTransport::create(path));
         core.emplace(
-            resolver, *transport, authz, prompter, tmp / "config.json", tmp / "cache",
+            resolver, authz, prompter, tmp / "config.json", tmp / "cache",
             [](const std::string&) -> std::optional<Agent::ReaderCard> { return std::nullopt; },
             [](const std::string&) -> std::optional<Agent::ObjectId> { return std::nullopt; });
         frontend.emplace(*transport, *core, "0.1-hw");
@@ -303,7 +303,7 @@ TEST(SignHwSmoke, PresenceReadAndSign)
     const int client = connectClient(rig.path);
 
     // Hello -> HelloAck.
-    const auto hello = sendReq(client, 1, Agent::Wire::Hello{1, std::string("hw-smoke")});
+    const auto hello = sendReq(client, 1, Agent::Wire::Hello{1});
     ASSERT_NE(hello.find("agentVer"), nullptr);
 
     // Presence: wait for the monitor to surface a card.

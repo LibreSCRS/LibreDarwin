@@ -129,16 +129,12 @@ A::Wire::CredentialRecord toWireCredentialRecord(const A::CredentialRecord& r)
     out.usesLeft = r.usesLeft;
     out.usesMax = r.usesMax;
     out.unblocksLeft = r.unblocksLeft;
-    out.minLength = r.minLength;
-    out.maxLength = r.maxLength;
     out.canChange = r.canChange;
     out.unblockable = r.unblockable;
-    out.unblockStyle = r.unblockStyle;
     out.activatable = r.activatable;
     out.keyActivationPending = r.keyActivationPending;
     out.keyActivatable = r.keyActivatable;
     out.recovery = r.recovery;
-    out.probeSafe = r.probeSafe;
     out.blockedGuidanceKey = r.blockedGuidanceKey;
     out.blockedGuidanceFallback = r.blockedGuidanceFallback;
     out.keyActivationGuidanceKey = r.keyActivationGuidanceKey;
@@ -156,8 +152,6 @@ A::Wire::CredentialOpResult toWireCredentialOpResult(const A::CredentialOpResult
     out.outcome = static_cast<A::Wire::CredentialOutcome>(r.outcome);
     out.retriesLeft = r.retriesLeft;
     out.blocked = r.blocked;
-    out.pinActivated = r.pinActivated;
-    out.keyActivated = r.keyActivated;
     return out;
 }
 
@@ -201,11 +195,6 @@ void SocketOperationChannel::emitPropertiesChanged() noexcept
         A::Wire::OpProgress ev;
         ev.op = m_opId;
         ev.phase = static_cast<Ops::OperationPhase>(m_state ? m_state->phase.load() : 0u);
-        if (m_state) {
-            ev.progress = m_state->progress.load();
-            ev.indeterminate = m_state->isIndeterminate.load();
-            ev.watchdogSecs = m_state->watchdogTimeoutSec.load();
-        }
         const A::Wire::CborValue msg = A::Wire::toCbor(ev);
         const std::uint64_t connId = m_connId;
         SocketTransport* t = &m_transport;

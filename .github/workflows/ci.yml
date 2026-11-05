@@ -85,7 +85,7 @@ jobs:
         # first-party floor (weeks before the tag, not first on it), deps.lock
         # well formed and reachable from upstream main, and every self-test
         # this repository ships.
-        uses: LibreSCRS/ci/actions/gates@d68f5d781a665759eaba63c67ef0e6eb1f738063
+        uses: LibreSCRS/ci/actions/gates@a6efbfe4072c3ef31aaf928fcfc64e6673658a7a
         with:
           gates: check-workflows check-skip-reasons check-version deps-lock selftests
 
@@ -125,7 +125,7 @@ jobs:
       - name: Select Xcode
         # Before anything compiles: LibreMiddleware below is built with the
         # same Xcode as LibreDarwin.
-        uses: LibreSCRS/ci/actions/select-xcode@d68f5d781a665759eaba63c67ef0e6eb1f738063
+        uses: LibreSCRS/ci/actions/select-xcode@a6efbfe4072c3ef31aaf928fcfc64e6673658a7a
         with:
           root: LibreDarwin
 
@@ -137,7 +137,7 @@ jobs:
         # history and submodules because LibreMiddleware derives its version
         # with git describe and vendors OpenSC and curl as submodules.
         id: deps
-        uses: LibreSCRS/ci/actions/checkout-deps@d68f5d781a665759eaba63c67ef0e6eb1f738063
+        uses: LibreSCRS/ci/actions/checkout-deps@a6efbfe4072c3ef31aaf928fcfc64e6673658a7a
         with:
           root: LibreDarwin
           names: LibreMiddleware LibreAgent
@@ -228,7 +228,7 @@ jobs:
         # LibreAgent tree CMake really used (FETCHCONTENT_SOURCE_DIR in the
         # cache) is still the locked commit -- the property, not what
         # configure printed.
-        uses: LibreSCRS/ci/actions/gates@d68f5d781a665759eaba63c67ef0e6eb1f738063
+        uses: LibreSCRS/ci/actions/gates@a6efbfe4072c3ef31aaf928fcfc64e6673658a7a
         with:
           gates: deps-lock-build test-floor
           root: LibreDarwin

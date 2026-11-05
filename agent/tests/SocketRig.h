@@ -178,7 +178,7 @@ struct Rig
         std::filesystem::create_directories(tmp);
         transport = std::move(*SocketTransport::create(path));
         core.emplace(
-            resolver, *transport, authorizerOverride != nullptr ? *authorizerOverride : authz,
+            resolver, authorizerOverride != nullptr ? *authorizerOverride : authz,
             prompterOverride != nullptr ? std::move(prompterOverride)
                                         : std::shared_ptr<Agent::Operations::PrompterClientBase>(prompter),
             tmp / "config.json", tmp / "cache",

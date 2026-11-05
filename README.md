@@ -22,14 +22,17 @@ a thin client of this agent.
 - **`agent/`** — the `librescrs-agent` launchd LaunchAgent: the single owner of
   the PC/SC connection, the warm PACE/SM channel, and every secret. Built on
   `LibreAgent::Core` (consumed via FetchContent or `find_package(CONFIG)`), it
-  implements the five platform-backend interfaces for macOS:
+  implements the four platform-backend interfaces for macOS:
   | LibreAgent interface | macOS backend (this repo) |
   |---|---|
-  | `AgentTransport` | `SocketTransport` — App-Group `0600` AF_UNIX socket, CBOR framing, `SCM_RIGHTS` fd-passing, GCD dispatch |
   | `Authorizer` | `SecCodeAuthorizer` — peer `audit_token` → `SecTask` signing identifier + App-Group entitlement allow-list, fail-closed on unidentifiable peers |
   | `Operations::PrompterClientBase` | `MacPrompterClient` — forwards to the agent-owned credential window |
   | `Operations::OperationChannel` | `SocketOperationChannel` — per-op progress/result over the socket (inline results, no memfd) |
   | `LibreSCRS::log::LogSink` (LibreMiddleware's facade, which the agent core logs through too) | `OsLogSink` — `os_log` sink injected via `LibreSCRS::log::init` |
+
+  Presence, posting and client liveness are not an interface: `SocketTransport` —
+  App-Group `0600` AF_UNIX socket, CBOR framing, `SCM_RIGHTS` fd-passing, GCD
+  dispatch — is the host's own object, wired to the core directly.
 - **`prompter/`** — the agent-owned secure credential window (PIN / CAN / MRZ),
   a separate helper the daemon drives.
 - **`pkcs11-module/`** — `librescrs-pkcs11-agent.dylib`, the card-less,

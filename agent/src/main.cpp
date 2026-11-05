@@ -248,8 +248,8 @@ int main(int argc, char** argv)
 
     // [3] The owning neutral-core aggregate.
     std::mutex stateMutex;
-    Agent::AgentCore core(resolver, *transport, authorizer, prompter, configFile, cacheRoot,
-                          makeResolveReaderCard(*transport), makeResolveCardKey(*transport));
+    Agent::AgentCore core(resolver, authorizer, prompter, configFile, cacheRoot, makeResolveReaderCard(*transport),
+                          makeResolveCardKey(*transport));
     // The prompt gate stamps every dialog with the reader that holds the card
     // (model + contact/contactless slot), looked up in the transport's presence
     // roster. Before any operation can run; the rig performs the same step.
