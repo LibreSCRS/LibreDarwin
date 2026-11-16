@@ -69,6 +69,7 @@ namespace {
 
 // An instant a publisher might have signed at.
 constexpr std::int64_t kSignedEarlier = 1'700'000'000;
+constexpr std::int64_t kSignedLater = 1'710'000'000;
 
 // A number no count on this wire can reach, so a missing or mistyped key fails
 // an equality on it rather than reading as zero.
@@ -753,6 +754,21 @@ TEST(CscaImportSocket, AnAcceptedImportIsRememberedInTheConfiguration)
     // just started could be answered from.
     Agent::Config::ConfigStore restarted(rig.tmp / "config.json", rig.tmp / "cache");
     EXPECT_EQ(restarted.cscaAnchorState(), recorded) << "the record did not survive a restart";
+}
+
+TEST(CscaImportSocket, AnOlderListFromTheSamePublisherIsNamedAsReplayed)
+{
+    Rig rig;
+    confirmEverything(rig);
+
+    const auto signer = fixture::makeIndependentSigner();
+    const auto newer = fixture::signMasterListDated({fixture::makeCsca("CSCA One", "AA")}, signer, kSignedLater);
+    const auto older = fixture::signMasterListDated({fixture::makeCsca("CSCA One", "AA")}, signer, kSignedEarlier);
+    ASSERT_EQ(errName(importBytes(rig, 1, newer.der)), "");
+
+    // The one refusal the caller can act on, so it keeps its own name rather
+    // than the invalid-request bucket the other refusals share.
+    EXPECT_EQ(errName(importBytes(rig, 2, older.der)), "MasterListReplayed");
 }
 
 // --- a report the anchor cache does not bear out ----------------------------

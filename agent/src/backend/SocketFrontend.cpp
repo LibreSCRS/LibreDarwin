@@ -1194,32 +1194,6 @@ void SocketFrontend::applyConfigWrite(std::uint64_t connId, std::uint64_t req, c
     sendReplyOnLoop(connId, A::Wire::makeReply(req, A::Wire::AckReply{}));
 }
 
-namespace {
-
-// The refusal the core reports, in this wire's vocabulary. Replayed is the one
-// name a person can act on directly ("you already have this list"), so it stays
-// separate; the rest share the invalid-argument bucket because a malformed
-// file, a bad signature and a wrong publisher are all "this file will not do"
-// to the caller, and the agent's log carries which one it was.
-A::Wire::SyncError syncErrorFor(A::Trust::ImportRefusal reason) noexcept
-{
-    switch (reason) {
-    case A::Trust::ImportRefusal::Replayed:
-        return A::Wire::SyncError::MasterListReplayed;
-    case A::Trust::ImportRefusal::CacheNotWritable:
-        return A::Wire::SyncError::CommunicationError;
-    case A::Trust::ImportRefusal::NotAMasterList:
-    case A::Trust::ImportRefusal::Empty:
-    case A::Trust::ImportRefusal::Malformed:
-    case A::Trust::ImportRefusal::BadSignature:
-    case A::Trust::ImportRefusal::SignerChanged:
-        break;
-    }
-    return A::Wire::SyncError::InvalidRequest;
-}
-
-} // namespace
-
 namespace detail {
 
 bool isRefusedSession(const LibreSCRS::SmartCard::OpenError& failure) noexcept
@@ -1233,36 +1207,6 @@ std::string requesterLabelFor(const std::optional<std::string>& signingId, std::
         return A::sanitizeLabel(std::move(fallback));
     }
     return A::sanitizeLabel(*signingId);
-}
-
-A::Config::CscaAnchorState recordedStateFor(const A::Trust::AnchorState& imported)
-{
-    // One import can now take in a COLLECTION of separately signed lists, so
-    // the single-publisher vocabulary this record and the wire reply speak
-    // cannot always be filled. Two fields are left ABSENT rather than picked:
-    // handing one fingerprint out of twenty-eight to a surface whose label
-    // reads "the publisher" is a concrete untruth, and on a trust surface a
-    // wrong answer and no answer are not failures of the same size. Absence is
-    // a shape this reply has always had -- a list with no signing time has
-    // omitted signedAt since the first version -- so a client written before
-    // collections reads it correctly without knowing they exist.
-    const A::Trust::AcceptedSigner* only = imported.signers.size() == 1 ? &imported.signers.front() : nullptr;
-
-    A::Config::CscaAnchorState out;
-    out.anchors = imported.anchorCount;
-    out.issuers = imported.issuerCount;
-    out.replayRefusalActive = imported.replayRefusalActive();
-    out.signer = only != nullptr ? A::Trust::toHex(only->fingerprint) : std::string{};
-    // Asked of the state rather than recomputed here. The aggregate is a
-    // property of what was accepted, and it has one owner now: both hosts had
-    // written the same fold independently, and both had to remember on their
-    // own that all_of over an empty range is true -- which would report a state
-    // with NO publisher as fully established, the strongest possible
-    // overstatement on a trust surface.
-    out.signerPinned = imported.everyPublisherEstablished();
-    out.acceptedAt = imported.acceptedAt;
-    out.signedAt = only != nullptr ? only->signedAt : std::nullopt;
-    return out;
 }
 
 } // namespace detail
@@ -1334,7 +1278,7 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
                 .count();
         auto imported = A::Trust::importMasterList(input.bytes, cache, now);
         if (!imported) {
-            replyError(connId, req, syncErrorFor(imported.error().reason));
+            replyError(connId, req, A::toSyncError(imported.error().reason));
             return;
         }
 
@@ -1352,7 +1296,7 @@ void SocketFrontend::handleImportCscaMasterList(SocketTransport::Inbound& in, co
         // The reply tells THIS client what it installed; the record is what tells
         // the next client to connect, which has no reply to read. The store
         // persists it and notifies observers itself.
-        const A::Config::CscaAnchorState recorded = detail::recordedStateFor(*imported);
+        const A::Config::CscaAnchorState recorded = A::Trust::recordedStateFor(*imported);
         cfg.recordCscaAnchorState(recorded);
 
         sendReplyOnLoop(connId, A::Wire::makeReply(req, toAnchorStateReply(recorded)));
