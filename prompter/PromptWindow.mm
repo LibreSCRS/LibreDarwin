@@ -32,6 +32,7 @@
 #include <cstdint>
 #include <cstring>
 #include <map>
+#include <string_view>
 #include <string>
 #include <utility>
 #include <vector>
@@ -68,8 +69,9 @@ struct PanelState
     std::uint32_t primaryMaxLength{0};
     std::uint32_t newMinLength{0};
     std::uint32_t newMaxLength{0};
-    // The single-secret panel's kind, so its OK gate knows whether the bounds
-    // above apply (PIN, CAN) or not (MRZ).
+    // The single-secret panel's kind, so its OK gate knows which rule applies
+    // (PIN bounds, the fixed CAN length, or MRZ). The bounds above are kept as
+    // the request carried them; SecretLength.h supplies the defaults.
     wire::PromptKind kind{wire::PromptKind::Pin};
 };
 
@@ -245,25 +247,12 @@ NSString* informativeText(const std::string& description, const std::string& req
     return info;
 }
 
-// The change panel's OK gate, pure so it is testable by inspection: current
-// within the primary bounds AND new within the new bounds AND confirm equal
-// to new. Lengths are UTF-8 byte counts; an unset (zero) bound is the shared
-// rule's (SecretLength.h). `changeInputsAcceptable` lifts an unset minimum to
-// 1, because an empty field is never an answer.
-using LibreSCRS::Darwin::lengthWithinBounds;
-
-bool changeInputsAcceptable(const PanelState& state, std::size_t currentLen, std::size_t newLen, bool confirmMatchesNew)
+// The bytes a field holds, for the gates in SecretLength.h. A field that fails
+// to encode reads as empty, which no gate accepts.
+std::string_view utf8View(NSString* value)
 {
-    // An empty field is never an answer: the agent treats an empty secret as a
-    // cancellation, so an unset minimum counts as 1 rather than 0.
-    return lengthWithinBounds(currentLen, std::max<std::uint32_t>(state.primaryMinLength, 1), state.primaryMaxLength) &&
-           lengthWithinBounds(newLen, std::max<std::uint32_t>(state.newMinLength, 1), state.newMaxLength) &&
-           confirmMatchesNew;
-}
-
-std::size_t utf8Length(NSString* value)
-{
-    return static_cast<std::size_t>([value lengthOfBytesUsingEncoding:NSUTF8StringEncoding]);
+    const char* bytes = value.UTF8String;
+    return bytes != nullptr ? std::string_view{bytes} : std::string_view{};
 }
 
 // The bytes a secure field holds right now. The caller scrubs the field.
@@ -580,12 +569,11 @@ NSString* promptHeading(const wire::PromptRequest& req)
 - (void)refreshOkGate
 {
     if (!changeFlow) {
-        // An empty secret is read by the agent as a cancellation, and a PIN or
-        // CAN outside the bounds the request carried can only be refused, so OK
-        // (and Return) stay disabled until the entry is one the card can be
-        // asked about.
+        // The rules of the Linux prompter (SecretLength.h): an empty secret is
+        // a cancellation to the agent, and an entry the card could only refuse
+        // keeps OK (and Return) disabled.
         okButton.enabled =
-            LibreSCRS::Darwin::secretEntryAcceptable(panelState->kind, utf8Length(primaryField.stringValue),
+            LibreSCRS::Darwin::secretEntryAcceptable(panelState->kind, utf8View(primaryField.stringValue),
                                                      panelState->primaryMinLength, panelState->primaryMaxLength);
         return;
     }
@@ -593,9 +581,10 @@ NSString* promptHeading(const wire::PromptRequest& req)
     // (current within the primary bounds, new within the new bounds, confirm
     // equal to new). The equality check is the confirm entry's ONLY consumer —
     // its value never leaves the panel.
-    okButton.enabled =
-        changeInputsAcceptable(*panelState, utf8Length(primaryField.stringValue), utf8Length(newField.stringValue),
-                               [confirmField.stringValue isEqualToString:newField.stringValue]);
+    okButton.enabled = LibreSCRS::Darwin::changeEntriesAcceptable(
+        LibreSCRS::Darwin::ChangeBounds{panelState->primaryMinLength, panelState->primaryMaxLength,
+                                        panelState->newMinLength, panelState->newMaxLength},
+        utf8View(primaryField.stringValue), utf8View(newField.stringValue), utf8View(confirmField.stringValue));
 }
 
 - (void)finishWithStatus:(wire::PromptReplyStatus)status
