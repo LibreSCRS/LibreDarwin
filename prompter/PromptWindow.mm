@@ -19,6 +19,7 @@
 
 #include "ArtifactText.h"
 #include "RequesterText.h"
+#include "SecretLength.h"
 
 #include <LibreSCRS/Agent/wire/ReaderInterface.h>
 
@@ -67,6 +68,9 @@ struct PanelState
     std::uint32_t primaryMaxLength{0};
     std::uint32_t newMinLength{0};
     std::uint32_t newMaxLength{0};
+    // The single-secret panel's kind, so its OK gate knows whether the bounds
+    // above apply (PIN, CAN) or not (MRZ).
+    wire::PromptKind kind{wire::PromptKind::Pin};
 };
 
 // Recognised `lastError` msgKey (mirrors
@@ -243,23 +247,17 @@ NSString* informativeText(const std::string& description, const std::string& req
 
 // The change panel's OK gate, pure so it is testable by inspection: current
 // within the primary bounds AND new within the new bounds AND confirm equal
-// to new. Lengths are UTF-8 byte counts — the unit that crosses the wire. A
-// zero bound is "unset" on the wire (the request codec omits zero fields):
-// min 0 imposes no lower limit and max 0 no upper limit, so unknown card
-// policy degrades to "let the card decide" rather than a permanently
-// disabled OK. `changeInputsAcceptable` lifts an unset minimum to 1, because
-// an empty field is never an answer.
-bool withinBounds(std::size_t len, std::uint32_t minLen, std::uint32_t maxLen)
-{
-    return len >= minLen && (maxLen == 0 || len <= maxLen);
-}
+// to new. Lengths are UTF-8 byte counts; an unset (zero) bound is the shared
+// rule's (SecretLength.h). `changeInputsAcceptable` lifts an unset minimum to
+// 1, because an empty field is never an answer.
+using LibreSCRS::Darwin::lengthWithinBounds;
 
 bool changeInputsAcceptable(const PanelState& state, std::size_t currentLen, std::size_t newLen, bool confirmMatchesNew)
 {
     // An empty field is never an answer: the agent treats an empty secret as a
     // cancellation, so an unset minimum counts as 1 rather than 0.
-    return withinBounds(currentLen, std::max<std::uint32_t>(state.primaryMinLength, 1), state.primaryMaxLength) &&
-           withinBounds(newLen, std::max<std::uint32_t>(state.newMinLength, 1), state.newMaxLength) &&
+    return lengthWithinBounds(currentLen, std::max<std::uint32_t>(state.primaryMinLength, 1), state.primaryMaxLength) &&
+           lengthWithinBounds(newLen, std::max<std::uint32_t>(state.newMinLength, 1), state.newMaxLength) &&
            confirmMatchesNew;
 }
 
@@ -582,9 +580,13 @@ NSString* promptHeading(const wire::PromptRequest& req)
 - (void)refreshOkGate
 {
     if (!changeFlow) {
-        // An empty secret is read by the agent as a cancellation, so OK (and
-        // Return) stay disabled until something has been typed.
-        okButton.enabled = utf8Length(primaryField.stringValue) > 0;
+        // An empty secret is read by the agent as a cancellation, and a PIN or
+        // CAN outside the bounds the request carried can only be refused, so OK
+        // (and Return) stay disabled until the entry is one the card can be
+        // asked about.
+        okButton.enabled =
+            LibreSCRS::Darwin::secretEntryAcceptable(panelState->kind, utf8Length(primaryField.stringValue),
+                                                     panelState->primaryMinLength, panelState->primaryMaxLength);
         return;
     }
     // Per-role length gating: OK stays disabled until every field passes
@@ -833,6 +835,10 @@ wire::PromptReply PromptWindow::showPrompt(const wire::PromptRequest& req)
                                                   retryErrorLine(req.attempt, req.lastError),
                                                   readerLine(req.readerModel, req.readerInterface))
                        changeFlow:NO];
+          // The entry bounds the OK gate holds the field to.
+          [panel state]->kind = req.kind;
+          [panel state]->primaryMinLength = req.minLength;
+          [panel state]->primaryMaxLength = req.maxLength;
           const BOOL soleStanding = impl->panels.empty() ? YES : NO;
           // The registry entry goes in BEFORE the window appears, so a
           // dismissal that arrives in the same breath finds something to close.

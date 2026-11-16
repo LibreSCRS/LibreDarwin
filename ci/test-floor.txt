@@ -17,6 +17,7 @@ PrompterHardeningTest 1
 PrompterProtocolTest 1
 PrompterServerTest 1
 SecCodeAuthorizerTest 1
+SecretLengthTest 1
 SignHwSmokeTest 1
 SocketAgentClientFactoryTest 1
 SocketFrontendTest 1
