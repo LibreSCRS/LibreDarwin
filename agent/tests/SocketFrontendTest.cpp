@@ -1900,6 +1900,7 @@ struct BenchReader
     Agent::ObjectId reader;
     Agent::ObjectId card;
     const char* name;
+    const char* atrHex = ""; // as PresenceModel publishes it; empty when the case does not care
 };
 const std::array<BenchReader, 3> kBench{{
     {Agent::ObjectId(1), Agent::ObjectId(11), "Gemalto PC Twin Reader (69988A87) 02 00"},
@@ -1964,6 +1965,7 @@ void exportCards(Rig& rig, std::span<const BenchReader> readers, bool served,
         Agent::CardState c;
         c.id = b.card;
         c.reader = b.reader;
+        c.atrHex = b.atrHex;
         rig.frontend->onCardPublished(c);
         rig.frontend->onReaderPropertiesChanged(b.reader, Agent::PropertyDelta{.hasCard = true, .card = b.card});
     }
@@ -2005,6 +2007,26 @@ TEST(SocketFrontend, ExportOfAServedCardHoldsItsReaderWhateverItsName)
     for (const auto& b : kCtkBench) {
         EXPECT_TRUE(ops.isReaderHeldForTest(b.reader)) << b.name << " was not held on export";
     }
+}
+
+// After a wake both slots of a dual-interface OMNIKEY 5422 report the one card
+// at once: the contact slot with its own ATR, the antenna with the PC/SC Part 3
+// pseudo-ATR the reader builds. Only the contact card is held; keeping the RF
+// session open would lock the contact side out. ATRs as measured on that reader.
+TEST(SocketFrontend, ACardSeenThroughTheAntennaIsNotHeld)
+{
+    const std::array<BenchReader, 2> twins{{
+        {Agent::ObjectId(2), Agent::ObjectId(12), "HID Global OMNIKEY 5422 Smartcard Reader",
+         "3B8D80015352422D6549442D56322E30306D"},
+        {Agent::ObjectId(3), Agent::ObjectId(13), "HID Global OMNIKEY 5422 Smartcard Reader 01",
+         "3BDE97008031FE4553434520382E302D433256300D0A2D"},
+    }};
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportCards(rig, twins, /*served=*/true));
+
+    auto& ops = rig.core->operationManager();
+    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(2))) << "the antenna's pseudo-ATR card was held";
+    EXPECT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(3))) << "the contact card was not held";
 }
 
 // A card no plugin serves is not held, even on the contact slot: the insertion

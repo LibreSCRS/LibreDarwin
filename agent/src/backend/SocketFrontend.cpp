@@ -1712,16 +1712,17 @@ void SocketFrontend::applyCardResolution(const A::CardState& card, const A::Card
     A::CardState refined{card.id, card.reader, probe.capabilities, probe.preReadAuth, probe.cardType, card.atrHex};
     m_transport.publishCard(refined);
 
-    // Power hold: every card a plugin serves stays connected while it is idle.
-    // The CryptoTokenKit slot names this host sees do not say which interface
-    // a slot is (the second slot of a name only gets " 01" appended, in
-    // enumeration order), so the contact slot of a dual-interface unit cannot
-    // be told apart from any other reader. Holding every served card is what
-    // keeps that unit's contactless twin from seeing the card in the contact
-    // slot each time it would lose power. Released by main.cpp's card-removed
+    // Power hold: every contact card a plugin serves stays connected while it
+    // is idle. The CryptoTokenKit slot names this host sees do not say which
+    // interface a slot is (the second slot of a name only gets " 01" appended,
+    // in enumeration order), so the contact slot of a dual-interface unit
+    // cannot be told apart from any other reader. Holding every served contact
+    // card keeps that unit's contactless twin from seeing the card in the
+    // contact slot each time it would lose power; a card seen through the
+    // antenna is never held, by its ATR. Released by main.cpp's card-removed
     // hook.
     if (A::CardResolutionPolicy::holdsReader(probe, m_transport.presenceRoster(), std::to_string(card.id.value()),
-                                             A::HoldRule::EveryServedCard)) {
+                                             card.atrHex, A::HoldRule::EveryServedContactCard)) {
         m_core.operationManager().setReaderHold(card.reader, true);
         std::string readerName;
         if (const auto rn = m_readerNames.find(card.reader.value()); rn != m_readerNames.end()) {

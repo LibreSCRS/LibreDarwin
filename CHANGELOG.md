@@ -146,8 +146,9 @@ versioning follows [Semantic Versioning](https://semver.org/).
   second connection is opened on a reader, so nothing lives longer in memory
   than it did. A card no plugin serves is not held. The Linux host holds only
   the contact slot of a dual-interface unit, which pcsc-lite's reader names
-  identify; CryptoTokenKit's slot names do not, so this host holds every card
-  a plugin serves, on any reader. For cards whose PIN state is not bound to a
+  identify; CryptoTokenKit's slot names do not, so this host holds every
+  contact card a plugin serves, on any reader. A card seen through an antenna
+  is never held (see the CAN entry under Fixed). For cards whose PIN state is not bound to a
   secure channel, the card's own verified state survives the 45 s idle
   window, so within a PKCS#11 login a signature after a longer pause no
   longer re-prompts before the login's own idle limit.
@@ -194,12 +195,15 @@ versioning follows [Semantic Versioning](https://semver.org/).
   agent let the card in the contact slot go once it had been idle for 45
   seconds; without power the card answered the antenna, and the agent probed it
   as a second, contactless card and asked for its CAN while the reader's light
-  flashed. The agent now keeps every card a plugin serves connected while it is
-  idle. CryptoTokenKit's slot names do not say which slot is the contact one,
-  so the agent does not try to tell. The cost: another application that
-  opens a served card directly, not through the agent, waits for as long as
-  the card stays in the reader. LibreSCRS applications go through the agent
-  and do not wait.
+  flashed. The agent now keeps every contact card a plugin serves connected
+  while it is idle. CryptoTokenKit's slot names do not say which slot is the
+  contact one, so the agent tells a contactless card by its ATR (the pseudo-ATR
+  the reader builds for a card on its antenna) and never holds one: after a
+  wake the antenna reaches the chip before the contact slot does, and holding
+  that card locked the contact side out until the card was re-seated. The
+  cost: another application that opens a served contact card directly, not
+  through the agent, waits for as long as the card stays in the reader.
+  LibreSCRS applications go through the agent and do not wait.
 
 - A prompter reply that arrived together with the prompter closing the
   connection is read instead of being reported as an error. macOS refuses a
