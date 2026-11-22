@@ -134,31 +134,23 @@ versioning follows [Semantic Versioning](https://semver.org/).
   (`KeepAlive` = `SuccessfulExit: false`, `ThrottleInterval` 10 s): stopping the
   agent on purpose no longer starts it again at once. A crash is still
   restarted.
-- **Dual-interface readers: the contact slot is kept powered while a card
-  sits in it, where the platform reports both slots as one unit.** A
-  dual-interface card in the contact slot of a reader such as the OMNIKEY 5422
-  couples weakly to the reader's contactless coupler, and on Linux the
-  contactless slot reported it as an endless insert/remove flap (reader LED
-  never at rest, a full card probe per flap). The agent now keeps such a
-  contact slot's one session open while a card it serves is present. After
+- **A card the agent serves is kept powered while it sits in the reader.**
+  A dual-interface card in the contact slot of a reader such as the OMNIKEY
+  5422 couples weakly to the reader's contactless coupler; let go, it showed
+  up in the contactless slot as a second card (see the CAN entry under Fixed).
+  The agent now keeps the card's one session open while it is present. After
   45 s idle the session is emptied of every secret — what the card plugins
-  held for it, the cached PACE secrets, the secure channel — and kept only to
-  hold the card powered; the next operation reuses it. No second connection
-  is opened on a reader, so nothing lives longer in memory than it did. A card
-  no plugin serves is not held. The hold engages only for a reader the agent can classify as the contact slot
-  of a dual-interface unit, which it does from the reader names the platform
-  publishes: two slots that share a serial in their name. macOS publishes the
-  bare product string for the readers measured so far, which names no unit
-  and is therefore never held; whether it names the OMNIKEY 5422's two slots
-  as one unit is not yet measured. Where the hold does engage: a PC/SC client
-  that asks for EXCLUSIVE access to that contact slot (GnuPG's scdaemon does
-  by default) is refused while the card is present; SHARED clients, including
-  OpenSC tools, are unaffected. On such a slot, and for cards whose PIN state
-  is not bound to a secure channel, the card's own verified state survives
-  the 45 s idle window, so within a PKCS#11 login a signature after a longer
-  pause no longer re-prompts before the login's own idle limit; that on-card
-  state is visible to any other local shared PC/SC client while the card
-  stays powered. The same change as the Linux host's, on the same agent core.
+  held for it, the cached PACE secrets — and kept only to hold the card
+  powered; the next operation reuses it. A session that ran secure messaging
+  is closed instead, and the hold comes back at the next idle check. No
+  second connection is opened on a reader, so nothing lives longer in memory
+  than it did. A card no plugin serves is not held. The Linux host holds only
+  the contact slot of a dual-interface unit, which pcsc-lite's reader names
+  identify; CryptoTokenKit's slot names do not, so this host holds every card
+  a plugin serves, on any reader. For cards whose PIN state is not bound to a
+  secure channel, the card's own verified state survives the 45 s idle
+  window, so within a PKCS#11 login a signature after a longer pause no
+  longer re-prompts before the login's own idle limit.
 - **A card no plugin serves is opened once on insertion.** The probe that
   resolves a new card now tells a card it could not open from a card no
   plugin serves; only the first is asked about again, so a card that belongs
@@ -196,6 +188,18 @@ versioning follows [Semantic Versioning](https://semver.org/).
   major.
 
 ### Fixed
+
+- **A dual-interface card in the contact slot no longer asks for a CAN.** On a
+  reader with a contact slot and an antenna in one unit (OMNIKEY 5422), the
+  agent let the card in the contact slot go once it had been idle for 45
+  seconds; without power the card answered the antenna, and the agent probed it
+  as a second, contactless card and asked for its CAN while the reader's light
+  flashed. The agent now keeps every card a plugin serves connected while it is
+  idle. CryptoTokenKit's slot names do not say which slot is the contact one,
+  so the agent does not try to tell. The cost: another application that
+  opens a served card directly, not through the agent, waits for as long as
+  the card stays in the reader. LibreSCRS applications go through the agent
+  and do not wait.
 
 - A prompter reply that arrived together with the prompter closing the
   connection is read instead of being reported as an error. macOS refuses a

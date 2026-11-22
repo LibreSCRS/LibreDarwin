@@ -1982,22 +1982,29 @@ void exportBench(Rig& rig, bool served)
 
 } // namespace
 
-// Export of a card a plugin serves on the CONTACT slot of a dual-interface
-// unit asks the reader's worker for the power hold, so the same single-chip
-// card's contactless twin stops flapping in and out of the CL slot; a card on
-// the CL slot, or in a single-interface reader, never does. Read back through the
-// operation manager's hold flag -- the thing the worker acts on -- not through
-// a log line. All three workers exist after the export (each card resolved on
-// its own), so a false here is the flag, not an absent worker.
-TEST(SocketFrontend, ExportOfAContactSlotCardHoldsTheReaderAndOtherSlotsDoNot)
+// The slot names CryptoTokenKit gives this host: a single-interface reader and
+// both slots of a dual-interface OMNIKEY 5422, whose second slot only gets
+// " 01" appended. Nothing in them says which slot is the contact one.
+const std::array<BenchReader, 3> kCtkBench{{
+    {Agent::ObjectId(1), Agent::ObjectId(11), "Gemalto PC Twin Reader"},
+    {Agent::ObjectId(2), Agent::ObjectId(12), "HID Global OMNIKEY 5422 Smartcard Reader"},
+    {Agent::ObjectId(3), Agent::ObjectId(13), "HID Global OMNIKEY 5422 Smartcard Reader 01"},
+}};
+
+// Export of a card a plugin serves asks the reader's worker for the power hold
+// on every reader, so the card in the contact slot of a dual-interface unit
+// stays powered and that unit's contactless twin stops reporting it as a
+// contactless card. Read back through the operation manager's hold flag -- the
+// thing the worker acts on -- not through a log line.
+TEST(SocketFrontend, ExportOfAServedCardHoldsItsReaderWhateverItsName)
 {
     Rig rig;
-    ASSERT_NO_FATAL_FAILURE(exportBench(rig, /*served=*/true));
+    ASSERT_NO_FATAL_FAILURE(exportCards(rig, kCtkBench, /*served=*/true));
 
     auto& ops = rig.core->operationManager();
-    EXPECT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(2))) << "the OMNIKEY contact slot is held on export";
-    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(3))) << "the OMNIKEY CL slot is never held";
-    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(1))) << "a single-interface reader is never held";
+    for (const auto& b : kCtkBench) {
+        EXPECT_TRUE(ops.isReaderHeldForTest(b.reader)) << b.name << " was not held on export";
+    }
 }
 
 // A card no plugin serves is not held, even on the contact slot: the insertion
@@ -2015,8 +2022,8 @@ TEST(SocketFrontend, AnUnservedCardOnTheContactSlotIsNotHeld)
 
 // A card no plugin serves is opened once on insertion. The probe's answer is
 // definitive, so the host does not ask again: each repeat would connect to a
-// card that belongs to someone else, probe it and let it go. The single-
-// interface reader keeps the hold out of the count.
+// card that belongs to someone else, probe it and let it go. An unserved card
+// takes no hold, so the count is the probe's alone.
 TEST(SocketFrontend, AnUnservedCardIsOpenedOnceOnInsertion)
 {
     Rig rig;
@@ -2125,7 +2132,7 @@ TEST(SocketFrontend, CardRemovalReleasesTheHold)
     Agent::releaseReaderOnCardRemoved(ops, Agent::ObjectId(2));
 
     EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(2))) << "the flag is the host's to clear on removal";
-    EXPECT_FALSE(ops.isReaderHeldForTest(Agent::ObjectId(3))) << "an unrelated reader is untouched";
+    EXPECT_TRUE(ops.isReaderHeldForTest(Agent::ObjectId(3))) << "an unrelated reader keeps its hold";
 }
 
 // A withdrawn READER takes its worker with it, as the Linux host's unexport

@@ -1712,23 +1712,22 @@ void SocketFrontend::applyCardResolution(const A::CardState& card, const A::Card
     A::CardState refined{card.id, card.reader, probe.capabilities, probe.preReadAuth, probe.cardType, card.atrHex};
     m_transport.publishCard(refined);
 
-    // Power hold: the policy's rule, classified from the transport's presence
-    // roster, the same lookup the prompt dialog uses. Released by main.cpp's
-    // card-removed hook.
-    //
-    // On macOS today this never fires. The classification reads the interface
-    // from pcsc-lite's reader-name tail (" (serial) <ifd> <slot>"), and the
-    // CryptoTokenKit slot names this host sees carry no such tail, so every
-    // reader classifies as Unknown and no card is held. A dual-interface unit's
-    // contactless twin therefore still flaps here; the branch is kept so a
-    // classification that works on these names turns it on unchanged.
-    if (A::CardResolutionPolicy::holdsReader(probe, m_transport.presenceRoster(), std::to_string(card.id.value()))) {
+    // Power hold: every card a plugin serves stays connected while it is idle.
+    // The CryptoTokenKit slot names this host sees do not say which interface
+    // a slot is (the second slot of a name only gets " 01" appended, in
+    // enumeration order), so the contact slot of a dual-interface unit cannot
+    // be told apart from any other reader. Holding every served card is what
+    // keeps that unit's contactless twin from seeing the card in the contact
+    // slot each time it would lose power. Released by main.cpp's card-removed
+    // hook.
+    if (A::CardResolutionPolicy::holdsReader(probe, m_transport.presenceRoster(), std::to_string(card.id.value()),
+                                             A::HoldRule::EveryServedCard)) {
         m_core.operationManager().setReaderHold(card.reader, true);
         std::string readerName;
         if (const auto rn = m_readerNames.find(card.reader.value()); rn != m_readerNames.end()) {
             readerName = rn->second;
         }
-        log::infof("reader {}: holding the contact interface to quiet its contactless twin", readerName);
+        log::infof("reader {}: keeping the card powered while it is idle", readerName);
     }
 }
 
