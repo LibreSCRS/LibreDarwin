@@ -33,7 +33,8 @@ bool hardenSecretProcess() noexcept;
 // into the process that receives the PIN. Keeping a list of what is needed
 // closes the ones nobody has listed yet.
 //
-// Call it first in main(), before anything reads the environment. It cannot
+// The agent reaches it through prepareAgentEnvironment (AgentEnvironment.h),
+// called first in main(), before anything else reads the environment. It cannot
 // undo what was read before main(): the loader's DYLD_* (refused by the
 // hardened runtime of a release bundle; the dev agent sets them on purpose)
 // and the few variables libSystem reads at start-up.

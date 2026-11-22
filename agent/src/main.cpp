@@ -13,6 +13,7 @@
 #include <LibreSCRS/Darwin/backend/OsLogSink.h>
 #include <LibreSCRS/Darwin/backend/PeerPolicy.h>
 #include <LibreSCRS/Darwin/backend/PluginDirectory.h>
+#include <LibreSCRS/Darwin/backend/AgentEnvironment.h>
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>
 #include <LibreSCRS/Darwin/backend/SecCodeAuthorizer.h>
 #include <LibreSCRS/Darwin/backend/SocketFrontend.h>
@@ -99,8 +100,9 @@ std::optional<Arguments> parseArguments(std::span<char* const> args)
 int main(int argc, char** argv)
 {
     // Must stay first, before anything reads the environment: the agent keeps
-    // only what it needs (ProcessHardening.h says why).
-    LibreSCRS::Darwin::restrictEnvironment(LibreSCRS::Darwin::kAgentEnvironment);
+    // only what it needs, after the middleware's trace switches have been read
+    // (AgentEnvironment.h and ProcessHardening.h say why).
+    LibreSCRS::Darwin::prepareAgentEnvironment();
 
     // Deny debugger attach + core dumps BEFORE anything secret-bearing exists
     // (this process will hold plaintext CAN/PIN + live PACE/SM keys). Covers

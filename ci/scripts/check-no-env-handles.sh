@@ -22,7 +22,9 @@
 # SSL_CERT_FILE / SSL_CERT_DIR, OPENSC_CONF, OPENSSL_CONF and a few debug
 # switches. The agent's main() removes every
 # variable it does not name before that code can read one (restrictEnvironment,
-# ProcessHardening.h); this check does not judge that call or those readers.
+# ProcessHardening.h), except the middleware's trace switches, which it has the
+# logging facade read first (prepareAgentEnvironment, AgentEnvironment.h); this
+# check does not judge those calls or those readers.
 #
 # Two rules:
 #

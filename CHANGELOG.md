@@ -38,9 +38,12 @@ versioning follows [Semantic Versioning](https://semver.org/).
 - **The agent keeps only `HOME`, `TMPDIR` and `TZ` from its environment**, so
   `launchctl setenv` can no longer name trust anchors, an OpenSC or OpenSSL
   configuration or a provider directory for it.
-  LibreMiddleware's debug variables (`LIBRESCRS_SIGN_TRACE`, `PKCS11_DEBUG`,
-  `LIBRESCRS_OPENSC_DEBUG`, `LIBRESCRS_PROBE_TRACE`, `LIBRESCRS_PCSC_TRACE`)
-  no longer reach the agent either.
+  LibreMiddleware's three trace switches (`LIBRESCRS_PROBE_TRACE`,
+  `LIBRESCRS_PCSC_TRACE`, `LIBRESCRS_SIGN_TRACE`) are read once, just before
+  the environment is cut, and work: set one with `launchctl setenv`, restart the agent, and the lines
+  arrive in the unified log at Debug level
+  (`log stream --level debug --predicate 'subsystem == "rs.librescrs.agent"'`).
+  No trace channel carries a card's answer, a PIN or decrypted data.
 - **The agent and the prompter refuse to start, with exit code 4, when their
   own signature does not match the build**: when it lacks the build's App
   Group, or, for a build that names a team, fails that team's designated

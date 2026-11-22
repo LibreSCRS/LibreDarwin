@@ -7,7 +7,10 @@
 // macOS depends on SIP/entitlements and is not CI-stable; ptrace(PT_DENY_ATTACH)
 // returning 0 (checked via the hardenSecretProcess result) is the kernel-level
 // acknowledgement.
+#include <LibreSCRS/Darwin/backend/AgentEnvironment.h>
 #include <LibreSCRS/Darwin/backend/ProcessHardening.h>
+
+#include <LibreSCRS/Logging.h>
 
 #include <gtest/gtest.h>
 
@@ -81,6 +84,43 @@ TEST(ProcessHardening, ChildKeepsOnlyTheNamedEnvironment)
         }
         if (::getenv("TMPDIR") != nullptr) {
             ::_exit(3); // a named but unset variable appeared
+        }
+        ::_exit(0);
+    }
+    int status = 0;
+    ASSERT_EQ(::waitpid(child, &status, 0), child);
+    ASSERT_TRUE(WIFEXITED(status));
+    EXPECT_EQ(WEXITSTATUS(status), 0);
+}
+
+// The middleware's trace switches are read before the environment is cut, so
+// they still take effect, and are gone from the environment afterwards like
+// every other variable. The parent must not ask the facade about a trace
+// channel first: the child would inherit a mask already latched off.
+TEST(ProcessHardening, AgentEnvironmentKeepsTheTraceSwitchesItRead)
+{
+    const pid_t child = ::fork();
+    ASSERT_GE(child, 0);
+    if (child == 0) {
+        ::setenv("LIBRESCRS_PROBE_TRACE", "1", 1);
+        ::setenv("LIBRESCRS_PCSC_TRACE", "1", 1);
+        ::setenv("LIBRESCRS_SIGN_TRACE", "0", 1);
+        ::setenv("OPENSC_CONF", "/tmp/foreign.conf", 1);
+
+        LibreSCRS::Darwin::prepareAgentEnvironment();
+
+        using LibreSCRS::log::TraceChannel;
+        if (!LibreSCRS::log::traceEnabled(TraceChannel::Probe) || !LibreSCRS::log::traceEnabled(TraceChannel::Pcsc)) {
+            ::_exit(1); // a switch that was set did not take effect
+        }
+        if (LibreSCRS::log::traceEnabled(TraceChannel::Sign)) {
+            ::_exit(2); // "0" switched a channel on
+        }
+        for (const char* gone :
+             {"LIBRESCRS_PROBE_TRACE", "LIBRESCRS_PCSC_TRACE", "LIBRESCRS_SIGN_TRACE", "OPENSC_CONF"}) {
+            if (::getenv(gone) != nullptr) {
+                ::_exit(3); // the environment was not cut
+            }
         }
         ::_exit(0);
     }

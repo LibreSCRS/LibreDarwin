@@ -42,6 +42,7 @@ target_link_libraries(LibreDarwinWireCore
         LibreAgent::Wire)
 
 add_library(LibreDarwinAgentBackend STATIC
+    src/backend/AgentEnvironment.cpp
     src/backend/SocketTransport.cpp
     src/backend/SecCodeAuthorizer.cpp
     src/backend/MacPrompterClient.cpp
