@@ -23,6 +23,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -93,6 +94,31 @@ bool carries(const std::vector<std::uint8_t>& haystack, const std::vector<std::u
     return std::ranges::search(haystack, needle).begin() != haystack.end();
 }
 
+// Stops a fake's serve thread, which may be blocked in accept() on @p listenFd,
+// and only then closes the listening socket. close() is no wake-up on Darwin:
+// it waits for the accept() still holding the descriptor, and the drain meant to
+// wake that accept() can be missed, leaving both threads blocked until ctest's
+// timeout. A connection that closes at once is a wake-up accept() cannot miss;
+// the serve loop reads EOF on it and then sees @p stop.
+void stopAcceptLoop(std::atomic<bool>& stop, int listenFd, const std::string& path, std::thread& thread)
+{
+    stop = true;
+    const int wake = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    if (wake >= 0) {
+        sockaddr_un addr{};
+        addr.sun_family = AF_UNIX;
+        std::strncpy(addr.sun_path, path.c_str(), sizeof(addr.sun_path) - 1);
+        static_cast<void>(::connect(wake, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)));
+        ::close(wake);
+    } else {
+        ADD_FAILURE() << "stopAcceptLoop: no socket to wake the serve thread with";
+    }
+    if (thread.joinable()) {
+        thread.join();
+    }
+    ::close(listenFd);
+}
+
 // A fake prompter: binds `path`, accepts connections, and replies to each
 // request with a fixed reply. Also captures the LAST PromptRequest it parsed
 // off the wire (mirrors FakeChangePrompter's capture below) so a test can
@@ -116,12 +142,7 @@ public:
     }
     ~FakePrompter()
     {
-        m_stop = true;
-        ::shutdown(m_listen, SHUT_RDWR);
-        ::close(m_listen);
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
+        stopAcceptLoop(m_stop, m_listen, m_path, m_thread);
         std::filesystem::remove(m_path);
     }
 
@@ -222,12 +243,7 @@ public:
     }
     ~FakeChangePrompter()
     {
-        m_stop = true;
-        ::shutdown(m_listen, SHUT_RDWR);
-        ::close(m_listen);
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
+        stopAcceptLoop(m_stop, m_listen, m_path, m_thread);
         std::filesystem::remove(m_path);
     }
 
@@ -652,12 +668,7 @@ public:
     }
     ~FakeConfirmPrompter()
     {
-        m_stop = true;
-        ::shutdown(m_listen, SHUT_RDWR);
-        ::close(m_listen);
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
+        stopAcceptLoop(m_stop, m_listen, m_path, m_thread);
         std::filesystem::remove(m_path);
     }
     [[nodiscard]] const std::optional<wire::ConfirmAction>& capturedAction() const
@@ -849,12 +860,7 @@ public:
     }
     ~FakeResetPrompter()
     {
-        m_stop = true;
-        ::shutdown(m_listen, SHUT_RDWR);
-        ::close(m_listen);
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
+        stopAcceptLoop(m_stop, m_listen, m_path, m_thread);
         for (const int held : m_held) {
             ::close(held);
         }
@@ -1248,12 +1254,7 @@ public:
     }
     ~SilentPrompter()
     {
-        m_stop = true;
-        ::shutdown(m_listen, SHUT_RDWR);
-        ::close(m_listen);
-        if (m_thread.joinable()) {
-            m_thread.join();
-        }
+        stopAcceptLoop(m_stop, m_listen, m_path, m_thread);
         for (const int held : m_held) {
             ::close(held);
         }
@@ -1331,6 +1332,54 @@ TEST(MacPrompterClient, ReceiveBudgetIsAcceptedByTheKernel)
     EXPECT_EQ(::setsockopt(fds[0], SOL_SOCKET, SO_RCVTIMEO, &budget, sizeof(budget)), 0);
     ::close(fds[0]);
     ::close(fds[1]);
+}
+
+// Every fake above is torn down while its serve thread may be just entering
+// accept(). A teardown that relies on close() to wake that accept() leaves both
+// threads blocked now and then on Darwin -- seen in CI as a 300 s timeout on
+// whichever case happened to lose. Thousands of tear-downs with no client hit
+// that window within seconds, and the watchdog turns the hang into a failure
+// that names it instead of a timeout that names only the binary.
+TEST(MacPrompterClient, AFakeTearsDownWhileItsServeThreadIsEnteringAccept)
+{
+    constexpr int kRounds = 20000;
+    std::atomic<int> rounds{0};
+    std::mutex watchMutex;
+    std::condition_variable watchCv;
+    bool finished = false;
+    std::thread watchdog([&] {
+        std::unique_lock lock(watchMutex);
+        int seen = -1;
+        while (!watchCv.wait_for(lock, std::chrono::seconds(10), [&] { return finished; })) {
+            const int now = rounds.load();
+            if (now == seen) {
+                std::fprintf(stderr, "fake teardown hung after %d rounds: close() did not wake accept()\n", now);
+                std::_Exit(EXIT_FAILURE);
+            }
+            seen = now;
+        }
+    });
+
+    wire::PromptReply reply;
+    reply.status = wire::PromptReplyStatus::Cancelled;
+    for (int i = 0; i < kRounds; ++i) {
+        FakePrompter server(uniquePath(), reply);
+        // Where the serve thread stands when teardown begins is set by this
+        // pause, swept across 0-10 us so some round lands on it entering
+        // accept() whatever the speed of the machine.
+        const auto pauseUntil = std::chrono::steady_clock::now() + std::chrono::nanoseconds((i % 64) * 160);
+        while (std::chrono::steady_clock::now() < pauseUntil) {
+        }
+        rounds.fetch_add(1);
+    }
+
+    {
+        const std::lock_guard lock(watchMutex);
+        finished = true;
+    }
+    watchCv.notify_all();
+    watchdog.join();
+    EXPECT_EQ(rounds.load(), kRounds);
 }
 
 } // namespace
