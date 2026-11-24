@@ -1730,6 +1730,24 @@ void SocketFrontend::applyCardResolution(const A::CardState& card, const A::Card
         }
         log::infof("reader {}: keeping the card powered while it is idle", readerName);
     }
+
+    // Warm the identity read cache in the background so the first client request
+    // is answered from it. The launcher runs it only once the reader is idle.
+    if (A::CardResolutionPolicy::prefetchesIdentity(probe)) {
+        // The wire handle is the transport's, not the ObjectId: find the card
+        // publishCard just exported by its routing entry.
+        for (const auto& exported : m_transport.currentState().cards) {
+            const auto routing = m_transport.cardRouting(exported.handle);
+            if (!routing || routing->cardId != card.id) {
+                continue;
+            }
+            m_launcher.prefetch(A::ReaderCard{.readerId = routing->readerId,
+                                              .readerName = routing->readerName,
+                                              .cardKey = routing->cardKey},
+                                Ops::OperationLauncher::PrefetchIdentity{.onCardType = cardTypeSink(exported.handle)});
+            break;
+        }
+    }
 }
 
 // --- config-changed / lease --------------------------------------------------

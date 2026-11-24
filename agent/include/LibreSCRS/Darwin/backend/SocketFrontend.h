@@ -213,9 +213,10 @@ private:
     // Presence: the deferred insertion probe on the reader's worker (loop thread).
     void scheduleCardResolve(const Agent::CardState& card);
     // Loop side of the probe: ask again after the wait m_resolution names, or
-    // publish the card with what @p probe learned and take the reader's power
-    // hold when the policy says so. The probe carries the core's OWN
-    // vocabulary, not the wire mirror; SocketTransport::publishCard converts.
+    // publish the card with what @p probe learned, take the reader's power hold
+    // and park a background identity read when the policy says so. The probe
+    // carries the core's OWN vocabulary, not the wire mirror;
+    // SocketTransport::publishCard converts.
     void applyCardResolution(const Agent::CardState& card, const Agent::CardProbe& probe);
 
     // A Sign artifact stashed for the grace-window GetSignResult recovery.

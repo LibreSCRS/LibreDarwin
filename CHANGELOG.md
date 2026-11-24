@@ -68,6 +68,10 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The socket agent reads a card's identity data in the background** once
+  the card is recognised and the reader has been idle for a moment, so the
+  first request for it is answered from the agent's cache. It never asks for a
+  PIN or other secret to do so.
 - **The socket agent answers `Pkcs11.LoginState`** — whether a PKCS#11 client's
   login on the card in a reader still holds, without extending it — and offers
   the `login-state` feature token. The PKCS#11 module asks it so that Firefox

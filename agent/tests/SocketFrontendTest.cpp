@@ -1949,10 +1949,11 @@ std::vector<Agent::Wire::CardState> exportedCards(Rig& rig)
 // Returns once every card is exported (bounded); a fatal failure here aborts
 // only this helper, so callers wrap it in ASSERT_NO_FATAL_FAILURE.
 void exportCards(Rig& rig, std::span<const BenchReader> readers, bool served,
-                 Agent::Operations::SessionFactory factory = detachedSessionFactory())
+                 Agent::Operations::SessionFactory factory = detachedSessionFactory(),
+                 LibreSCRS::Plugin::CardCapabilities caps = LibreSCRS::Plugin::CardCapabilities::PKI)
 {
     if (served) {
-        rig.resolver.serving = std::make_shared<ServingPlugin>();
+        rig.resolver.serving = std::make_shared<ServingPlugin>(caps);
     }
     rig.core->operationManager().setSessionFactoryForTest(std::move(factory));
     for (const auto& b : readers) {
@@ -2007,6 +2008,27 @@ TEST(SocketFrontend, ExportOfAServedCardHoldsItsReaderWhateverItsName)
     for (const auto& b : kCtkBench) {
         EXPECT_TRUE(ops.isReaderHeldForTest(b.reader)) << b.name << " was not held on export";
     }
+}
+
+// A card whose plugin declares identity data is exported with a background
+// identity read parked on its reader, so the first client request finds the
+// read cache warm. Read back through the manager's accepted-slot count.
+TEST(SocketFrontend, ExportOfAnIdentityCardAsksForPrefetch)
+{
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportCards(rig, std::span{kBench}.first(1), /*served=*/true, detachedSessionFactory(),
+                                        LibreSCRS::Plugin::CardCapabilities::IdentityData));
+
+    EXPECT_EQ(rig.core->operationManager().backgroundRequestsForTest(kBench[0].reader), 1U);
+}
+
+// A card that serves only PKI has no identity to warm: nothing is parked.
+TEST(SocketFrontend, ExportOfAPkiOnlyCardAsksForNoPrefetch)
+{
+    Rig rig;
+    ASSERT_NO_FATAL_FAILURE(exportCards(rig, std::span{kBench}.first(1), /*served=*/true));
+
+    EXPECT_EQ(rig.core->operationManager().backgroundRequestsForTest(kBench[0].reader), 0U);
 }
 
 // After a wake both slots of a dual-interface OMNIKEY 5422 report the one card

@@ -65,13 +65,14 @@ namespace Agent = ::LibreSCRS::Agent;
 class ServingPlugin final : public LibreSCRS::Plugin::CardPlugin
 {
 public:
-    ServingPlugin()
+    explicit ServingPlugin(LibreSCRS::Plugin::CardCapabilities caps = LibreSCRS::Plugin::CardCapabilities::PKI)
+        : m_caps(caps)
     {
         setIdentity("serving-stub", 0);
     }
     LibreSCRS::Plugin::CardCapabilities capabilities() const override
     {
-        return LibreSCRS::Plugin::CardCapabilities::PKI;
+        return m_caps;
     }
     std::span<const LibreSCRS::Plugin::Atr> supportedAtrs() const noexcept override
     {
@@ -84,6 +85,9 @@ protected:
     {
         return LibreSCRS::Plugin::ReadResult::communicationError(LibreSCRS::Auth::ErrorKeys::genericComm());
     }
+
+private:
+    LibreSCRS::Plugin::CardCapabilities m_caps;
 };
 
 // Hermetic fakes: the resolver serves no card unless a case sets @c serving
