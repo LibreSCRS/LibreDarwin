@@ -138,8 +138,8 @@ public:
     // otherwise: a client that reads only while it waits for its own reply
     // would otherwise queue every presence frame until the outbound bound
     // closes it. It still receives every reply, every event of an operation it
-    // started, and the agent-wide ConfigChanged and AgentQuiesced. A vanished
-    // id is ignored. Loop-thread only.
+    // started, and the agent-wide ConfigChanged, AgentQuiesced and
+    // AgentResumed. A vanished id is ignored. Loop-thread only.
     void setWantsPresenceEvents(std::uint64_t connId, bool wants);
 
     // Broadcast a Config1.Changed event to every connection (the frontend's
@@ -150,6 +150,12 @@ public:
     // so clients render "card suspended" rather than a bare removal.
     // Loop-thread only (wrap in post() from another thread).
     void broadcastQuiesced(Agent::Wire::QuiesceReason reason);
+
+    // Broadcast an AgentResumed event: the quiesce announced for @p reason is
+    // over (wake / unlock / the user's session back), so clients treat the
+    // agent as reachable again. Sent only for a quiesce that was announced.
+    // Loop-thread only (wrap in post() from another thread).
+    void broadcastResumed(Agent::Wire::QuiesceReason reason);
 
     // Update the published card-state's cardType and broadcast a
     // PropertyChanged carrying the full new value -- the post-read

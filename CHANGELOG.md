@@ -68,6 +68,13 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- **The socket agent tells its clients when a quiesce ends.** After the
+  machine wakes, the screen unlocks or your session becomes the active one
+  again, every client hears `AgentResumed` with the reason that ended, so
+  LibreCelik sees the agent as available again without a manual retry. It is
+  sent only for a quiesce that was announced; the agent keeps one record of
+  the reasons in force.
+
 - **The socket agent reads a card's identity data in the background** once
   the card is recognised and the reader has been idle for a moment, so the
   first request for it is answered from the agent's cache. It never asks for a

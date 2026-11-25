@@ -1008,6 +1008,11 @@ void SocketTransport::broadcastQuiesced(Agent::Wire::QuiesceReason reason)
     broadcast(Agent::Wire::toCbor(Agent::Wire::AgentQuiesced{reason}), EventKind::AgentWide);
 }
 
+void SocketTransport::broadcastResumed(Agent::Wire::QuiesceReason reason)
+{
+    broadcast(Agent::Wire::toCbor(Agent::Wire::AgentResumed{reason}), EventKind::AgentWide);
+}
+
 std::optional<Agent::Wire::Darwin::PeerCredentials>
 SocketTransport::credentialsFor(const Agent::CallerToken& caller) const
 {

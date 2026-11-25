@@ -77,6 +77,34 @@ TEST(SystemLifecycle, EachEventQuiescesForItsOwnReason)
     }
 }
 
+// The reason an event ENDS: wake ends the sleep, unlock the lock, the user's
+// session coming back the switch away. The twin of quiesceReasonFor, so the
+// two tables name each reason once at each end. Every event is listed.
+TEST(SystemLifecycle, EachEventEndsItsOwnReason)
+{
+    using LibreSCRS::Agent::QuiesceReason;
+    using LibreSCRS::Darwin::resumeReasonFor;
+    struct Row
+    {
+        Event event;
+        std::optional<QuiesceReason> reason;
+    };
+    const Row rows[] = {
+        {.event = Event::Suspend, .reason = std::nullopt},
+        {.event = Event::Resume, .reason = QuiesceReason::SystemSleep},
+        {.event = Event::ScreenLock, .reason = std::nullopt},
+        {.event = Event::ScreenUnlock, .reason = QuiesceReason::ScreenLocked},
+        {.event = Event::SessionResign, .reason = std::nullopt},
+        {.event = Event::SessionActive, .reason = QuiesceReason::SessionInactive},
+        {.event = Event::PowerOff, .reason = std::nullopt},
+    };
+    ASSERT_EQ(std::size(rows), static_cast<std::size_t>(Event::PowerOff) + 1);
+    for (std::size_t i = 0; i < std::size(rows); ++i) {
+        ASSERT_EQ(static_cast<std::size_t>(rows[i].event), i) << "one row per event, in declaration order";
+        EXPECT_EQ(resumeReasonFor(rows[i].event), rows[i].reason) << "event " << i;
+    }
+}
+
 TEST(SystemLifecycle, StartStopAreIdempotentAndCrashFree)
 {
     int calls = 0;

@@ -19,6 +19,7 @@
 
 #include <cstdlib>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -80,10 +81,12 @@ inline void installReaderIdentityResolver(Agent::AgentCore& core, const SocketTr
 // reason (quiesceReasonFor) and the core forgets what that reason says
 // (AgentCore::quiesce), under @p stateMutex because the monitor mutates the
 // registry the quiesce reads on its own thread; then every client hears the
-// same reason, marshaled onto the transport loop. Wake lifts the sleep's hold
-// suspension (AgentCore::resume, under the same mutex) and tells no client;
-// unlock and switching back name no reason and change nothing -- the next
-// operation re-acquires.
+// same reason, marshaled onto the transport loop. The event that ends a reason
+// (resumeReasonFor) tells every client AgentResumed, but only when that reason
+// was announced and not yet ended: the handler keeps a QuiesceSet under
+// @p stateMutex for that. Wake also lifts the sleep's hold suspension
+// (AgentCore::resume, under the same mutex); unlock and switching back change
+// nothing in the core -- the next operation re-acquires.
 // PowerOff stops the agent through @p stop instead. One function, so main.cpp
 // and the tests run the same step rather than a test re-stating it. The core,
 // the mutex and the transport MUST outlive the handler.
@@ -91,14 +94,26 @@ inline void installReaderIdentityResolver(Agent::AgentCore& core, const SocketTr
                                                                    SocketTransport& transport,
                                                                    std::function<void()> stop)
 {
-    return [&core, &stateMutex, &transport, stop = std::move(stop)](SystemLifecycle::Event event) {
+    // Shared, so a copy of the handler keeps one record of what is quiesced.
+    auto active = std::make_shared<Agent::QuiesceSet>();
+    return [&core, &stateMutex, &transport, active, stop = std::move(stop)](SystemLifecycle::Event event) {
         if (event == SystemLifecycle::Event::PowerOff) {
             stop();
             return;
         }
-        if (event == SystemLifecycle::Event::Resume) {
-            const std::lock_guard<std::mutex> lk(stateMutex);
-            core.resume();
+        SocketTransport* trp = &transport;
+        if (const auto ended = resumeReasonFor(event)) {
+            bool announce = false;
+            {
+                const std::lock_guard<std::mutex> lk(stateMutex);
+                if (event == SystemLifecycle::Event::Resume) {
+                    core.resume();
+                }
+                announce = active->end(*ended);
+            }
+            if (announce) {
+                trp->post([trp, resumed = *ended] { trp->broadcastResumed(resumed); });
+            }
             return;
         }
         const auto reason = quiesceReasonFor(event);
@@ -108,8 +123,8 @@ inline void installReaderIdentityResolver(Agent::AgentCore& core, const SocketTr
         {
             const std::lock_guard<std::mutex> lk(stateMutex);
             core.quiesce(*reason);
+            active->begin(*reason);
         }
-        SocketTransport* trp = &transport;
         trp->post([trp, quiesced = *reason] { trp->broadcastQuiesced(quiesced); });
     };
 }

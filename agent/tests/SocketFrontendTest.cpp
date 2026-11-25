@@ -1166,9 +1166,10 @@ TEST(SocketFrontend, CardRemovalDropsSnapshot)
 // over the rig's real core and transport, so this is the production step and
 // not a restatement of it. A lock keeps the cached CAN and the credential
 // listing (it only re-asks for the PIN); a sleep forgets both; every client
-// hears each reason in the order the events came; a wake says nothing (what it
-// does to the hold suspension is ResumeLiftsTheHoldSuspension's); power-off
-// stops the agent instead of quiescing it.
+// hears each reason in the order the events came; a wake announces the end of
+// the sleep (what it does to the hold suspension is
+// ResumeLiftsTheHoldSuspension's); power-off stops the agent instead of
+// quiescing it.
 TEST(SocketFrontend, ALifecycleEventQuiescesTheCoreAndTellsEveryClient)
 {
     Rig rig;
@@ -1203,9 +1204,11 @@ TEST(SocketFrontend, ALifecycleEventQuiescesTheCoreAndTellsEveryClient)
     };
     EXPECT_EQ(reasonOf(listening.waitFor("AgentQuiesced", 4)),
               static_cast<std::uint64_t>(Agent::QuiesceReason::ScreenLocked));
+    // The wake ends a sleep that never began: nothing to announce, so the next
+    // frame is the sleep itself.
     EXPECT_EQ(reasonOf(listening.waitFor("AgentQuiesced", 4)),
               static_cast<std::uint64_t>(Agent::QuiesceReason::SystemSleep))
-        << "the wake between them must not be announced";
+        << "the wake between them ended no sleep, so it must not be announced";
     // Anything the power-off had posted would be queued ahead of this reply.
     listening.send(2, Agent::Wire::GetState{});
     const auto next = listening.recv();
@@ -1232,13 +1235,77 @@ TEST(SocketFrontend, ResumeLiftsTheHoldSuspension)
     handle(Event::Resume);
     EXPECT_FALSE(rig.core->operationManager().holdsSuspended()) << "a wake lifts the suspension";
 
-    // The sleep's own quiesce is queued first; a wake that announced anything would queue behind it.
+    // The sleep's own quiesce is queued first, the end of the sleep behind it.
     (void)listening.waitFor("AgentQuiesced", 4);
+    const auto resumed = listening.waitFor("AgentResumed", 4);
+    ASSERT_NE(resumed.find("reason"), nullptr);
+    EXPECT_EQ(resumed.find("reason")->asUInt().value_or(~0ULL),
+              static_cast<std::uint64_t>(Agent::QuiesceReason::SystemSleep));
     listening.send(2, Agent::Wire::GetState{});
     const auto next = listening.recv();
     ASSERT_NE(next.find("t"), nullptr);
     ASSERT_NE(next.find("t")->asText(), nullptr);
-    EXPECT_EQ(*next.find("t")->asText(), "Reply") << "a wake must not announce a quiesce";
+    EXPECT_EQ(*next.find("t")->asText(), "Reply") << "a wake announces the end of the sleep once";
+}
+
+namespace {
+
+// The reasons of every AgentResumed / AgentQuiesced a listening client
+// receives, in order, as "Q<reason>" / "R<reason>"; stops at the Reply to a
+// GetState sent after the events, so frames the handler posted earlier are all
+// in front of it.
+std::vector<std::string> lifecycleFramesUntilReply(Client& listening, std::uint64_t requestId)
+{
+    listening.send(requestId, Agent::Wire::GetState{});
+    std::vector<std::string> out;
+    for (;;) {
+        const auto frame = listening.recv();
+        const auto* tag = frame.find("t");
+        if (tag == nullptr || tag->asText() == nullptr) {
+            return out;
+        }
+        if (*tag->asText() == "Reply") {
+            return out;
+        }
+        const auto* reason = frame.find("reason");
+        const auto value = reason != nullptr ? reason->asUInt().value_or(~0ULL) : ~0ULL;
+        if (*tag->asText() == "AgentQuiesced") {
+            out.push_back("Q" + std::to_string(value));
+        } else if (*tag->asText() == "AgentResumed") {
+            out.push_back("R" + std::to_string(value));
+        }
+    }
+}
+
+} // namespace
+
+// Each end names the reason it ends, announced only for a quiesce that began
+// (a lone unlock or a lone return to the session says nothing), and one reason
+// ending leaves the others standing.
+TEST(SocketFrontend, TheEndOfEachQuiesceReasonIsAnnouncedOnlyForAQuiesceThatBegan)
+{
+    Rig rig;
+    Client listening(rig.path);
+    timeval tv{5, 0};
+    ASSERT_EQ(::setsockopt(listening.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), 0);
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion});
+    ASSERT_EQ(errName(listening.waitFor("Reply")), "");
+
+    std::mutex stateMutex;
+    const auto handle = makeLifecycleHandler(*rig.core, stateMutex, *rig.transport, [] {});
+    using Event = SystemLifecycle::Event;
+
+    handle(Event::ScreenUnlock);  // no lock began
+    handle(Event::SessionActive); // no switch began
+    handle(Event::ScreenLock);    // Q1
+    handle(Event::SessionResign); // Q2
+    handle(Event::ScreenUnlock);  // R1
+    handle(Event::ScreenUnlock);  // already ended: nothing
+    handle(Event::SessionActive); // R2
+    handle(Event::ScreenLock);    // Q1 again after its end
+    handle(Event::ScreenUnlock);  // R1
+
+    EXPECT_EQ(lifecycleFramesUntilReply(listening, 2), (std::vector<std::string>{"Q1", "Q2", "R1", "R2", "Q1", "R1"}));
 }
 
 // --- trust tier: a human confirms, or the value does not move ----------------
