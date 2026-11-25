@@ -1166,8 +1166,9 @@ TEST(SocketFrontend, CardRemovalDropsSnapshot)
 // over the rig's real core and transport, so this is the production step and
 // not a restatement of it. A lock keeps the cached CAN and the credential
 // listing (it only re-asks for the PIN); a sleep forgets both; every client
-// hears each reason in the order the events came; a wake changes nothing and
-// says nothing; power-off stops the agent instead of quiescing it.
+// hears each reason in the order the events came; a wake says nothing (what it
+// does to the hold suspension is ResumeLiftsTheHoldSuspension's); power-off
+// stops the agent instead of quiescing it.
 TEST(SocketFrontend, ALifecycleEventQuiescesTheCoreAndTellsEveryClient)
 {
     Rig rig;
@@ -1211,6 +1212,33 @@ TEST(SocketFrontend, ALifecycleEventQuiescesTheCoreAndTellsEveryClient)
     ASSERT_NE(next.find("t"), nullptr);
     ASSERT_NE(next.find("t")->asText(), nullptr);
     EXPECT_EQ(*next.find("t")->asText(), "Reply") << "power-off must not announce a quiesce";
+}
+
+TEST(SocketFrontend, ResumeLiftsTheHoldSuspension)
+{
+    Rig rig;
+    Client listening(rig.path);
+    timeval tv{5, 0};
+    ASSERT_EQ(::setsockopt(listening.fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)), 0);
+    listening.send(1, Agent::Wire::Hello{Agent::Wire::kProtocolVersion});
+    ASSERT_EQ(errName(listening.waitFor("Reply")), "");
+
+    std::mutex stateMutex;
+    const auto handle = makeLifecycleHandler(*rig.core, stateMutex, *rig.transport, [] {});
+    using Event = SystemLifecycle::Event;
+
+    handle(Event::Suspend);
+    EXPECT_TRUE(rig.core->operationManager().holdsSuspended()) << "a sleep suspends the card holds";
+    handle(Event::Resume);
+    EXPECT_FALSE(rig.core->operationManager().holdsSuspended()) << "a wake lifts the suspension";
+
+    // The sleep's own quiesce is queued first; a wake that announced anything would queue behind it.
+    (void)listening.waitFor("AgentQuiesced", 4);
+    listening.send(2, Agent::Wire::GetState{});
+    const auto next = listening.recv();
+    ASSERT_NE(next.find("t"), nullptr);
+    ASSERT_NE(next.find("t")->asText(), nullptr);
+    EXPECT_EQ(*next.find("t")->asText(), "Reply") << "a wake must not announce a quiesce";
 }
 
 // --- trust tier: a human confirms, or the value does not move ----------------

@@ -80,8 +80,10 @@ inline void installReaderIdentityResolver(Agent::AgentCore& core, const SocketTr
 // reason (quiesceReasonFor) and the core forgets what that reason says
 // (AgentCore::quiesce), under @p stateMutex because the monitor mutates the
 // registry the quiesce reads on its own thread; then every client hears the
-// same reason, marshaled onto the transport loop. Wake, unlock and switching
-// back name no reason and change nothing -- the next operation re-acquires.
+// same reason, marshaled onto the transport loop. Wake lifts the sleep's hold
+// suspension (AgentCore::resume, under the same mutex) and tells no client;
+// unlock and switching back name no reason and change nothing -- the next
+// operation re-acquires.
 // PowerOff stops the agent through @p stop instead. One function, so main.cpp
 // and the tests run the same step rather than a test re-stating it. The core,
 // the mutex and the transport MUST outlive the handler.
@@ -92,6 +94,11 @@ inline void installReaderIdentityResolver(Agent::AgentCore& core, const SocketTr
     return [&core, &stateMutex, &transport, stop = std::move(stop)](SystemLifecycle::Event event) {
         if (event == SystemLifecycle::Event::PowerOff) {
             stop();
+            return;
+        }
+        if (event == SystemLifecycle::Event::Resume) {
+            const std::lock_guard<std::mutex> lk(stateMutex);
+            core.resume();
             return;
         }
         const auto reason = quiesceReasonFor(event);

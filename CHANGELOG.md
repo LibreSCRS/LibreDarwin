@@ -194,6 +194,11 @@ versioning follows [Semantic Versioning](https://semver.org/).
 
 ### Fixed
 
+- **The agent releases its card holds across sleep and takes them again after
+  wake.** A wake now lifts the suspension a sleep put on every reader's hold;
+  the hold itself comes back on a later idle sweep, and the first operation
+  after waking reconnects instead of reusing a connection the system dropped
+  while asleep.
 - **A dual-interface card in the contact slot no longer asks for a CAN.** On a
   reader with a contact slot and an antenna in one unit (OMNIKEY 5422), the
   agent let the card in the contact slot go once it had been idle for 45
