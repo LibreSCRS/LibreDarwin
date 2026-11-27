@@ -214,23 +214,25 @@ TEST(ManagePinOperation, CancelledPromptEmitsUserCancelledResultThenFinishesCanc
     auto* raw = channel.get();
 
     auto state = std::make_shared<OperationState>();
-    ManagePinOperation op(std::move(channel),
-                          ManagePinOperation::Deps{
-                              .holder = holder.get(),
-                              .credentials = credentials,
-                              .prompter = prompter,
-                              .serializer = serializer,
-                              .credCache = credCache,
-                              .snapshotCache = snapshotCache,
-                              .readCache = readCache,
-                              .cardKey = "card-A",
-                              .readerName = "FakeReader",
-                              .requester = "test",
-                              .artifact = "credentials",
-                              .request = changeReq(),
-                              .snapshot = makeSnapshot(),
-                          },
-                          state);
+    ManagePinOperation op(
+        std::move(channel),
+        ManagePinOperation::Deps{
+            .holder = holder.get(),
+            .credentials = credentials,
+            .prompter = prompter,
+            .serializer = serializer,
+            .credCache = credCache,
+            .snapshotCache = snapshotCache,
+            .readCache = readCache,
+            .cardKey = "card-A",
+            .readerName = "FakeReader",
+            .requester = "test",
+            .artifact = "credentials",
+            .request = changeReq(),
+            .snapshot = makeSnapshot(),
+            .refusalGenerationAtPublish = PublishedRefusalGeneration{credCache.refusalGenerationFor("card-A")},
+        },
+        state);
     op.runOnWorker();
 
     ASSERT_EQ(raw->events.size(), 2u);
@@ -266,23 +268,25 @@ TEST(ManagePinOperation, WrongPinEmitsInvalidPinResultThenFinishesCredentialWron
     auto* raw = channel.get();
 
     auto state = std::make_shared<OperationState>();
-    ManagePinOperation op(std::move(channel),
-                          ManagePinOperation::Deps{
-                              .holder = holder.get(),
-                              .credentials = credentials,
-                              .prompter = prompter,
-                              .serializer = serializer,
-                              .credCache = credCache,
-                              .snapshotCache = snapshotCache,
-                              .readCache = readCache,
-                              .cardKey = "card-A",
-                              .readerName = "FakeReader",
-                              .requester = "test",
-                              .artifact = "credentials",
-                              .request = changeReq(),
-                              .snapshot = makeSnapshot(),
-                          },
-                          state);
+    ManagePinOperation op(
+        std::move(channel),
+        ManagePinOperation::Deps{
+            .holder = holder.get(),
+            .credentials = credentials,
+            .prompter = prompter,
+            .serializer = serializer,
+            .credCache = credCache,
+            .snapshotCache = snapshotCache,
+            .readCache = readCache,
+            .cardKey = "card-A",
+            .readerName = "FakeReader",
+            .requester = "test",
+            .artifact = "credentials",
+            .request = changeReq(),
+            .snapshot = makeSnapshot(),
+            .refusalGenerationAtPublish = PublishedRefusalGeneration{credCache.refusalGenerationFor("card-A")},
+        },
+        state);
     op.runOnWorker();
 
     ASSERT_EQ(raw->events.size(), 2u);
@@ -316,20 +320,22 @@ TEST(ListCredentialsOperation, FailedListEmitsUnspecifiedResultThenFinishesError
     auto* raw = channel.get();
 
     auto state = std::make_shared<OperationState>();
-    ListCredentialsOperation op(std::move(channel),
-                                ListCredentialsOperation::Deps{
-                                    .holder = holder.get(),
-                                    .credentials = credentials,
-                                    .prompter = prompter,
-                                    .serializer = serializer,
-                                    .credCache = credCache,
-                                    .snapshotCache = snapshotCache,
-                                    .cardKey = "card-A",
-                                    .readerName = "FakeReader",
-                                    .requester = "test",
-                                    .artifact = "credentials",
-                                },
-                                state);
+    ListCredentialsOperation op(
+        std::move(channel),
+        ListCredentialsOperation::Deps{
+            .holder = holder.get(),
+            .credentials = credentials,
+            .prompter = prompter,
+            .serializer = serializer,
+            .credCache = credCache,
+            .snapshotCache = snapshotCache,
+            .cardKey = "card-A",
+            .readerName = "FakeReader",
+            .requester = "test",
+            .artifact = "credentials",
+            .refusalGenerationAtPublish = PublishedRefusalGeneration{credCache.refusalGenerationFor("card-A")},
+        },
+        state);
     op.runOnWorker();
 
     ASSERT_EQ(raw->events.size(), 2u);

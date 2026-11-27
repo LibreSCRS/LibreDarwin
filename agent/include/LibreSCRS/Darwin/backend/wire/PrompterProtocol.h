@@ -94,8 +94,8 @@ struct PromptRequest
     // RequestSecret option.
     std::vector<std::string> artifacts{};
     // Retry context for a re-prompt after the card rejected the CAN/MRZ
-    // collected last time for the SAME card (CredentialCache::
-    // markCredentialWrong / applyRetryContext on the agent core): `attempt`
+    // collected last time for the SAME card (AttemptContext::recordRejection /
+    // CredentialCache::applyRetryContext on the agent core): `attempt`
     // numbers this prompt (2 = second attempt, ...), `lastError` carries the
     // msgKey of the failure that triggered the retry. Both stay at their
     // default (0 / empty) on the first-ever prompt for a card. Mirrors

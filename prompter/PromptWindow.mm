@@ -81,7 +81,7 @@ struct PanelState
 // cross-binary vocabulary convention the Linux PromptDialog.cpp uses for its
 // own copy of this same string — this file has no LM dependency to share the
 // constant with). The only source of a retry `lastError` today is the
-// eMRTD read flows' AuthFailed path (CredentialCache::markCredentialWrong).
+// eMRTD read flows' AuthFailed path (noteRejectedSecret on the agent core).
 constexpr const char* kErrorPreReadAuthFailed = "librescrs.error.preRead.authFailed";
 
 // Retry-context inline error line (req.attempt > 0 -- a genuine re-prompt
